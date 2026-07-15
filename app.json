@@ -13,7 +13,6 @@
     "android": {
       "package": "com.zenas.zao",
       "softwareKeyboardLayoutMode": "pan",
-      "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
@@ -56,7 +55,8 @@
           "isAccessMediaLocationEnabled": false
         }
       ],
-      "./plugins/withTermuxRunCommand"
+      "./plugins/withTermuxRunCommand",
+      "./plugins/withCleartextTraffic"
     ]
   }
 }
