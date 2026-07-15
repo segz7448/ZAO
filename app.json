@@ -1,0 +1,61 @@
+{
+  "expo": {
+    "name": "ZAO",
+    "slug": "ZAO",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.zenas.zao",
+      "softwareKeyboardLayoutMode": "pan",
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "READ_MEDIA_IMAGES"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#1F2937"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "ZAO needs access to your photos so you can attach images to chat.",
+          "cameraPermission": "ZAO needs camera access so you can take a photo to attach to your chat."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "ZAO needs access to your photos to save images from chat.",
+          "savePhotosPermission": "ZAO needs permission to save images from chat to your photos.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      "./plugins/withTermuxRunCommand"
+    ]
+  }
+}
