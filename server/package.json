@@ -1,0 +1,13 @@
+{
+  "name": "zao-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Termux backend for ZAO - wraps llama-server (Qwen2.5-Coder-3B) with a small HTTP layer the app auto-connects to.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
