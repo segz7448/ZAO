@@ -1,10 +1,21 @@
 name: Build APK
 
-# Builds a real, installable Android debug APK on every push to main -
-# a self-contained local build (expo prebuild + Gradle) rather than
-# EAS Build, so it needs no Expo account/token and stays consistent
-# with running everything self-hosted. Produces a debug-signed APK
-# (fine to sideload for testing, not a Play Store release build).
+# Builds a real, installable, STANDALONE Android APK on every push to
+# main - a self-contained local build (expo prebuild + Gradle) rather
+# than EAS Build, so it needs no Expo account/token and stays consistent
+# with running everything self-hosted.
+#
+# This builds the *release* variant, not debug. A debug APK does not
+# contain the JS bundle - it fetches it live from a Metro dev server on
+# your computer at app launch, so installing a debug APK on a phone with
+# no dev server running/reachable fails immediately on open. The release
+# variant bundles the JS into the APK's assets automatically as part of
+# `assembleRelease` (Gradle's react-native plugin runs the JS bundling
+# task before packaging), so it opens with no PC/dev-server involved at
+# all. The React Native/Expo default template signs release builds with
+# the debug keystore automatically when no real release keystore is
+# configured, so this still installs fine via sideloading - it's just
+# not a Play-Store-ready signature.
 
 on:
   push:
@@ -39,14 +50,14 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./android/gradlew
 
-      - name: Build debug APK
+      - name: Build standalone release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
 
       - name: Upload APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: zao-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: zao-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 14
