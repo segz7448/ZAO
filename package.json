@@ -59,6 +59,10 @@
   },
   "jest": {
     "preset": "jest-expo",
+    "moduleNameMapper": {
+      "^uuid$": "<rootDir>/node_modules/uuid/dist/index.js",
+      "^expo-file-system/legacy$": "<rootDir>/__mocks__/expo-file-system-legacy.js"
+    },
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/server/",
@@ -71,4 +75,3 @@
     ]
   }
 }
-
