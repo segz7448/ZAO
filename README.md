@@ -1,488 +1,338 @@
 # ZAO
 
-Fully on-device AI assistant for Android. Chat, coding, and reasoning/math
-all run locally via `llama.rn` (llama.cpp) - no OpenRouter, no per-message
-API key, no rate limit, no network call for any of that. The only cloud
-calls left in the app are Gemini (image generation, image editing, and
-photo/screenshot OCR - your own API key) and Hugging Face (Whisper speech-
-to-text, until a local STT model replaces it). Beyond chat, ZAO also acts
-as an on-device agent: it can browse the web, push code to GitHub, run
-real shell commands via Termux, and create/read PDF/Word/Excel/PowerPoint
-files - all invoked automatically by the local coder model, not through
-dedicated buttons.
+An Android chat app whose "brain" runs on your PC, not the phone or the
+cloud. One model - **Qwen2.5 Coder 3B**, served by a small Node backend on
+your PC (`/server`) via `llama-server` (llama.cpp) - handles chat, coding,
+reasoning, and tool-calling. The phone talks to it over LAN or a
+Cloudflare Quick Tunnel. Beyond chat, ZAO acts as an on-device agent: it
+can browse the web (via a Playwright agent also running on the PC), push
+code to GitHub, run real shell commands (on the PC or, for lighter tasks,
+via Termux on the phone), and create/read PDF/Word/Excel/PowerPoint files
+- all invoked automatically by the model deciding what a request needs,
+not through dedicated buttons.
 
-## Models in this project
+**No vision, no audio, no image generation.** There is exactly one model
+and it's text-only. Attached images still show up as chat bubbles, but
+the model can't see them - only whatever text OCR pulls out of them (see
+"File handling" below). There's no speech-to-text, no text-to-speech, no
+voice mode, and no image generation anywhere in the app.
+
+## The model
 
 | Model | Where it runs | Used for |
 |---|---|---|
-| **Qwen3 4B** (Q4_K_M) | Local, `llama.rn` | General chat, business writing |
-| **Qwen2.5 Coder 3B Instruct** (Q4_K_M) | Local, `llama.rn` | Coding, and as the tool-calling "router" for GitHub/filesystem/terminal/PDF/Office/browser-agent tasks |
-| **Phi-4 Mini Instruct** (Q4_K_M) | Local, `llama.rn` | Reasoning and math |
-| **Gemini** (`gemini-2.5-flash-image` + `gemini-2.5-flash`) | Cloud API, user's own key | Image generation, image editing, vision/photo OCR |
-| **Whisper Large V3** | Cloud, Hugging Face Inference | Speech-to-text (mic button, Voice Mode) |
+| **Qwen2.5 Coder 3B Instruct** (Q4_K_M GGUF) | Your PC, via `llama-server` | Everything: chat, coding, reasoning, tool-calling/routing |
 
-Registered in code at `src/config/localModels.js` (`LOCAL_MODELS`, the three
-local GGUF models) and `src/providers/gemini.js` / `src/providers/huggingface.js`
-(the two cloud calls). See "Local models" and "Cloud calls" below for detail
-on each.
+That's it - one model, no fallback chain, no task-based switching, no
+on-device weights on the phone. `src/config/localModels.js` keeps a single
+`MODEL_KEYS.QWEN25_CODER_3B` key purely so call sites that predate this
+(`toolOrchestrator.js`, `memoryEngine.js`) didn't need rewriting - the key
+itself is cosmetic; the backend only ever runs whatever `MODEL_PATH` in
+`server/config.js` points to.
 
 ## Architecture
 
 ```
+App.js                         Screen state machine (chat/settings/plan/browserAgent),
+                              mounts the persistent BrowserAgentPiP + BrowserAgentStream
+                              connection, wires PlanScreen to planStore's actions.
+
 src/
-  db/database.js              SQLite layer. Every function returns {success, data, error},
-                               never throws. This is the offline-first source of truth -
-                               conversations, messages, preferences, API key metadata,
-                               memory facts, usage events, model health.
-  config/
-    localModels.js             Single source of truth for the three local models: source/
-                               local GGUF filenames, classifyTask() (keyword-based task
-                               detection), and FIXED_MODEL_ROUTE (task category -> model
-                               key, no manual override, no fallback chain).
-    trialKeys.js                resolveApiKey() - the one place user-key-vs-trial-key
-                               priority is decided. Only Hugging Face has a baked-in
-                               trial key; Gemini and GitHub always require the person's
-                               own key/token.
-  providers/
-    adapterUtils.js             Shared timeout wrapper + error classification, used by
-                               every cloud call (Gemini, Hugging Face).
-    gemini.js                   Image generation, image editing, and vision/OCR via the
-                               Gemini API - the one deliberate cloud exception for
-                               something with no local model yet. User's own key only.
-    huggingface.js               Whisper speech-to-text only now (see Cloud calls below).
+  db/database.js               SQLite layer. Every function returns {success, data, error},
+                              never throws. Source of truth for conversations, messages,
+                              preferences, memories, procedures, plans, usage log.
+  config/localModels.js        The one model key + classifyTask(), a keyword-based
+                              degraded fallback used only when the model-based
+                              classifier (intentClassifier.js) can't be reached.
   services/
-    llama/
-      llamaEngine.js              Local inference engine. Keeps one LlamaContext resident
-                                 in memory at a time (only one model fits comfortably at
-                                 Q4_K_M on a phone) and swaps it when a different model
-                                 key is requested. sendMessage() mirrors the old cloud
-                                 provider adapters' {success, data, error} shape.
-      modelImportTool.js          One-time SAF folder grant (Settings > Local Models) +
-                                 native streaming copy of each GGUF from wherever it lives
-                                 (e.g. an SD card) into app-private storage, since
-                                 initLlama() needs a real file:// path, not a content:// URI.
-    toolOrchestrator.js           The "project manager" pattern: the local Qwen2.5 Coder
-                               model sees OpenAI-style tool schemas for GitHub, filesystem,
-                               PDF, Office (docx/xlsx/pptx/csv), and Termux, decides which
-                               to call and in what order, and the chat only ever shows a
-                               running checklist ("Working... Created repo... Pushed to
-                               GitHub"). The person never sees a "tools" button.
-    github/githubTool.js          Real GitHub REST/Git Data API calls (create repo, read/
-                               commit files, branches, PRs) using the person's own
-                               Personal Access Token. Not the `git` binary - there's no
-                               git available inside the RN runtime - this drives the same
-                               end state (blob -> tree -> commit -> ref update) over HTTPS.
-    filesystem/filesystemTool.js  Device-wide file operations (create/move/rename/delete/
-                               zip/extract) under a folder the person grants once via
-                               Android's Storage Access Framework - required because
-                               Android 10+ blocks arbitrary path access outside SAF.
-    terminal/terminalTool.js      Dispatches real shell commands to Termux via a native
-                               module (see plugins/withTermuxRunCommand below) and returns
-                               actual stdout/stderr/exit code - not a simulated shell.
-    pdf/pdfTool.js                 Create/merge/split PDFs (pdf-lib, pure JS). OCR is NOT
-                               here - reading text out of a scanned/image PDF is a vision
-                               problem, handled by Gemini instead (see Cloud calls).
-    office/
-      docxTool.js                  Create Word documents (docx library).
-      xlsxTool.js                  Create spreadsheets + CSV (SheetJS-style, live formulas
-                                  supported via `=`-prefixed cell values).
-      pptxTool.js                  Create PowerPoint decks (pptxgenjs).
-    browserAgent/
-      agentLoop.js                  The on-device browser agent's "brain" - an AgentSession
-                                  is a stateful, resumable conversation (system prompt +
-                                  every task + action/observation pairs) driven by the local
-                                  Qwen2.5 Coder model. Replaces the old server-based
-                                  Internet Router entirely - zero servers, zero tunnels.
-      BrowserAgentView.js /
-      BrowserAgentPiP.js             The "hands" - the actual on-device WebView the agent
-                                  controls, one persistent instance for the app's lifetime
-                                  so a follow-up task picks up wherever the last one left
-                                  off (open page, filled-in form, etc.).
-      domBridge.js                   Injects JS into the WebView to read/click/fill the
-                                  live DOM and report back to agentLoop.js.
-    memory/memoryEngine.js         Long-term, cross-conversation memory (name, preferences,
-                               ongoing projects) - extracted in the background by the local
-                               coder model after each turn, re-injected as a system message
-                               into every future conversation. Toggle in Settings > Memory.
-    hf/
-      hfTaskClient.js               Shared low-level client for Hugging Face's task-specific
-                                  REST endpoints.
-      whisper.js                    Speech-to-text - feeds the mic button and Voice Mode.
-    tts/androidTts.js               Native Android text-to-speech (expo-speech) for Voice
-                               Mode's spoken replies - not a cloud TTS model.
-    audio/useZaoAudioRecorder.js    Recording hook (expo-audio, not the removed expo-av).
-    video/frameSampler.js            Extracts video frames (expo-video-thumbnails) - built
-                               for future video-understanding use, not currently wired to
-                               a model since local models here are text-only.
-    fileTypes.js / fileProcessor.js  Entry point for any attached file - routes to the right
-                               extractor (text/CSV/ZIP/PDF/DOCX/PPTX/XLSX), normalizes every
-                               result into one shape, never throws.
-    textExtraction.js / zipHandler.js  On-device plain text/CSV and ZIP extraction
-                               (expo-file-system + papaparse / jszip, no server round-trip).
-    documentExtraction.js           Client for the (optional) Supabase Edge Function PDF/
-                               DOCX extraction path - see Supabase section below.
+    backend/backendClient.js    Talks to the PC backend: sendMessage() (chat completions),
+                              runTerminalCommand() (PC terminal), runOcrExtraction()
+                              (OCR). Handles LAN vs. Remote (tunnel) connection modes
+                              and the shared-secret auth token.
+    intentClassifier.js         Model-based router: classifies a message into
+                              github / browsing / general.
+    toolOrchestrator.js          Flat ReAct-style tool-calling loop: GitHub, filesystem,
+                              terminal, PDF, and Office (docx/xlsx/pptx/csv-create)
+                              tools, driven by real OpenAI-style tool_calls.
+    github/githubTool.js          Real GitHub REST/Git Data API calls (create repo,
+                              read/commit files, branches, PRs, releases) using the
+                              person's own Personal Access Token.
+    filesystem/filesystemTool.js  Device-wide file ops (create/move/rename/delete/zip/
+                              extract) under a folder granted once via Android's
+                              Storage Access Framework.
+    terminal/
+      pcTerminalTool.js           Heavy commands, run on the PC via the backend's
+                                /terminal/run.
+      termuxTerminalTool.js        Light/fallback commands, run on the phone via
+                                Termux's RUN_COMMAND (native module, see plugins/).
+      terminalRouter.js            Gives the model live PC-reachability/internet
+                                status; the model decides which of the two to use.
+      commandSafety.js             Hard-blocks catastrophic commands (rm -rf /, mkfs,
+                                fork bombs); gates destructive-but-legitimate ones
+                                (rm -rf, git push --force, DROP TABLE) behind an
+                                explicit confirmed:true the app doesn't set yet.
+    pdf/pdfTool.js                 Create/merge/split PDFs (pdf-lib).
+    office/{docxTool,xlsxTool,pptxTool}.js  Create Word/Excel/PowerPoint files.
+    brain/
+      frontendBrain.js             decideRoute(): combines intentClassifier.js with
+                                the free local shouldDecompose() heuristic to pick
+                                one of HIERARCHICAL_PLAN / TOOL_TASK / BROWSING / CHAT.
+      backendBrain.js              BRAIN_ROLES taxonomy + runHierarchicalPlan(),
+                                which drives planCoordinator/planExecutor for goals
+                                big enough to decompose.
+    reasoning/                    Chain-of-thought (default), tree-of-thought,
+                              self-reflection, deductive/inductive/abductive/
+                              analogical inference - see REASONING_ARCHITECTURE.md.
+    planning/                    8-module Strategic -> Project -> Task -> Execution
+                              planning system - see BRAIN_ARCHITECTURE.md.
+    memory/                      Working-memory compaction, semantic facts, procedural
+                              memory, lexical retrieval - see MEMORY_ARCHITECTURE.md.
+    browserAgent/                 Phone-side display/control for the PC-hosted
+                              Playwright browser agent (see server/browserAgent.js) -
+                              a WebSocket stream, not an on-device browser.
+    fileProcessor.js             Entry point for any attached file - routes to the
+                              right extractor, normalizes every result into one
+                              shape, falls back to server-side OCR when local PDF
+                              text extraction finds nothing.
+    textExtraction.js /
+    zipHandler.js                 On-device plain text/CSV extraction and ZIP
+                              unzipping (expo-file-system + papaparse / jszip).
   files/
-    fileTypes.js, pdfExtractor.js,
-    officeExtractors.js, zipExtractor.js  On-device extraction helpers for reading uploaded
-                               PDF/Office/ZIP content into the chat as context - the reading
-                               counterpart to services/pdf and services/office's creation
-                               tools.
-  utils/
-    orchestrator.js                The one function the UI calls to send a message.
-                               Checks for an attached image first (routes to Gemini
-                               vision/OCR), then GitHub/tool tasks, then the browser agent
-                               toggle, then image generation (Gemini), then falls through
-                               to normal local chat completion via classifyTask() + 
-                               FIXED_MODEL_ROUTE. Also exports editImageOrchestrated() for
-                               Gemini image-editing turns. Never throws.
-    saveImageToGallery.js           Saves a message's image (attached or generated) to the
-                               device photo gallery via expo-media-library.
-    sseClient.js                     Shared SSE/streaming helper.
+    pdfExtractor.js               On-device, pattern-matching PDF text extraction -
+                              works on normal text-based PDFs; scanned/image-based
+                              PDFs fall through to fileProcessor.js's OCR fallback.
+    officeExtractors.js            On-device .docx text extraction (jszip).
+  utils/orchestrator.js           The one function the UI calls to send a message:
+                              frontendBrain.decideRoute() picks a path, then either
+                              runs reasoningEngine's runReasoningChat() (plain chat),
+                              toolOrchestrator (tool task), the browser agent, or
+                              backendBrain.runHierarchicalPlan(). Never throws.
   store/
-    chatStore.js                    Zustand store: messages, active conversation,
-                               conversation list, sending state, browser-agent step
-                               progress. Builds the assistant message row (including a
-                               generated/edited image's local file path) from whatever
-                               the orchestrator returns.
-    preferencesStore.js              Zustand store: theme, memory/browser-access toggles,
-                               API key status (Hugging Face, Gemini, GitHub, browser
-                               router), SAF grants (filesystem + local-model folder).
-    themeStore.js                    Auto/Light/Dark preference, persisted to SQLite.
+    chatStore.js                   Zustand store: messages, conversations, sending
+                                state, attachment extraction, assembleHistory()
+                                (semantic facts -> retrieved snippets -> rolling
+                                summary -> raw recent turns, in that order).
+    planStore.js                    Wraps the planning system for PlanScreen.js.
+    preferencesStore.js              Theme, memory/browser-access toggles, backend
+                                connection settings, GitHub token status.
   screens/
-    ChatScreen.js                    Main chat UI - message bubbles (including both
-                               user-attached and AI-generated/edited images via the same
-                               local_image_path field), composer, browser-agent step list.
-    SettingsScreen.js                 Local Models (import/manage GGUFs), API Keys
-                               (Hugging Face, Gemini, GitHub), Browser Agent, Memory,
-                               Usage & Activity.
-    BrowserAgentScreen.js             Full-screen browser agent view.
-    VoiceModeScreen.js / VoiceSettingsSheet.js  Continuous voice conversation (Whisper in,
-                               native Android TTS out) and its voice/rate settings.
-  components/
-    ModelPickerSheet.js, ErrorBoundary.js, SidebarDrawer.js, AttachmentSheet.js,
-    MarkdownText.js, MessageActionMenu.js, MessageActions.js, Toast.js,
-    ImageViewerModal.js         UI building blocks - see inline comments per file.
-  theme/                        tokens.js (full light+dark palettes) + useTheme.js (the
-                               hook every screen/component should pull colors from).
-  supabase/client.js             Optional Supabase client + auth - app works fully offline
-                               without ever calling this.
-  sync/syncEngine.js             Background push/pull between local SQLite and Supabase,
-                               fire-and-forget, never on the critical path.
-  storage/fileStorage.js          Upload/download helpers for the 'zao-files' Supabase
-                               Storage bucket (used for generated-image backup and browser-
-                               agent step snapshots when signed in).
+    ChatScreen.js                    Main chat UI, ReasoningChip, "View Plan" chip.
+    PlanScreen.js / StepDetailSheet.js  Approve/reject steps, milestone strip,
+                                checkpoint bar, four-tier trace drill-down.
+    SettingsScreen.js                 Backend Connection, GitHub token, Memory,
+                                Browser Agent, Usage.
+    BrowserAgentScreen.js             Full-screen live browser agent view.
+  components/                     ErrorBoundary, SidebarDrawer, AttachmentSheet,
+                              MarkdownText, MessageActionMenu/Actions, Toast,
+                              ImageViewerModal.
+  theme/                        tokens.js (light+dark palettes) + useTheme.js.
 
-plugins/withTermuxRunCommand/    Expo config plugin: copies the native Kotlin
-                               TermuxRunCommand module into the generated android/ project,
-                               registers it in MainApplication, and adds the
-                               com.termux.permission.RUN_COMMAND manifest permission -
-                               regenerated correctly on every `expo prebuild`, no manual
-                               Android Studio editing needed.
+plugins/withTermuxRunCommand/    Expo config plugin: wires a native Kotlin module
+                              so termuxTerminalTool.js can reach Termux's
+                              RUN_COMMAND service (an Android Service, which
+                              expo-intent-launcher's Activity-only API can't reach
+                              on its own) - regenerated on every expo prebuild.
 
-supabase/
-  schema.sql                    Full Postgres schema (tables, RLS, storage bucket +
-                               policies, auto-provisioning trigger). Optional - only
-                               needed if you want cross-device sync.
-  functions/extract-document/    Edge Function (Deno) for server-side PDF/DOCX text
-                               extraction - one of the only features that isn't fully
-                               offline-capable (see "File handling" below).
+server/                        PC backend (Node/Express) - see server/README.md.
+  index.js                       Spawns/monitors llama-server, proxies
+                              /v1/chat/completions, health check + internet-
+                              reachability self-check, rate limiting, auth.
+  terminal.js                    /terminal/run - real cmd.exe execution.
+  ocr.js + scripts/ocr_extract.py  /ocr/extract - free, open-source OCR
+                              (Tesseract via pytesseract, PyMuPDF for PDF page
+                              rendering) in a Python subprocess.
+  browserAgent.js / browserStream.js  Playwright-driven browser agent + its
+                              WebSocket stream to the phone, including a
+                              needsHuman handoff for CAPTCHAs/2FA.
 ```
 
-## Local models
+For the deeper architectural picture (what "brain," "reasoning," and
+"memory" mean here and exactly what's wired vs. still a gap), see:
 
-All three local models are GGUF files (Q4_K_M quantization) run through
-`llama.rn`, which wraps llama.cpp. They are **not bundled with the app** - a
-multi-GB model in the APK isn't practical - instead:
-
-1. Grant folder access once in **Settings > Local Models** (Android's system
-   folder picker, via Storage Access Framework - works even for a path like
-   an SD card that JS can't otherwise reach directly).
-2. Tap import for each model. ZAO finds it by exact filename inside that
-   folder and streams a native copy into app-private storage
-   (`FileSystem.documentDirectory`), since `initLlama()` needs a real
-   `file://` path, not a SAF `content://` URI.
-3. Once imported, the model is ready - no further network or setup needed.
-
-**Routing is fully automatic** (`src/config/localModels.js`), based on
-keyword detection in `classifyTask()` - there's no manual model picker and
-no fallback chain, since every local model is free/unlimited/always-on
-anyway (a failure - not imported yet, out of memory - is a real error
-surfaced to the person, not silently retried on a different model):
-
-| Task category | Routes to |
-|---|---|
-| Coding (build/debug/component/refactor/etc.) | Qwen2.5 Coder 3B |
-| Reasoning / math (solve/calculate/proof/equation/etc.) | Phi-4 Mini Instruct |
-| General chat, business writing, everything else | Qwen3 4B |
-
-Only one model is kept resident in memory at a time - a phone doesn't have
-room for more than one loaded simultaneously at this size class - so
-switching task categories mid-conversation releases the previous context
-and loads the new one (`llamaEngine.js`'s `ensureModelLoaded()`).
-
-Qwen2.5 Coder 3B additionally acts as the **tool-calling router**: GitHub,
-filesystem, terminal, PDF, and Office (docx/xlsx/pptx/csv) requests all go
-through it via `src/services/toolOrchestrator.js`, using real OpenAI-style
-`tool_calls` against actual JS functions (llama.rn's Jinja chat-template
-support makes this possible fully on-device).
-
-## Cloud calls
-
-Two cloud calls remain, both because there's no local/on-device equivalent
-yet - both use the person's own API key/token, never a shared backend:
-
-- **Gemini** (`src/providers/gemini.js`) - image generation
-  (`gemini-2.5-flash-image`), image editing (same model, existing image +
-  instruction), and vision/OCR (`gemini-2.5-flash`, image + optional
-  question -> text). Add your own key in **Settings > API Keys**; there is
-  no trial allowance for this one (see `src/config/trialKeys.js`). This is
-  specifically for genuine **image-based** OCR (a photo, a screenshot, a
-  scanned page attached as an image) - reading text out of a structured
-  PDF/DOCX/PPTX/XLSX file is a different problem and stays entirely local,
-  via the pdf/office tools routed through Qwen2.5 Coder.
-- **Hugging Face** (`src/providers/huggingface.js`) - Whisper Large V3
-  speech-to-text only, feeding the mic button and Voice Mode. A small trial
-  key can be baked in at build time (see GitHub Secrets below); your own key
-  always takes priority if you add one.
-
-## GitHub, filesystem, and terminal access
-
-These are real, not simulated:
-
-- **GitHub** - add a Personal Access Token with `repo` scope in
-  **Settings > API Keys**. Uses the REST/Git Data API (create blob -> tree
-  -> commit -> update ref) since there's no `git` binary on-device - the
-  end result in the repo is identical to a normal push.
-- **Filesystem** - grant a folder once via Android's system folder picker
-  (Settings), then the coder model can create/move/rename/delete/zip/
-  extract files in it on request.
-- **Terminal** - requires Termux installed with the one-time
-  `RUN_COMMAND` permission granted (the app's Termux plugin adds the
-  manifest permission automatically; Termux itself still needs
-  `allow-external-apps` set and the Android permission prompt accepted
-  once). Runs real shell commands (`npm install`, `pip install`,
-  `gradlew`, etc.) and returns actual stdout/stderr/exit code.
-
-None of these have dedicated buttons - you just ask in plain language, and
-`toolOrchestrator.js` (driven by the local coder model) decides which
-tool(s) to call and shows a running checklist as it works.
-
-## Browser agent
-
-Toggle the composer's globe icon to let ZAO browse the web on request. This
-is fully on-device: a real WebView (`BrowserAgentView.js`/
-`BrowserAgentPiP.js`) that the local coder model reads/clicks/fills via
-injected JS (`domBridge.js`), directed by a resumable `AgentSession`
-(`agentLoop.js`) that persists across multiple tasks in the same
-conversation. Replaces an earlier server-based design entirely - no backend,
-no tunnel, no self-hosted service required.
-
-## Key design decisions
-
-- **Offline-first for everything except the two cloud calls above**: every
-  message is written to local SQLite immediately; Supabase sync (optional,
-  see below) is a background layer on top, never on the critical path.
-- **No fallback chains for local models**: a local model failing to load or
-  respond is a real, surfaceable error - there's no other provider to
-  silently retry, unlike the old OpenRouter/Hugging Face cascade this app
-  used to have.
-- **Nothing throws uncaught**: `db/database.js`, `providers/*`,
-  `utils/orchestrator.js`, and the tool services all wrap every operation
-  in try/catch and return a consistent `{success, data, error}` shape.
-  Combined with the top-level `ErrorBoundary` in `App.js`, the app should
-  never show a blank crash screen.
-- **Icons: `@expo/vector-icons` only, never emoji or favicon-style glyphs**.
-  Every icon (composer "+", camera/photos/files tiles, mic, send, menu,
-  settings gear, close, checkmarks, sparkles, attach clip, sync notice,
-  warning state, etc.) must be a proper icon component
-  (`Ionicons`/`MaterialIcons`/`MaterialCommunityIcons`) with explicit `size`
-  and `color` props from `useTheme()`. `@expo/vector-icons` ships bundled
-  with `expo` already - no extra install needed.
+- `BRAIN_ARCHITECTURE.md` - dense/MoE/multi-brain/hybrid-symbolic taxonomy
+  and which files implement which.
+- `REASONING_ARCHITECTURE.md` - CoT/ToT/ReAct/self-reflection/inference-mode
+  taxonomy and routing.
+- `MEMORY_ARCHITECTURE.md` - working/episodic/semantic/procedural/retrieval
+  memory taxonomy and routing.
+- `SYSTEM_COMPONENTS.md` - routing, state management, feedback loop,
+  human-in-the-loop, and audit trail: what exists, what doesn't.
+- `HARDENING_NOTES.md` - security/reliability gaps and what's fixed.
 
 ## Setup
 
+**PC backend** (does the actual model inference - see `server/README.md`
+for full detail):
+```
+cd server
+npm install
+# edit config.js: MODEL_PATH, LLAMA_SERVER_BIN, ZAO_AUTH_TOKEN
+```
+Double-click `start.bat` (or run it from a shell) each time before using
+the app - it starts the Node server + `llama-server`, and optionally a
+Cloudflare Quick Tunnel for Remote mode.
+
+**Phone app**:
 ```bash
 npm install
 npx expo start          # dev server, scan QR with Expo Go for quick iteration
 npx expo prebuild --platform android --clean   # generate native android/ project
 ```
+Then in **Settings > Backend Connection**, enter the PC's LAN URL (or the
+tunnel URL for Remote mode) and the same auth token set in
+`server/config.js`.
 
-APK builds happen via GitHub Actions on push to `main` (see
-`.github/workflows/build-apk.yml`). It runs `expo prebuild` fresh every
-time, so `android/` is gitignored and never committed.
+## Tool access (GitHub, filesystem, terminal)
 
-After installing, import your local models (Settings > Local Models - see
-"Local models" above) before expecting chat/coding/reasoning to work; add a
-Gemini key (Settings > API Keys) before expecting image generation, image
-editing, or photo OCR to work.
+None of these have dedicated buttons - ask in plain language, and
+`toolOrchestrator.js` (driven by the model) decides which tool(s) to call
+and shows a running checklist as it works.
 
-## Supabase setup (optional - only needed for cross-device sync)
+- **GitHub** - add a Personal Access Token with `repo` scope in
+  **Settings**. Uses the REST/Git Data API (blob -> tree -> commit ->
+  update ref) since there's no `git` binary in the RN runtime.
+- **Filesystem** - grant a folder once via Android's system folder picker,
+  then the model can create/move/rename/delete/zip/extract files in it.
+  Every `.js`/`.jsx`/`.ts`/`.tsx`/`.json` write is syntax/JSX-checked with
+  a real parser (`syntaxCheck.js`) before it touches disk - a broken file
+  is refused instead of saved. `fs_check_syntax`/`fs_check_project_syntax`
+  check on demand; the same project-wide check also runs automatically
+  right before a terminal command that starts/builds a project
+  (`projectRunGate.js`), blocking the run if anything fails.
+- **Terminal** - two paths, see `terminalRouter.js`: the PC backend (heavy
+  commands - builds, Docker, installs) and Termux on the phone (light/
+  fallback commands, requires Termux's own one-time `RUN_COMMAND`
+  permission setup). Zipping/unzipping works through either path already
+  - both are real shells, so `zip`/`unzip`/`tar` just work as plain
+  commands with no special-casing needed - in addition to the JS-level
+  zip handling already in `zipHandler.js` (for reading an uploaded zip
+  attachment) and `filesystemTool.js` (`fs_zip`/`fs_extract_zip`, for the
+  model creating/extracting archives as part of a task).
 
-1. Create a project at supabase.com.
-2. Go to **SQL Editor > New query**, paste the entire contents of
-   `supabase/schema.sql`, and run it. Safe to re-run any time - every
-   statement uses `if exists`/`if not exists`/`or replace`.
-3. Go to **Settings > API**, copy your Project URL and `anon public` key.
-4. Copy `.env.example` to `.env` and fill in those two values.
-5. Enable email auth (or whatever provider you want) under
-   **Authentication > Providers**.
+## Browser agent
 
-Sync is entirely opt-in: signed-out users get full offline local
-functionality via SQLite, and nothing calls Supabase until a user signs in.
-`syncNow()` (`src/sync/syncEngine.js`) runs on app start and after every
-completed message, always in the background - never blocks the chat UI, and
-no-ops silently if signed out or offline.
-
-## GitHub Secrets (trial key + Supabase)
-
-The build workflow (`.github/workflows/build-apk.yml`) reads these from
-**Settings > Secrets and variables > Actions** and injects them as
-`EXPO_PUBLIC_*` env vars at build time, baked into the compiled JS bundle:
-
-| Secret name | Used for |
-|---|---|
-| `SUPABASE_URL` | Supabase project URL (optional) |
-| `SUPABASE_ANON_KEY` | Supabase anon/public key (optional - safe to embed, RLS does real access control) |
-| `HUGGINGFACE_TRIAL_KEY` | Small default Whisper allowance so voice input works before adding your own key |
-
-**Do NOT add a Supabase service role key here** - it bypasses RLS entirely
-and is extractable from the built APK by decompiling it. Service role
-belongs only in a trusted server-side context (Supabase Edge Functions),
-never in a client app.
-
-**There is deliberately no Gemini or GitHub trial secret.** Both require the
-person's own account/key - Gemini because it's a paid-tier-capable API with
-no small free allowance to bake in safely, GitHub because repo actions have
-to happen under the person's own identity. `resolveApiKey()`
-(`src/config/trialKeys.js`) is the single place user-key-vs-trial-key
-priority is decided for the one provider (Hugging Face) that has a trial
-key at all.
-
-## Secure API key storage
-
-User-provided keys/tokens (Hugging Face, Gemini, GitHub) are stored via
-`expo-secure-store`, using Android Keystore (hardware-backed encryption on
-most devices) rather than plain SQLite. The `api_keys` table in local
-SQLite only holds non-sensitive metadata (which provider has a key, whether
-it's user-provided, when it last changed) - the actual `key_value` lives
-only in SecureStore. See `src/db/database.js`'s `storeApiKey`/`getApiKey`/
-`deleteApiKey` comments for the full split.
-
-The Hugging Face trial key baked in via GitHub Secrets is NOT run through
-secure storage - it's embedded directly in the JS bundle via
-`EXPO_PUBLIC_*`, a different and already-accepted tradeoff for a small
-trial allowance, not a place a real per-user secret should live.
-
-## Theme system & navigation
-
-Three-way theme preference - **Auto** (follows the phone's live system
-setting), **Light**, or **Dark** - set in Settings > Appearance and
-persisted to SQLite so it's sticky across restarts. `src/theme/tokens.js`
-holds both full color palettes; `src/theme/useTheme.js` is the hook every
-screen calls to get the resolved theme object.
-
-Navigation is a hand-rolled sidebar drawer (`src/components/SidebarDrawer.js`),
-built on React Native's `Animated` + `PanResponder` only - deliberately not
-`react-navigation`, to avoid pulling in `react-native-gesture-handler` +
-`reanimated` as additional native dependencies. Shows conversation history
-(newest first, auto-titled), a "New chat" action, and a Settings gear
-pinned next to the user row.
+The composer's globe icon toggles live web browsing. The browser itself
+runs on the PC via Playwright (`server/browserAgent.js`), streamed live to
+the phone over a WebSocket (`src/services/browserAgent/browserAgentStream.js`)
+- `BrowserAgentPiP.js`/`BrowserStreamView.js` render the live screenshot
+feed and let the person take over manually (CAPTCHAs, logins, 2FA) when
+the agent flags `needsHuman`. One `BrowserAgentStream` connection persists
+for the app's lifetime so a session's page/history survives across
+separate tasks in the same conversation.
 
 ## File handling
 
-ZAO can read images, PDF, Word (.docx), PowerPoint (.pptx), Excel (.xlsx),
-ZIP archives, CSV, and plain text/code files attached via the "+" button -
-and separately, create new PDF/Word/Excel/PowerPoint/CSV files on request
-via the tool-calling path (`services/pdf`, `services/office`).
+ZAO can read PDF, Word (.docx), ZIP archives, CSV, plain text/code files,
+and images attached via the "+" button - and separately, create new PDF/
+Word/Excel/PowerPoint/CSV files on request via the tool-calling path.
 
-- **Images** - sent to Gemini vision/OCR (`src/providers/gemini.js`) along
-  with any caption/question typed alongside the attachment. Requires a
-  Gemini key configured; if not, the orchestrator returns a clear
-  "add your Gemini key" message rather than silently ignoring the image.
 - **CSV, plain text/code files** - extracted entirely on-device
-  (`src/services/textExtraction.js`) via `expo-file-system` + `papaparse`.
+  (`textExtraction.js`) via `expo-file-system` + `papaparse`.
 - **ZIP archives** - unzipped entirely on-device (`jszip`, pure JS), capped
   at 30 entries / ~60,000 combined characters so a huge archive can't hang
-  the app or blow out a model's context window.
-- **PDF and Word (.docx) reading** - on-device extraction is preferred
-  (`src/files/pdfExtractor.js`, `src/files/officeExtractors.js`); the
-  Supabase Edge Function path (`documentExtraction.js` +
-  `supabase/functions/extract-document/`) remains available as an optional
-  server-side extractor for cases the on-device path can't handle, but
-  requires being signed in (file uploads to private storage, is read, then
-  deleted).
-- **Generating PDF/Word/Excel/PowerPoint files** - via the local
-  tool-calling path (Qwen2.5 Coder as router), not a separate UI: describe
-  what you want, and `pdf_create`/`docx_create`/`xlsx_create`/`pptx_create`
-  get called automatically. See `src/services/toolOrchestrator.js`'s tool
-  schemas for exactly what each can produce.
+  the app or blow out the model's context window.
+- **PDF** - `src/files/pdfExtractor.js` does on-device, pattern-matching
+  text extraction first (fast, no network, works on normal text-based
+  PDFs). When that finds nothing or flags a suspiciously low text-to-size
+  ratio (likely scanned/image-based), `fileProcessor.js` falls back to
+  real OCR on the PC backend (`server/ocr.js` - free, open-source
+  Tesseract + PyMuPDF, no cloud call).
+- **Word (.docx)** - on-device extraction (`officeExtractors.js`, jszip).
+- **.pptx reading** - not supported yet (creating a .pptx works; reading
+  one back would need dedicated slide-XML parsing that hasn't been built).
+- **Images** - there's no vision model, so the model can't see an attached
+  image. It still attaches and displays as a chat bubble, and
+  `fileProcessor.js` runs the same OCR path against it as a best-effort
+  fallback - a screenshot or photo of a document/whiteboard gets its text
+  extracted; a photo with no text just attaches with nothing extracted.
+  OCR setup (Python + Tesseract) is documented in `server/README.md`; if
+  it's not installed, images/scanned PDFs still attach fine, they just
+  won't have any text pulled out of them.
+- **Generating PDF/Word/Excel/PowerPoint files** - via the tool-calling
+  path, not a separate UI: describe what you want, and
+  `pdf_create`/`docx_create`/`xlsx_create`/`pptx_create` get called
+  automatically.
 
-**Deploying the edge function** (one-time, or after editing
-`supabase/functions/extract-document/index.ts`):
-```bash
-npx supabase functions deploy extract-document
-```
-Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` set as secrets on
-the Supabase project itself (Project Settings > Edge Functions > Secrets),
-never in the app's GitHub Secrets.
+## Key design decisions
+
+- **Single model, no fallback chain**: the model failing to load or
+  respond is a real, surfaceable error - there's no other provider to
+  silently retry.
+- **Nothing throws uncaught**: `db/database.js`, `backendClient.js`, and
+  every tool service wrap operations in try/catch and return a consistent
+  `{success, data, error}` shape. Combined with the top-level
+  `ErrorBoundary` in `App.js`, the app shouldn't show a blank crash
+  screen.
+- **Routing is understood, not pattern-matched**: `intentClassifier.js`
+  asks the model itself to understand what a message needs, rather than
+  scanning for exact hardcoded phrases. The old keyword list
+  (`classifyTask()` in `localModels.js`) still exists, but only as a
+  degraded fallback for when the classifier call itself can't be made.
+- **Icons: `@expo/vector-icons` only**, never emoji or favicon-style
+  glyphs - every icon is a proper icon component with explicit `size` and
+  `color` props from `useTheme()`.
 
 ## Message actions (long-press menu)
 
 Long-pressing a message bubble opens a floating context menu
-(`src/components/MessageActionMenu.js`): background dims/blurs, the bubble
-pops slightly, a haptic fires, the menu fades/scales in.
+(`src/components/MessageActionMenu.js`).
 
 - **User's own message**: Copy, Edit.
-- **Assistant message**: Copy, Regenerate (re-runs the orchestrator against
-  the prior user turn). Read Aloud / Like / Dislike are wired as optional
-  callback props on `MessageActionMenu` - each row only renders if its
-  callback is actually passed in from `ChatScreen.js`.
+- **Assistant message**: Copy, Regenerate, Like/Dislike (feedback is
+  stored per message but not yet read back anywhere - see
+  `SYSTEM_COMPONENTS.md`'s feedback-loop section).
 
 **Edit** (user messages only) pulls the message's text back into the
-composer and swaps Send for Save; the original message stays visible while
-editing (no flicker from removing/re-adding it mid-type), and Save updates
-that row's `content` in place via `chatStore.editMessage()` /
-`db/database.js`'s `updateMessage()`, stamping `edited_at`. Editing does
-NOT re-send to the model or touch later messages - it's a correction to the
+composer; Save updates that row's content in place via
+`chatStore.editMessage()`, stamping `edited_at`. Editing does NOT re-send
+to the model or touch later messages - it's a correction to the
 historical record, not a new turn.
 
-## Voice
+## Theme & navigation
 
-- **Mic button** (composer) - one-time recording -> Whisper transcription
-  -> appended to the text input.
-- **Voice Mode** (waveform button) - full-screen continuous conversation:
-  mic capture -> Whisper -> the same orchestrated `chatStore.sendMessage()`
-  call typed messages use (so it's persisted and routed exactly the same
-  way) -> native Android TTS speaks the reply aloud. No separate "voice
-  conversation" data model - it's the same messages, same history.
+Three-way theme preference - **Auto** (follows the phone's system
+setting), **Light**, or **Dark** - persisted to SQLite. Navigation is a
+hand-rolled sidebar drawer (`src/components/SidebarDrawer.js`), built on
+React Native's `Animated` + `PanResponder` only - deliberately not
+`react-navigation`, to avoid pulling in `react-native-gesture-handler` +
+`reanimated` as additional native dependencies.
 
-## Known gaps / not yet built
+## Known gaps
 
-- **Local speech-to-text** - Whisper (Hugging Face) is still the only STT
-  path; a local model would remove the last always-on cloud dependency
-  after Gemini's image features.
-- **Attached/generated images and Supabase sync** - local images (both
-  user-attached and Gemini-generated/edited) persist fine on-device via
-  `local_image_path`, but aren't yet mirrored to Supabase Storage for
-  cross-device access the way text messages are (see
-  `src/storage/fileStorage.js`'s `uploadGeneratedImage`, which is wired for
-  generated images specifically but not user attachments yet).
-- **Markdown renderer** (`src/components/MarkdownText.js`) is a lightweight
-  hand-rolled parser (bold/italic/inline code/code blocks/headers/lists) -
-  no tables, no links - deliberately, to avoid adding
-  `react-native-markdown-display` as more native/build surface area.
-- **Sign in / sign up screen** - client functions exist
-  (`src/supabase/client.js`), no UI wired up yet; the app works fully
-  local/signed-out in the meantime, and the sidebar/chat greeting show
-  placeholder names until this exists.
-- **Video understanding** - `frameSampler.js` can extract frames from a
-  video, but none of the three local text models or Gemini's current
-  wiring here consume them yet; video isn't a recognized attachment type.
+See `SYSTEM_COMPONENTS.md`'s "what still needs work" section and
+`HARDENING_NOTES.md`'s "still open" section for the current, maintained
+list - resumable plans on launch, live plan-progress handlers, a
+feedback-loop consumer, an `agent_actions` audit table, and terminal
+confirmation UI are the main ones. `.pptx` reading (not writing) is also
+not built yet (see "File handling" above).
 
-## Notes on API terms
+## Testing
 
-Use your own Hugging Face account/key for Whisper, your own Gemini API key,
-and your own GitHub Personal Access Token. Provider terms generally
-prohibit using multiple accounts to multiply free-tier quota - ZAO's
-architecture is BYO-key specifically so quota scales with the person using
-it, not through account pooling.
+`npm test` runs the Jest suite (`jest-expo` preset). Coverage right now
+is deliberately focused on the highest-blast-radius, pure-logic pieces
+of the state machine - the modules a silent bug in would be hardest to
+notice and most costly to ship:
+
+- `src/services/terminal/__tests__/commandSafety.test.js` - the
+  HARD_BLOCKED / RISKY / safe tiers both terminal tools gate every raw
+  command through.
+- `src/services/execution/__tests__/permissionModes.test.js` - the
+  five permission modes' allow/confirm/refuse decisions for every tool
+  category (read, write, destructive, terminal).
+- `src/services/planning/__tests__/planExecutor.test.js` -
+  `computeReadySteps()`, the dependency-scheduling core of the
+  hierarchical plan executor (single deps, fan-in deps, blocked
+  propagation).
+
+`.github/workflows/ci.yml` runs this suite on every push/PR to `main`.
+
+**First-time setup note:** this project is on Expo SDK 57 /
+`react-native@0.86.0`, which currently hits a known upstream
+`jest-expo`/`react-native` peer-dependency conflict
+([expo/expo#47435](https://github.com/expo/expo/issues/47435)) that
+makes a plain `npm install` fail with `ERESOLVE`. The `overrides` entry
+already in `package.json` (`"@react-native/jest-preset": "0.86.0"`) is
+the documented workaround - run `npm install` once locally after
+pulling this change so `package-lock.json` picks it up and gets
+committed; CI installs from that updated lockfile from then on.
+

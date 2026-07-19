@@ -16,12 +16,17 @@
  * - Simple text-based PDFs (most reports, articles, exported documents)
  *
  * What this will NOT work on:
- * - Scanned/image-based PDFs (would need real OCR - not built here)
+ * - Scanned/image-based PDFs (needs real OCR, which this pattern-matching
+ *   approach can't do)
  * - PDFs with unusual compression or encryption
  * - Complex layouts (multi-column, heavy tables) - text order may be jumbled
  *
  * When extraction yields suspiciously little text relative to file size,
- * we say so explicitly rather than silently returning a poor result.
+ * we say so explicitly (via `warning`) rather than silently returning a
+ * poor result - fileProcessor.js uses that signal, plus outright
+ * `success: false`, to fall back to real server-side OCR (free/open-source
+ * Tesseract + PyMuPDF running on the PC backend - see server/ocr.js)
+ * rather than presenting either of those as a dead end.
  */
 
 import * as FileSystem from 'expo-file-system';
@@ -75,7 +80,7 @@ export async function extractPdfText(fileUri) {
         success: false,
         text: '',
         warning: null,
-        error: 'Could not extract readable text from this PDF. It may be a scanned/image-based PDF (which needs OCR, not yet supported), encrypted, or use an unsupported internal format.',
+        error: 'Could not extract readable text from this PDF directly. It may be a scanned/image-based PDF, encrypted, or use an unsupported internal format.',
       };
     }
 

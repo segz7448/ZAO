@@ -8,8 +8,15 @@
  * Camera/Photos/Files are wired to onPress callbacks the parent screen
  * implements once file-handling is built (see README TODO) - for now they
  * can safely no-op or show "coming soon" without breaking this component.
- * Web search is UI-only for now (a visual toggle with no backing behavior
- * yet) - deliberately labeled so it's not mistaken for a working feature.
+ * Web search IS wired to a real tool now (server/webSearch.js via
+ * src/services/search/webSearchTool.js) - web_search is registered as
+ * an always-available tool (src/services/toolOrchestrator.js) the model
+ * can call whenever a request needs it, regardless of this toggle's
+ * state. The toggle itself is currently visual only (its value isn't
+ * threaded into sendMessageOrchestrated yet) - a reasonable next step
+ * is passing it through orchestrator.js as a hint, similar to how
+ * browserAccessEnabled works, if the person wants the toggle to mean
+ * something stronger than "on by default anyway."
  */
 
 import React from 'react';
@@ -99,11 +106,10 @@ export default function AttachmentSheet({
         <ToggleRow
           icon={<Ionicons name="globe-outline" size={18} color={theme.textSecondary} />}
           label="Web search"
-          subtitle="Coming soon"
+          subtitle="Search the web when useful"
           value={webSearchEnabled}
           onValueChange={onToggleWebSearch}
           theme={theme}
-          disabled
         />
       </View>
     </Modal>

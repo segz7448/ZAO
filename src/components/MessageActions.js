@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { View, Text, Pressable, StyleSheet, ActivityIndicator, Share } from 'react-native';
+import { View, Pressable, StyleSheet, ActivityIndicator, Share } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '../theme/useTheme';

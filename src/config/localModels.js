@@ -2,38 +2,48 @@
  * ZAO - Model Configuration
  *
  * Single model, everything: chat, coding, reasoning, math, and the
- * tool-calling router all go through Qwen2.5-Coder-1.5B, served by the
- * Termux backend (see /server and src/services/backend/backendClient.js).
+ * tool-calling router all go through Qwen2.5-Coder-3B, served by the PC
+ * backend (see /server and src/services/backend/backendClient.js) -
+ * reachable over LAN or a Cloudflare Quick Tunnel, see Settings > Backend
+ * Connection.
  *
  * No fallback chain, no task-based model switching, no on-device weights -
- * the model runs entirely on the Termux server. There's exactly one
- * "model key" left (QWEN25_CODER_1_5B) purely so toolOrchestrator.js,
- * agentLoop.js, and memoryEngine.js - which all call
+ * the model runs entirely on the PC backend. There's exactly one
+ * "model key" left (QWEN25_CODER_3B) purely so toolOrchestrator.js and
+ * memoryEngine.js - which both call
  * backendClient.sendMessage(history, modelKey, options) - didn't need
- * their call sites rewritten. The key is otherwise inert; the backend only
+ * their call sites rewritten. (The browser agent's model calls are
+ * separate - see server/browserAgent.js - since they run entirely on the
+ * PC and call llama-server directly rather than through this phone-side
+ * client.) The key is otherwise inert; the backend only
  * ever runs the one model it was started with (whatever MODEL_PATH in
  * server/config.js points to - this label is cosmetic/display-only and
  * won't change what actually runs).
  */
 
 export const MODEL_KEYS = {
-  QWEN25_CODER_1_5B: 'qwen25_coder_1_5b',
+  QWEN25_CODER_3B: 'qwen25_coder_3b',
 };
 
 export const ACTIVE_MODEL = {
-  key: MODEL_KEYS.QWEN25_CODER_1_5B,
-  label: 'Qwen2.5 Coder 1.5B',
-  description: 'Chat, coding, reasoning, and tool-calling - served from Termux',
+  key: MODEL_KEYS.QWEN25_CODER_3B,
+  label: 'Qwen2.5 Coder 3B',
+  description: 'Chat, coding, reasoning, and tool-calling - served from your PC',
 };
 
 /**
- * Task classifier - trimmed down. There is no more per-category model
- * routing (coding/reasoning/math/general/business all go to the same
- * model), so this now only distinguishes the categories that actually
- * change BEHAVIOR, not which model answers: 'github' (tool-orchestrator
- * tasks) and 'browsing' (on-device browser agent toggle check upstream in
- * orchestrator.js). Everything else is 'general' and goes straight to the
- * one model.
+ * Task classifier - KEYWORD FALLBACK ONLY. Primary routing now goes
+ * through src/services/intentClassifier.js's classifyIntent(), which
+ * asks the model itself to understand what the message actually needs
+ * rather than scanning for exact substrings - a request phrased any way
+ * other than these specific phrases would silently misroute if this
+ * were still the primary classifier. This function only runs as a
+ * degraded fallback when the model call itself can't be made (backend
+ * unreachable, request timed out) - see classifyIntent()'s catch block.
+ * Keep the category set here in sync with classifyIntent()'s
+ * ('github' | 'browsing' | 'general') even though the matching approach
+ * differs, so the fallback and primary path agree on what each category
+ * means.
  */
 export function classifyTask(messageText = '') {
   const text = messageText.toLowerCase();

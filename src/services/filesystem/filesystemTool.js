@@ -30,7 +30,15 @@
 
 import * as FileSystem from 'expo-file-system/legacy';
 import JSZip from 'jszip';
-import { getPreferences, updatePreferences } from '../../db/database';
+import { getPreferences, updatePreferences, getCheckpoint } from '../../db/database';
+import * as checkpointManager from '../execution/checkpointManager';
+import * as syntaxCheck from '../execution/syntaxCheck';
+
+// Directories never worth syntax-checking as part of a whole-project scan
+// (checkProjectSyntax below) - vendored/generated/build output the model
+// didn't write and shouldn't be asked to fix, and in node_modules' case,
+// walking it would make the scan slow for no benefit.
+const PROJECT_SCAN_EXCLUDE_RE = /(^|\/)(node_modules|\.git|android|ios|build|dist|\.expo|\.expo-shared)(\/|$)/;
 
 const { StorageAccessFramework } = FileSystem;
 
@@ -178,13 +186,37 @@ export async function createFile(relativePath, content) {
   const baseDirUri = await getGrantedDirUri();
   if (!baseDirUri) return requireAccessError();
 
+  // SYNTAX / JSX CHECK - fails closed, before anything else touches disk.
+  // Every .js/.jsx/.mjs/.cjs/.ts/.tsx/.json write is parsed with the real
+  // parser (syntaxCheck.js) first; a broken file is refused outright, the
+  // same way Claude Code's own Write tool won't save unparseable code. No
+  // checkpoint is even taken on failure, since nothing changed.
+  if (syntaxCheck.isCheckableFile(relativePath)) {
+    const check = syntaxCheck.checkSyntax(relativePath, content);
+    if (!check.valid) {
+      return {
+        success: false,
+        data: null,
+        error: { message: syntaxCheck.formatSyntaxErrors(relativePath, check), syntaxErrors: check.errors },
+      };
+    }
+  }
+
   const resolved = await resolveUri(relativePath, baseDirUri, { createIntermediateDirs: true });
   if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+
+  // Checkpoint BEFORE the write - covers the "create" landing on top of
+  // something that already existed at that path (a re-create/overwrite),
+  // not just genuinely brand-new files. previousContentB64 comes back
+  // null for a real brand-new file, which checkpointManager.snapshot()
+  // records correctly as "nothing existed before."
+  const previousContentB64 = await readEntryBase64IfExists(relativePath, baseDirUri);
+  const checkpointId = await checkpointManager.snapshot({ path: relativePath, operation: 'create', previousContentB64 });
 
   try {
     const fileUri = await StorageAccessFramework.createFileAsync(resolved.dirUri, resolved.fileName, guessMimeType(resolved.fileName));
     await FileSystem.writeAsStringAsync(fileUri, content, { encoding: FileSystem.EncodingType.UTF8 });
-    return { success: true, data: { path: relativePath, uri: fileUri }, error: null };
+    return { success: true, data: { path: relativePath, uri: fileUri, checkpointId }, error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not create ${relativePath}.` } };
   }
@@ -250,6 +282,24 @@ async function findEntryUri(relativePath, baseDirUri) {
 }
 
 /**
+ * Reads a file's exact current content as base64 for checkpointManager.js
+ * to snapshot BEFORE a mutating call overwrites/removes it - base64
+ * because this has to round-trip any file type (binary included), same
+ * reasoning as renameEntry/moveEntry's own base64 reads below. Returns
+ * null (not an error) when the entry doesn't exist yet, which
+ * checkpointManager.snapshot() treats as "this was a brand-new file."
+ */
+async function readEntryBase64IfExists(relativePath, baseDirUri) {
+  const entryUri = await findEntryUri(relativePath, baseDirUri);
+  if (!entryUri) return null;
+  try {
+    return await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.Base64 });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Deletes a file or folder at a path relative to the granted directory.
  */
 export async function deleteEntry(relativePath) {
@@ -261,9 +311,12 @@ export async function deleteEntry(relativePath) {
     return { success: false, data: null, error: { message: `${relativePath} does not exist.` } };
   }
 
+  const previousContentB64 = await readEntryBase64IfExists(relativePath, baseDirUri);
+  const checkpointId = await checkpointManager.snapshot({ path: relativePath, operation: 'delete', previousContentB64 });
+
   try {
     await StorageAccessFramework.deleteAsync(entryUri);
-    return { success: true, data: { path: relativePath }, error: null };
+    return { success: true, data: { path: relativePath, checkpointId }, error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not delete ${relativePath}.` } };
   }
@@ -296,12 +349,14 @@ export async function renameEntry(relativePath, newName) {
     // UTF8 get mangled or dropped). base64 round-trips any byte content
     // safely regardless of what the file actually contains.
     const content = await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.Base64 });
+    const newRelativePath = relativePath.split('/').slice(0, -1).concat(newName).join('/');
+    const checkpointId = await checkpointManager.snapshot({ path: newRelativePath, operation: 'rename', previousContentB64: content, previousPath: relativePath });
+
     const newUri = await StorageAccessFramework.createFileAsync(resolved.dirUri, newName, guessMimeType(newName));
     await FileSystem.writeAsStringAsync(newUri, content, { encoding: FileSystem.EncodingType.Base64 });
     await StorageAccessFramework.deleteAsync(entryUri);
 
-    const newRelativePath = relativePath.split('/').slice(0, -1).concat(newName).join('/');
-    return { success: true, data: { oldPath: relativePath, newPath: newRelativePath }, error: null };
+    return { success: true, data: { oldPath: relativePath, newPath: newRelativePath, checkpointId }, error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not rename ${relativePath}.` } };
   }
@@ -332,6 +387,14 @@ export async function moveEntry(sourcePath, destinationFolderPath, { keepOrigina
     // function moves/copies any file type, and UTF8 read/write would
     // corrupt binary content.
     const content = await FileSystem.readAsStringAsync(sourceUri, { encoding: FileSystem.EncodingType.Base64 });
+    const destinationPath = `${destinationFolderPath}/${fileName}`;
+    // Only checkpointed when the move actually removes the source
+    // (keepOriginal=false, i.e. a real move) - a copy leaves the
+    // original untouched, so there's nothing there to need a rewind for.
+    const checkpointId = keepOriginal
+      ? null
+      : await checkpointManager.snapshot({ path: destinationPath, operation: 'move', previousContentB64: content, previousPath: sourcePath });
+
     const newUri = await StorageAccessFramework.createFileAsync(destResolved.dirUri, fileName, guessMimeType(fileName));
     await FileSystem.writeAsStringAsync(newUri, content, { encoding: FileSystem.EncodingType.Base64 });
 
@@ -341,7 +404,7 @@ export async function moveEntry(sourcePath, destinationFolderPath, { keepOrigina
 
     return {
       success: true,
-      data: { sourcePath, destinationPath: `${destinationFolderPath}/${fileName}`, copied: keepOriginal },
+      data: { sourcePath, destinationPath, copied: keepOriginal, checkpointId },
       error: null,
     };
   } catch (err) {
@@ -447,6 +510,377 @@ export async function extractZip(zipPath, destinationFolderPath) {
   }
 }
 
+// File extensions readFile/grep/glob treat as text - anything else is
+// skipped (grep/glob) or rejected with a clear error (readFile), since
+// reading binary content (images, zips, APKs) as UTF8 would corrupt/
+// garble it rather than produce anything useful for the model to read.
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'json', 'js', 'jsx', 'ts', 'tsx', 'html', 'htm', 'css', 'scss',
+  'csv', 'xml', 'yml', 'yaml', 'py', 'java', 'kt', 'kts', 'c', 'cc', 'cpp', 'h', 'hpp',
+  'cs', 'go', 'rs', 'rb', 'php', 'sh', 'bat', 'ps1', 'sql', 'gradle', 'properties', 'env',
+  'gitignore', 'log', 'ini', 'toml', 'cfg', 'swift', 'dart', 'vue', 'svelte',
+]);
+
+function isTextFile(fileName) {
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  return TEXT_EXTENSIONS.has(ext);
+}
+
+/**
+ * Recursively walks the granted directory (or a subfolder of it),
+ * yielding { relativePath, name, uri } for every FILE found (folders are
+ * descended into, not yielded themselves). Shared by grep()/globFiles()
+ * so both search operations use one consistent, depth-first walk instead
+ * of two slightly different ones.
+ */
+async function walkFiles(dirUri, relativePrefix) {
+  const files = [];
+  const entries = await StorageAccessFramework.readDirectoryAsync(dirUri).catch(() => []);
+
+  for (const entryUri of entries) {
+    const name = decodeURIComponent(entryUri).split('/').pop();
+    const entryRelativePath = relativePrefix ? `${relativePrefix}/${name}` : name;
+    const info = await FileSystem.getInfoAsync(entryUri).catch(() => null);
+
+    if (info?.isDirectory) {
+      files.push(...(await walkFiles(entryUri, entryRelativePath)));
+    } else if (info) {
+      files.push({ relativePath: entryRelativePath, name, uri: entryUri });
+    }
+  }
+
+  return files;
+}
+
+/**
+ * Reads a text file's content, optionally restricted to a 1-indexed line
+ * range - the Read equivalent for this device-filesystem tool. Content
+ * comes back with line numbers prefixed (matching how Claude Code's own
+ * Read tool presents file content), since that's what lets the model
+ * refer back to "line 42" unambiguously in a later fs_edit_file call.
+ *
+ * @param {string} relativePath
+ * @param {{startLine?: number, endLine?: number}} [range] - 1-indexed, inclusive. Omit both to read the whole file.
+ */
+export async function readFile(relativePath, range = {}) {
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  if (!isTextFile(relativePath)) {
+    return { success: false, data: null, error: { message: `${relativePath} doesn't look like a text file - readFile only supports text content.` } };
+  }
+
+  const entryUri = await findEntryUri(relativePath, baseDirUri);
+  if (!entryUri) {
+    return { success: false, data: null, error: { message: `${relativePath} does not exist.` } };
+  }
+
+  try {
+    const content = await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.UTF8 });
+    const allLines = content.split('\n');
+    const totalLines = allLines.length;
+
+    const startLine = Math.max(1, range.startLine || 1);
+    const endLine = Math.min(totalLines, range.endLine || totalLines);
+    const selected = allLines.slice(startLine - 1, endLine);
+
+    const numbered = selected.map((line, i) => `${startLine + i}\t${line}`).join('\n');
+
+    return {
+      success: true,
+      data: { path: relativePath, content: numbered, totalLines, startLine, endLine },
+      error: null,
+    };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || `Could not read ${relativePath}.` } };
+  }
+}
+
+/**
+ * Searches file CONTENTS for a regex pattern across every text file
+ * under a folder (recursively) - the Grep equivalent. Returns one entry
+ * per matching line, capped at maxResults so a broad pattern over a big
+ * folder can't return an unbounded response.
+ *
+ * @param {string} pattern - regex pattern (no delimiters), e.g. "TODO|FIXME"
+ * @param {{path?: string, caseSensitive?: boolean, maxResults?: number}} [options]
+ */
+export async function grep(pattern, options = {}) {
+  const { path: searchPath = '', caseSensitive = false, maxResults = 100 } = options;
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  let startDirUri = baseDirUri;
+  if (searchPath) {
+    const resolved = await resolveDirUri(searchPath, baseDirUri);
+    if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+    startDirUri = resolved.dirUri;
+  }
+
+  let regex;
+  try {
+    regex = new RegExp(pattern, caseSensitive ? 'g' : 'gi');
+  } catch (err) {
+    return { success: false, data: null, error: { message: `Invalid pattern: ${err.message}` } };
+  }
+
+  try {
+    const files = await walkFiles(startDirUri, searchPath);
+    const matches = [];
+
+    for (const file of files) {
+      if (matches.length >= maxResults) break;
+      if (!isTextFile(file.name)) continue;
+
+      const content = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.UTF8 }).catch(() => null);
+      if (content == null) continue;
+
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length && matches.length < maxResults; i++) {
+        regex.lastIndex = 0;
+        if (regex.test(lines[i])) {
+          matches.push({ path: file.relativePath, line: i + 1, text: lines[i].trim().slice(0, 300) });
+        }
+      }
+    }
+
+    return { success: true, data: { pattern, matches, truncated: matches.length >= maxResults }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || 'Grep search failed.' } };
+  }
+}
+
+/**
+ * Converts a simple glob pattern (*, **, ?) to a RegExp. Deliberately
+ * minimal - no {a,b} brace expansion or [abc] character classes - since
+ * this tool only needs to cover the common "find files by
+ * name/extension" case (**\/*.js, src/**\/*.test.js), not be a full
+ * glob implementation.
+ */
+function globToRegExp(glob) {
+  let out = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        out += '.*';
+        i++;
+        if (glob[i + 1] === '/') i++; // ** / also swallows the following slash
+      } else {
+        out += '[^/]*';
+      }
+    } else if (c === '?') {
+      out += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      out += `\\${c}`;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/**
+ * Finds files by NAME pattern (not content) - the Glob equivalent.
+ * Matches relative paths against a glob pattern like "**\/*.test.js" or
+ * "src/*.json". Sorted so the most recently relevant results are easy to
+ * scan (alphabetical - there's no reliable mtime through SAF to sort by
+ * recency instead).
+ *
+ * @param {string} pattern - glob pattern, e.g. "**\/*.js"
+ * @param {{path?: string, maxResults?: number}} [options]
+ */
+export async function globFiles(pattern, options = {}) {
+  const { path: searchPath = '', maxResults = 200 } = options;
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  let startDirUri = baseDirUri;
+  if (searchPath) {
+    const resolved = await resolveDirUri(searchPath, baseDirUri);
+    if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+    startDirUri = resolved.dirUri;
+  }
+
+  let regex;
+  try {
+    regex = globToRegExp(pattern);
+  } catch (err) {
+    return { success: false, data: null, error: { message: `Invalid pattern: ${err.message}` } };
+  }
+
+  try {
+    const files = await walkFiles(startDirUri, searchPath);
+    const matched = files
+      .map((f) => f.relativePath)
+      .filter((p) => regex.test(p))
+      .sort()
+      .slice(0, maxResults);
+
+    return { success: true, data: { pattern, paths: matched, truncated: matched.length >= maxResults }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || 'Glob search failed.' } };
+  }
+}
+
+/**
+ * Precise, diff-based single-file edit - the Edit equivalent. Replaces
+ * one exact occurrence of oldString with newString (unless replaceAll is
+ * set), refusing to guess when oldString appears zero times (nothing to
+ * anchor to) or more than once (ambiguous - which one?) so this can't
+ * silently make the wrong change the way a blind "rewrite the whole
+ * file" approach could. Always read the file (readFile, above) shortly
+ * before calling this, so oldString is copied from real current content
+ * rather than guessed from memory.
+ *
+ * @param {string} relativePath
+ * @param {string} oldString - exact text to find (include enough surrounding context to be unique)
+ * @param {string} newString - replacement text
+ * @param {{replaceAll?: boolean}} [options]
+ */
+export async function editFile(relativePath, oldString, newString, options = {}) {
+  const { replaceAll = false } = options;
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  if (oldString === newString) {
+    return { success: false, data: null, error: { message: 'oldString and newString are identical - nothing to change.' } };
+  }
+
+  const entryUri = await findEntryUri(relativePath, baseDirUri);
+  if (!entryUri) {
+    return { success: false, data: null, error: { message: `${relativePath} does not exist.` } };
+  }
+
+  try {
+    const content = await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.UTF8 });
+    const occurrences = content.split(oldString).length - 1;
+
+    if (occurrences === 0) {
+      return { success: false, data: null, error: { message: `oldString was not found in ${relativePath}. Re-read the file to get its exact current content before editing.` } };
+    }
+    if (occurrences > 1 && !replaceAll) {
+      return { success: false, data: null, error: { message: `oldString appears ${occurrences} times in ${relativePath} - it must be unique, or pass replaceAll: true to change every occurrence.` } };
+    }
+
+    const updated = replaceAll
+      ? content.split(oldString).join(newString)
+      : content.replace(oldString, newString);
+
+    // SYNTAX / JSX CHECK - checks the file's RESULTING content (after the
+    // replace, not the diff in isolation - a perfectly valid snippet can
+    // still land somewhere that breaks the surrounding file). Fails
+    // closed: on a syntax error nothing is written and no checkpoint is
+    // taken, exactly like createFile above.
+    if (syntaxCheck.isCheckableFile(relativePath)) {
+      const check = syntaxCheck.checkSyntax(relativePath, updated);
+      if (!check.valid) {
+        return {
+          success: false,
+          data: null,
+          error: { message: syntaxCheck.formatSyntaxErrors(relativePath, check), syntaxErrors: check.errors },
+        };
+      }
+    }
+
+    const previousContentB64 = await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.Base64 });
+    const checkpointId = await checkpointManager.snapshot({ path: relativePath, operation: 'edit', previousContentB64 });
+
+    await FileSystem.writeAsStringAsync(entryUri, updated, { encoding: FileSystem.EncodingType.UTF8 });
+
+    return { success: true, data: { path: relativePath, occurrencesReplaced: replaceAll ? occurrences : 1, checkpointId }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || `Could not edit ${relativePath}.` } };
+  }
+}
+
+/**
+ * Runs the real syntax/JSX check (syntaxCheck.js) against a file already
+ * on disk, standalone - createFile/editFile above already run this
+ * automatically before every write, so this is for checking a file the
+ * model didn't just write itself: after an external change, before
+ * telling the person a file is ready, or as part of checkProjectSyntax
+ * below. Non-code files (skipped by isCheckableFile) come back
+ * { valid: true, skipped: true } rather than an error - checking them was
+ * never meaningful in the first place.
+ */
+export async function checkFileSyntax(relativePath) {
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  if (!syntaxCheck.isCheckableFile(relativePath)) {
+    return { success: true, data: { path: relativePath, valid: true, skipped: true, errors: [] }, error: null };
+  }
+
+  const entryUri = await findEntryUri(relativePath, baseDirUri);
+  if (!entryUri) {
+    return { success: false, data: null, error: { message: `${relativePath} does not exist.` } };
+  }
+
+  try {
+    const content = await FileSystem.readAsStringAsync(entryUri, { encoding: FileSystem.EncodingType.UTF8 });
+    const result = syntaxCheck.checkSyntax(relativePath, content);
+    return { success: true, data: { path: relativePath, ...result }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || `Could not check ${relativePath}.` } };
+  }
+}
+
+/**
+ * Recursively syntax/JSX-checks every checkable code file
+ * (.js/.jsx/.mjs/.cjs/.ts/.tsx/.json) under a folder, skipping
+ * node_modules/.git/android/ios/build/dist/.expo (PROJECT_SCAN_EXCLUDE_RE
+ * above) - vendored or generated output isn't the model's to fix, and
+ * walking node_modules would make this slow for no benefit.
+ *
+ * This is what backs BOTH the fs_check_project_syntax tool (the model
+ * calling it directly, e.g. "make sure everything's clean before I run
+ * this") AND projectRunGate.js's automatic pre-run gate in front of
+ * terminal_pc_run_command/terminal_termux_run_command - see that file's
+ * header for the one real caveat (it checks the SAF-granted folder on
+ * the phone, which may or may not be the exact folder a PC-backend
+ * command actually runs against).
+ *
+ * @param {string} [relativePath] - folder to scan; '' scans the whole granted root
+ */
+export async function checkProjectSyntax(relativePath = '') {
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  let startDirUri = baseDirUri;
+  if (relativePath) {
+    const resolved = await resolveDirUri(relativePath, baseDirUri);
+    if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+    startDirUri = resolved.dirUri;
+  }
+
+  try {
+    const allFiles = await walkFiles(startDirUri, relativePath);
+    const checkable = allFiles.filter(
+      (f) => syntaxCheck.isCheckableFile(f.relativePath) && !PROJECT_SCAN_EXCLUDE_RE.test(f.relativePath)
+    );
+
+    const failures = [];
+    for (const f of checkable) {
+      try {
+        const content = await FileSystem.readAsStringAsync(f.uri, { encoding: FileSystem.EncodingType.UTF8 });
+        const result = syntaxCheck.checkSyntax(f.relativePath, content);
+        if (!result.valid) failures.push({ path: f.relativePath, errors: result.errors });
+      } catch (err) {
+        failures.push({ path: f.relativePath, errors: [{ line: null, column: null, message: err?.message || 'Could not read file.' }] });
+      }
+    }
+
+    return {
+      success: true,
+      data: { path: relativePath, filesChecked: checkable.length, valid: failures.length === 0, failures },
+      error: null,
+    };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || 'Project syntax check failed.' } };
+  }
+}
+
 /**
  * Lists the contents of a folder relative to the granted directory - not
  * one of the person's originally-requested capabilities, but included
@@ -470,5 +904,61 @@ export async function listFolder(relativePath = '') {
     return { success: true, data: { path: relativePath, entries: names }, error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not list ${relativePath || '(root)'}.` } };
+  }
+}
+
+/**
+ * Restores the file state recorded by one checkpoint (checkpointManager.js /
+ * edit_checkpoints table) - the actual "Esc Esc rewind" action. Lives here
+ * rather than in checkpointManager.js so that module never needs to know
+ * about SAF URIs (see that file's header for why). Handles all five
+ * checkpointed operations:
+ *   - create: previousContentB64 null -> the file didn't exist before, so
+ *     rewinding deletes it. Non-null -> it overwrote something, so
+ *     rewinding restores that prior content.
+ *   - edit:   always overwrite with previousContentB64.
+ *   - delete: the file no longer exists at all - rewinding recreates it
+ *     from previousContentB64.
+ *   - rename/move: the file now lives at `path`; rewinding recreates it
+ *     at previousPath with the same content and removes it from `path`.
+ */
+export async function rewindToCheckpoint(checkpointId) {
+  const checkpointResult = await getCheckpoint(checkpointId);
+  const checkpoint = checkpointResult.data;
+  if (!checkpoint) {
+    return { success: false, data: null, error: { message: 'Checkpoint not found.' } };
+  }
+
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  const { path, operation, previous_content_b64: previousContentB64, previous_path: previousPath } = checkpoint;
+
+  try {
+    if (operation === 'create' && !previousContentB64) {
+      const entryUri = await findEntryUri(path, baseDirUri);
+      if (entryUri) await StorageAccessFramework.deleteAsync(entryUri);
+    } else if (operation === 'delete' || (operation === 'create' && previousContentB64)) {
+      const resolved = await resolveUri(path, baseDirUri, { createIntermediateDirs: true });
+      if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+      const fileUri = await StorageAccessFramework.createFileAsync(resolved.dirUri, resolved.fileName, guessMimeType(resolved.fileName));
+      await FileSystem.writeAsStringAsync(fileUri, previousContentB64, { encoding: FileSystem.EncodingType.Base64 });
+    } else if (operation === 'edit') {
+      const entryUri = await findEntryUri(path, baseDirUri);
+      if (!entryUri) return { success: false, data: null, error: { message: `${path} no longer exists - cannot rewind an edit on a file that's been deleted since.` } };
+      await FileSystem.writeAsStringAsync(entryUri, previousContentB64, { encoding: FileSystem.EncodingType.Base64 });
+    } else if (operation === 'rename' || operation === 'move') {
+      const currentUri = await findEntryUri(path, baseDirUri);
+      const resolved = await resolveUri(previousPath, baseDirUri, { createIntermediateDirs: true });
+      if (!resolved.success) return { success: false, data: null, error: { message: resolved.error } };
+      const fileUri = await StorageAccessFramework.createFileAsync(resolved.dirUri, resolved.fileName, guessMimeType(resolved.fileName));
+      await FileSystem.writeAsStringAsync(fileUri, previousContentB64, { encoding: FileSystem.EncodingType.Base64 });
+      if (currentUri) await StorageAccessFramework.deleteAsync(currentUri);
+    }
+
+    await checkpointManager.markRewound(path, checkpoint.created_at);
+    return { success: true, data: { checkpointId, path, operation }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || `Could not rewind checkpoint ${checkpointId}.` } };
   }
 }

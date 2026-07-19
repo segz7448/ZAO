@@ -20,11 +20,58 @@ import {
   deleteConversation as dbDeleteConversation,
   deleteMessagesAfter,
   setMessageFeedback as dbSetMessageFeedback,
+  clearPendingConfirmation as dbClearPendingConfirmation,
 } from '../db/database';
 import { sendMessageOrchestrated } from '../utils/orchestrator';
+import { approveAndRunPendingTool } from '../services/toolOrchestrator';
 import { usePreferencesStore } from './preferencesStore';
 import { processAttachedFile, formatFileContextBlock } from '../services/fileProcessor';
 import { getMemorySystemMessage, extractMemoriesFromTurn, detectExplicitMemoryCommand, handleRememberCommand, handleForgetCommand } from '../services/memory/memoryEngine';
+import { buildWorkingHistory } from '../services/memory/workingMemory';
+import { shouldAttemptRecall, retrieveRelevantContext } from '../services/memory/retrievalMemory';
+import { getFeedbackGuidanceMessage, recordDislikeFeedback } from '../services/memory/feedbackMemory';
+
+/**
+ * Assembles the exact `history` array sent to the model for a turn,
+ * layering every memory type that injects into the prompt, in a fixed
+ * order, in one place - all three send paths below (send / edit /
+ * regenerate) call this instead of each hand-rolling their own
+ * unshift() calls, so the order and the compaction behavior can't drift
+ * between them.
+ *
+ * Order (front to back): semantic facts (memoryEngine.js) -> feedback
+ * guidance distilled from past dislikes (feedbackMemory.js) -> retrieved
+ * cross-conversation snippets (retrievalMemory.js, only when the
+ * message looks like a backward reference) -> rolling summary of this
+ * conversation's own older turns, if it's long enough to need one
+ * (workingMemory.js) -> the raw recent turns themselves.
+ *
+ * @param {Array<{id, role, content, created_at}>} rawMessages - this conversation's messages, oldest first, including the new/edited message
+ * @param {{ conversationId: string, memoryEnabled: boolean, lastUserText: string }} context
+ */
+async function assembleHistory(rawMessages, { conversationId, memoryEnabled, lastUserText }) {
+  const history = await buildWorkingHistory(conversationId, rawMessages);
+
+  if (lastUserText && shouldAttemptRecall(lastUserText)) {
+    const retrieved = await retrieveRelevantContext(lastUserText, { excludeConversationId: conversationId });
+    if (retrieved) history.unshift(retrieved);
+  }
+
+  if (memoryEnabled !== false) {
+    // Feedback guidance is derived from past conversation content the
+    // same way semantic memory is, so it's gated behind the same
+    // memoryEnabled toggle rather than always-on - someone who's turned
+    // memory off doesn't want past exchanges (even distilled ones)
+    // feeding back into the prompt either.
+    const feedbackMessage = await getFeedbackGuidanceMessage();
+    if (feedbackMessage) history.unshift(feedbackMessage);
+
+    const memoryMessage = await getMemorySystemMessage();
+    if (memoryMessage) history.unshift(memoryMessage);
+  }
+
+  return history;
+}
 
 const SENT_IMAGES_DIR = `${FileSystem.documentDirectory}zao-sent-images/`;
 
@@ -68,6 +115,33 @@ function buildAssistantMessageFromResult(result, conversationId) {
     model: result.data.modelId,
     model_family: result.data.family,
     is_error: false,
+    // Set only when the reply came from the hierarchical planning system
+    // (src/services/brain/backendBrain.js's runHierarchicalPlan, wired in
+    // via src/utils/orchestrator.js) - lets ChatScreen.js render a "View
+    // Plan" chip on this specific bubble. NULL for every ordinary reply.
+    plan_id: result.data.planId || null,
+    // Which reasoning strategy produced this reply (see
+    // src/services/reasoning/reasoningTypes.js) - chain_of_thought by
+    // default, or tree_of_thought/deductive/inductive/abductive/
+    // analogical/self_reflection for a reasoningRouter.js-classified
+    // message, or react/hybrid_symbolic_plan for tool/browsing/plan
+    // routes (see orchestrator.js's STRATEGY_FOR_ROUTE). Lets
+    // ChatScreen.js render a reasoning chip on the bubble.
+    reasoning_type: result.data.reasoningType || null,
+    reasoning_trace: result.data.reasoningTrace || null,
+    // Set only when this reply came from a time_get_current tool call
+    // (src/services/toolOrchestrator.js) - lets ChatScreen.js render a
+    // live ClockWidget on this specific bubble. NULL for every ordinary
+    // reply. See src/db/database.js's messages migration comment for
+    // clock_data.
+    clock_data: result.data.clockData ? JSON.stringify(result.data.clockData) : null,
+    // Set only when a terminal command this turn was refused because it
+    // needs human confirmation (toolOrchestrator.js's pendingConfirmation,
+    // see orchestrator.js's runToolTaskHandler) - lets ChatScreen.js render
+    // an "Approve this command?" card on this specific bubble. NULL for
+    // every ordinary reply. See src/db/database.js's messages migration
+    // comment for pending_confirmation.
+    pending_confirmation: result.data.pendingConfirmation ? JSON.stringify(result.data.pendingConfirmation) : null,
   };
 }
 
@@ -81,17 +155,41 @@ export const useChatStore = create((set, get) => ({
   // Reset to null at the start of every send; populated only when the
   // orchestrator's browsing branch actually runs (see sendMessage below).
   // ChatScreen can render this as a step list while isSending is true -
-  // the actual live *visual* view is BrowserAgentPiP itself (mounted at
-  // the App level), not a screenshot feed through the store anymore.
+  // the actual live *visual* view is the PC's screenshot stream, shown by
+  // BrowserAgentPiP (mounted at the App level), not routed through the
+  // store.
   browsingSteps: [],
-  // The live AgentSession instance (src/services/browserAgent/agentLoop.js),
-  // set once via setAgentSession() from wherever BrowserAgentPiP mounts
-  // (App.js) since the store itself can't hold a React ref directly. Held
-  // here so sendMessage/editMessage/regenerateMessage can all pass the
-  // same session into the orchestrator without each needing their own
-  // plumbing back up to the component tree - this is what lets one
-  // AgentSession's browser state/history persist across multiple separate
-  // browsing tasks within a single chat.
+  // Live hierarchical-plan progress for the message currently being
+  // sent - mirrors browsingSteps above. planProgress is the short
+  // cosmetic stage label fired while the plan is being BUILT
+  // (planCoordinator.js, e.g. "Breaking the goal into projects…");
+  // planSteps accumulates one label per completed step while the plan
+  // then RUNS (planExecutor.js). Reset to null/[] at the start of every
+  // send and cleared again once the reply lands, same lifecycle as
+  // browsingSteps. Previously threaded through orchestrator.js with no
+  // handler on this end, so a running plan showed nothing but a generic
+  // "Thinking…" spinner - see SYSTEM_COMPONENTS.md's state-management
+  // section.
+  planProgress: null,
+  planSteps: [],
+  // The in-progress reply text for the message currently being sent, while
+  // it's still streaming in (see backendClient.js's onToken /
+  // reasoningEngine.js's runReasoningChat). Only ever populated for the
+  // CHAT route - other routes keep using their own progress state above.
+  // Reset to null at the start of every send and cleared again once the
+  // final assistant message is appended, same lifecycle as browsingSteps.
+  streamingText: null,
+  // The connected BrowserAgentStream instance
+  // (src/services/browserAgent/browserAgentStream.js) - talks to the
+  // Playwright agent running on the person's PC. Set once via
+  // setAgentSession() from wherever BrowserAgentPiP mounts (App.js) since
+  // the store itself can't hold a React ref/instance directly. Held here
+  // so sendMessage/editMessage/regenerateMessage can all pass the same
+  // stream into the orchestrator without each needing their own plumbing
+  // back up to the component tree - this is what lets one PC-side
+  // session's browser state/history persist across multiple separate
+  // browsing tasks within a single chat. Named agentSession (not
+  // browserStream) for call-site compatibility with orchestrator.js.
   agentSession: null,
   setAgentSession(session) {
     set({ agentSession: session });
@@ -171,16 +269,15 @@ export const useChatStore = create((set, get) => ({
         ? { ...m, content: trimmed, edited_at: updateResult.data.edited_at }
         : m
     );
-    set({ messages: truncatedMessages, isSending: true, error: null });
+    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null });
 
     // 3. Re-run orchestration using history up to and including the edit.
     const prefs = usePreferencesStore.getState().preferences;
-    const history = truncatedMessages.map((m) => ({ role: m.role, content: m.content }));
-
-    if (prefs.memory_enabled !== false) {
-      const memoryMessage = await getMemorySystemMessage();
-      if (memoryMessage) history.unshift(memoryMessage);
-    }
+    const history = await assembleHistory(truncatedMessages, {
+      conversationId,
+      memoryEnabled: prefs.memory_enabled !== false,
+      lastUserText: trimmed,
+    });
 
     const result = await sendMessageOrchestrated({
       history,
@@ -188,6 +285,10 @@ export const useChatStore = create((set, get) => ({
       lastMessageText: trimmed,
       agentSession: get().agentSession,
       githubUsername: prefs.github_username,
+      conversationId,
+      onPlanProgress: (stage) => set({ planProgress: stage }),
+      onPlanStep: (label) => set((state) => ({ planSteps: [...state.planSteps, label] })),
+      onToken: (text) => set({ streamingText: text }),
     });
 
     if (result.success) {
@@ -200,6 +301,9 @@ export const useChatStore = create((set, get) => ({
       set((state) => ({
         messages: [...state.messages, assistantMessage],
         isSending: false,
+        planProgress: null,
+        planSteps: [],
+        streamingText: null,
       }));
       await get().loadConversationList();
       if (prefs.memory_enabled !== false) {
@@ -219,6 +323,9 @@ export const useChatStore = create((set, get) => ({
         messages: [...state.messages, errorMessage],
         isSending: false,
         error: result.error?.message || 'Failed to get a response',
+        planProgress: null,
+        planSteps: [],
+        streamingText: null,
       }));
     }
 
@@ -248,15 +355,14 @@ export const useChatStore = create((set, get) => ({
 
     await deleteMessagesAfter(conversationId, anchorMessage.created_at);
     const truncatedMessages = messages.slice(0, userIndex + 1);
-    set({ messages: truncatedMessages, isSending: true, error: null });
+    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null });
 
     const prefs = usePreferencesStore.getState().preferences;
-    const history = truncatedMessages.map((m) => ({ role: m.role, content: m.content }));
-
-    if (prefs.memory_enabled !== false) {
-      const memoryMessage = await getMemorySystemMessage();
-      if (memoryMessage) history.unshift(memoryMessage);
-    }
+    const history = await assembleHistory(truncatedMessages, {
+      conversationId,
+      memoryEnabled: prefs.memory_enabled !== false,
+      lastUserText: anchorMessage.content,
+    });
 
     const result = await sendMessageOrchestrated({
       history,
@@ -264,6 +370,10 @@ export const useChatStore = create((set, get) => ({
       lastMessageText: anchorMessage.content,
       agentSession: get().agentSession,
       githubUsername: prefs.github_username,
+      conversationId,
+      onPlanProgress: (stage) => set({ planProgress: stage }),
+      onPlanStep: (label) => set((state) => ({ planSteps: [...state.planSteps, label] })),
+      onToken: (text) => set({ streamingText: text }),
     });
 
     if (result.success) {
@@ -276,6 +386,9 @@ export const useChatStore = create((set, get) => ({
       set((state) => ({
         messages: [...state.messages, assistantMessage],
         isSending: false,
+        planProgress: null,
+        planSteps: [],
+        streamingText: null,
       }));
       await get().loadConversationList();
       return { success: true };
@@ -293,6 +406,9 @@ export const useChatStore = create((set, get) => ({
       messages: [...state.messages, errorMessage],
       isSending: false,
       error: result.error?.message || 'Failed to get a response',
+      planProgress: null,
+      planSteps: [],
+      streamingText: null,
     }));
     return { success: false, error: result.error };
   },
@@ -301,9 +417,21 @@ export const useChatStore = create((set, get) => ({
    * Toggles like/dislike on an assistant message. Tapping the already-
    * active button clears feedback (passing null); tapping the other one
    * switches it. Persisted so it survives app restarts.
+   *
+   * A fresh 'dislike' also fires feedbackMemory.js's aggregation
+   * (fire-and-forget, never awaited - a slow/failed distillation call
+   * must never make the dislike button feel unresponsive): the disliked
+   * reply plus the user message that led to it are distilled into a
+   * general "avoid this" instruction and folded into future prompts via
+   * assembleHistory() above. Toggling dislike back off does NOT retract
+   * an already-distilled pattern - same tradeoff memoryEngine.js makes
+   * for extractMemoriesFromTurn (nothing un-learns a fact if the
+   * triggering message is later edited/deleted either); this is a
+   * background learning signal, not a 1:1 reversible log.
    */
   async setFeedback(messageId, feedback) {
-    const current = get().messages.find((m) => m.id === messageId);
+    const messages = get().messages;
+    const current = messages.find((m) => m.id === messageId);
     const nextFeedback = current?.feedback === feedback ? null : feedback;
 
     const result = await dbSetMessageFeedback(messageId, nextFeedback);
@@ -313,12 +441,88 @@ export const useChatStore = create((set, get) => ({
           m.id === messageId ? { ...m, feedback: nextFeedback } : m
         ),
       }));
+
+      if (nextFeedback === 'dislike' && current) {
+        const messageIndex = messages.findIndex((m) => m.id === messageId);
+        const precedingUserMessage = messages
+          .slice(0, messageIndex)
+          .reverse()
+          .find((m) => m.role === 'user');
+        recordDislikeFeedback(precedingUserMessage?.content || '', current.content, messageId);
+      }
     }
     return result;
   },
 
   clearError() {
     set({ error: null });
+  },
+
+  /**
+   * Approves the tool call attached to a message's pending_confirmation
+   * (see database.js's migration comment and toolOrchestrator.js's
+   * pendingConfirmation) - the ONLY path in the app that re-invokes a
+   * refused confirmable tool call, and only reachable from an explicit
+   * tap on ChatScreen.js's confirmation card. Runs the exact call that
+   * was refused (terminal commands re-run with confirmed: true; every
+   * other WRITE_TOOL/DESTRUCTIVE_TOOL runs directly - see
+   * approveAndRunPendingTool()'s own header), appends its real result as
+   * a new assistant message (success or failure, never hidden either way
+   * - same honesty guarantee runCommand() itself already gives), and
+   * clears pending_confirmation off the original message so the card
+   * doesn't linger or re-trigger.
+   *
+   * Covers every confirmable tool now, not just terminal commands - a
+   * GitHub push, a file delete, or a generated document that got refused
+   * with requiresConfirmation used to have no way to ever actually run;
+   * see toolOrchestrator.js's pendingConfirmation comment for that gap.
+   */
+  async approvePendingToolCall(messageId) {
+    const { conversationId, messages } = get();
+    const message = messages.find((m) => m.id === messageId);
+    if (!message?.pending_confirmation) return { success: false, error: 'NO_PENDING_CONFIRMATION' };
+
+    let pending;
+    try {
+      pending = JSON.parse(message.pending_confirmation);
+    } catch (err) {
+      return { success: false, error: 'MALFORMED_PENDING_CONFIRMATION' };
+    }
+
+    await dbClearPendingConfirmation(messageId);
+    set((state) => ({
+      messages: state.messages.map((m) => (m.id === messageId ? { ...m, pending_confirmation: null } : m)),
+    }));
+
+    const result = await approveAndRunPendingTool(pending);
+
+    // Terminal commands carry stdout/stderr; every other tool's result
+    // shape varies (a created file's path, a commit SHA, etc.), so fall
+    // back to the tool's own human-readable label rather than assuming
+    // a terminal-shaped payload.
+    const resultMessage = {
+      id: uuidv4(),
+      conversation_id: conversationId,
+      role: 'assistant',
+      content: result.success
+        ? (result.data?.stdout != null
+            ? `Ran it:\n\n\`\`\`\n${result.data.stdout || '(no output)'}\n\`\`\``
+            : `Done: ${result.label || 'Approved and completed.'}`)
+        : `That failed: ${result.error?.message || 'Unknown error'}${result.data?.stderr ? `\n\n\`\`\`\n${result.data.stderr}\n\`\`\`` : ''}`,
+      is_error: !result.success,
+    };
+    await addMessage(resultMessage);
+    set((state) => ({ messages: [...state.messages, resultMessage] }));
+
+    return result;
+  },
+
+  /** Dismisses a pending terminal-command confirmation without running it. */
+  async dismissPendingConfirmation(messageId) {
+    await dbClearPendingConfirmation(messageId);
+    set((state) => ({
+      messages: state.messages.map((m) => (m.id === messageId ? { ...m, pending_confirmation: null } : m)),
+    }));
   },
 
   async sendMessage(userText, attachment = null) {
@@ -399,14 +603,19 @@ export const useChatStore = create((set, get) => ({
       const result = await processAttachedFile(attachment, trimmed);
 
       if (result.isImage) {
-        // There's no vision model anymore (Gemini removed) - the image
-        // still attaches and shows as a thumbnail in the chat (per product
-        // decision: camera/gallery/file attachments stay), but the model
-        // can't actually see it. Tell it so in plain text rather than
-        // silently sending nothing and confusing the person when the
-        // reply doesn't reference the image at all.
+        // There's no vision model (Gemini removed) - the image still
+        // attaches and shows as a thumbnail in the chat (per product
+        // decision: camera/gallery/file attachments stay), and the model
+        // still can't SEE it, but fileProcessor.js now runs OCR
+        // (server-side, free/open-source Tesseract - see server/ocr.js)
+        // on every attached image as a best-effort fallback. If the image
+        // contains readable text (a screenshot, a photo of a document or
+        // whiteboard), that text is what actually reaches the model here -
+        // otherwise it's the same "can't see images" note as before.
         userImageLocalPath = await copyAttachmentLocally(attachment);
-        const imageNote = "[The user attached an image, but it can't be viewed - there's no vision model available. If relevant, let them know you can't see images.]";
+        const imageNote = result.text
+          ? `[The user attached an image. There's no vision model so it can't be visually viewed, but OCR found the following text in it:]\n\n${result.text}`
+          : "[The user attached an image, but it can't be viewed - there's no vision model available, and OCR found no readable text in it. If relevant, let them know you can't see images.]";
         messageContent = messageContent ? `${imageNote}\n\n${messageContent}` : imageNote;
       } else if (result.success) {
         const contextBlock = formatFileContextBlock(attachment.name, result);
@@ -442,6 +651,9 @@ export const useChatStore = create((set, get) => ({
       isSending: true,
       error: null,
       browsingSteps: [],
+      planProgress: null,
+      planSteps: [],
+      streamingText: null,
     }));
 
     // Auto-title the conversation from the first message, same pattern as
@@ -454,37 +666,50 @@ export const useChatStore = create((set, get) => ({
     }
 
     const prefs = usePreferencesStore.getState().preferences;
-    const history = get().messages
-      .concat([userMessage])
-      .map((m) => ({ role: m.role, content: m.content }));
 
-    // Long-term memory injection - prepends a system message summarizing
-    // everything ZAO remembers about the person from past conversations
-    // (see src/services/memory/memoryEngine.js). Skipped entirely if the
-    // person has turned memory off in Settings, or if there's nothing
-    // stored yet (getMemorySystemMessage returns null in that case).
-    if (prefs.memory_enabled !== false) {
-      const memoryMessage = await getMemorySystemMessage();
-      if (memoryMessage) {
-        history.unshift(memoryMessage);
-      }
-    }
+    // Layers every prompt-injecting memory type in one place - see
+    // assembleHistory() above: semantic facts (memoryEngine.js),
+    // cross-conversation retrieval (retrievalMemory.js, only when this
+    // message looks like a backward reference), and this conversation's
+    // own rolling summary once it's long enough to need compaction
+    // (workingMemory.js) - in front of the raw recent turns. Skipped/no-op
+    // pieces (memory off in Settings, nothing stored yet, no recall cue,
+    // conversation still short) each degrade gracefully on their own.
+    const history = await assembleHistory(get().messages.concat([userMessage]), {
+      conversationId,
+      memoryEnabled: prefs.memory_enabled !== false,
+      lastUserText: messageContent,
+    });
 
     const result = await sendMessageOrchestrated({
       history,
       browserAccessEnabled: !!prefs.browser_access_enabled,
       lastMessageText: messageContent,
-      // The on-device AgentSession (src/services/browserAgent/agentLoop.js),
-      // set via setAgentSession() from wherever BrowserAgentPiP mounts.
-      // Live visual progress is the PiP itself, not a screenshot feed
+      // The connected BrowserAgentStream to the PC's Playwright agent
+      // (src/services/browserAgent/browserAgentStream.js), set via
+      // setAgentSession() from wherever BrowserAgentPiP mounts. Live
+      // visual progress is the PiP's screenshot stream itself, not routed
       // through the store - onBrowserStep here is just a lightweight text
       // log (step index + action taken) for an optional "what it's doing"
       // list in ChatScreen, if the person has the PiP minimized.
       agentSession: get().agentSession,
       githubUsername: prefs.github_username,
+      conversationId,
       onBrowserStep: (step) => {
         set((state) => ({ browsingSteps: [...state.browsingSteps, step] }));
       },
+      // Live hierarchical-plan progress, same idea as onBrowserStep above -
+      // onPlanProgress fires cosmetic stage labels while the plan is being
+      // BUILT (planCoordinator.js), onPlanStep fires once per completed
+      // step while it RUNS (planExecutor.js). Both threaded through
+      // orchestrator.js already; this is the handler that was missing on
+      // this end (see SYSTEM_COMPONENTS.md's state-management section).
+      onPlanProgress: (stage) => set({ planProgress: stage }),
+      onPlanStep: (label) => set((state) => ({ planSteps: [...state.planSteps, label] })),
+      // Live token-by-token text for a plain CHAT reply (see
+      // reasoningEngine.js's runReasoningChat) - ChatScreen renders this in
+      // place of the "Thinking…" indicator while it's populated.
+      onToken: (text) => set({ streamingText: text }),
     });
 
     if (result.success) {
@@ -498,6 +723,9 @@ export const useChatStore = create((set, get) => ({
         messages: [...state.messages, assistantMessage],
         isSending: false,
         browsingSteps: [],
+        planProgress: null,
+        planSteps: [],
+        streamingText: null,
       }));
 
       await get().loadConversationList();
@@ -526,6 +754,9 @@ export const useChatStore = create((set, get) => ({
         isSending: false,
         error: result.error?.message || 'Failed to get a response',
         browsingSteps: [],
+        planProgress: null,
+        planSteps: [],
+        streamingText: null,
       }));
     }
   },

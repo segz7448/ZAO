@@ -47,7 +47,7 @@ import {
 // no per-call cost, so reusing Qwen3-4B rather than maintaining a second
 // resident model just for extraction is the simpler and more
 // memory-friendly choice on a phone. Gemma 4 (OpenRouter) is gone.
-const EXTRACTION_MODEL_KEY = MODEL_KEYS.QWEN25_CODER_1_5B;
+const EXTRACTION_MODEL_KEY = MODEL_KEYS.QWEN25_CODER_3B;
 
 // Hard ceiling on how many active memories are kept at once. Once exceeded,
 // the oldest-updated memories are soft-deleted first - keeps the injected

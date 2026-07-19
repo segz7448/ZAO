@@ -25,8 +25,10 @@ import MessageActionMenu from '../components/MessageActionMenu';
 import MessageActions from '../components/MessageActions';
 import Toast from '../components/Toast';
 import ImageViewerModal from '../components/ImageViewerModal';
+import ClockWidget from '../components/ClockWidget';
 import { ACTIVE_MODEL } from '../config/localModels';
 import { useTheme } from '../theme/useTheme';
+import { REASONING_STRATEGY_LABELS, REASONING_STRATEGY_GLYPHS } from '../services/reasoning/reasoningTypes';
 
 // Long-press threshold per spec: 400-500ms. 450ms sits in the middle of
 // that range - long enough to not fire on a slightly slow tap, short
@@ -35,7 +37,173 @@ import { useTheme } from '../theme/useTheme';
 // action row below instead (see MessageActions.js).
 const LONG_PRESS_DURATION_MS = 450;
 
-function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps }) {
+/** Safely turns messages.clock_data (stored as JSON text - see src/db/database.js's migration comment) back into { timezone, label }, never throwing on malformed/legacy data. */
+function parseClockData(rawClockData) {
+  if (!rawClockData) return null;
+  try {
+    return JSON.parse(rawClockData);
+  } catch (err) {
+    return null;
+  }
+}
+
+/** Safely turns messages.reasoning_trace (stored as JSON text - see src/db/database.js's migration comment) back into a plain object/string, never throwing on malformed or legacy data. */
+function parseReasoningTrace(rawTrace) {
+  if (!rawTrace) return null;
+  if (typeof rawTrace !== 'string') return rawTrace;
+  try {
+    return JSON.parse(rawTrace);
+  } catch (err) {
+    return rawTrace; // plain string trace (chainOfThought.js / inferenceModes.js's <thinking> text) stored as-is
+  }
+}
+
+/** Safely turns messages.pending_confirmation (stored as JSON text - see src/db/database.js's migration comment) back into { toolName, args, reason }, never throwing on malformed/legacy data. */
+function parsePendingConfirmation(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return null;
+  }
+}
+
+/** Renders a parsed reasoning trace (string or the shape treeOfThought.js/selfReflection.js produce) as readable plain text for the expandable trace box. */
+function formatReasoningTrace(trace) {
+  if (!trace) return null;
+  if (typeof trace === 'string') return trace;
+
+  const parts = [];
+  if (Array.isArray(trace.branches)) {
+    trace.branches.forEach((b, i) => {
+      const marker = i === trace.chosenIndex ? '✓ ' : '';
+      parts.push(`${marker}${b.approach}\n${b.reasoning}`);
+    });
+    if (trace.whyBest) parts.push(`Chosen because: ${trace.whyBest}`);
+  }
+  if (trace.thinking) parts.push(trace.thinking);
+  if (trace.selfReflection?.issues?.length) {
+    parts.push(`Self-check found: ${trace.selfReflection.issues.join('; ')} — revised.`);
+  }
+  if (trace.note) parts.push(trace.note);
+  return parts.length ? parts.join('\n\n') : null;
+}
+
+/** Small "🧠 Tree of thought" style chip under an assistant bubble - tap to expand/collapse the reasoning trace, if one was recorded (see src/db/database.js's reasoning_type/reasoning_trace migration). */
+function ReasoningChip({ reasoningType, reasoningTrace, theme }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!reasoningType || !REASONING_STRATEGY_LABELS[reasoningType]) return null;
+
+  const trace = parseReasoningTrace(reasoningTrace);
+  const traceText = formatReasoningTrace(trace);
+  const label = REASONING_STRATEGY_LABELS[reasoningType];
+  const glyph = REASONING_STRATEGY_GLYPHS[reasoningType] || '';
+
+  return (
+    <>
+      <TouchableOpacity
+        onPress={() => traceText && setExpanded((v) => !v)}
+        style={[styles.reasoningChip, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}
+        activeOpacity={traceText ? 0.7 : 1}
+      >
+        <Text style={[styles.reasoningChipText, { color: theme.textSecondary }]}>{glyph} {label}</Text>
+        {!!traceText && (
+          <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={13} color={theme.textTertiary} />
+        )}
+      </TouchableOpacity>
+      {expanded && !!traceText && (
+        <View style={[styles.reasoningTraceBox, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
+          <Text style={[styles.reasoningTraceText, { color: theme.textSecondary }]}>{traceText}</Text>
+        </View>
+      )}
+    </>
+  );
+}
+
+/**
+ * Human-readable one-line preview of what a non-terminal tool call would
+ * do, built from its raw args - there's no single "command" field to
+ * show the way there is for terminal calls, so this picks the most
+ * relevant identifying field per tool family instead of dumping raw JSON
+ * at the person.
+ */
+function describePendingToolArgs(toolName, args) {
+  if (!args) return null;
+  if (toolName?.startsWith('github_')) {
+    const target = [args.owner, args.repo].filter(Boolean).join('/');
+    if (toolName === 'github_commit_files' && Array.isArray(args.files)) {
+      return `${target}: commit ${args.files.length} file${args.files.length === 1 ? '' : 's'}${args.branch ? ` to ${args.branch}` : ''}`;
+    }
+    if (toolName === 'github_create_pull_request') return `${target}: open PR "${args.title || ''}" (${args.head} → ${args.base || 'main'})`;
+    return target || args.name || null;
+  }
+  if (toolName?.startsWith('fs_')) return args.path || args.name || null;
+  if (toolName?.startsWith('pdf_') || toolName?.startsWith('docx_') || toolName?.startsWith('xlsx_') || toolName?.startsWith('pptx_') || toolName === 'csv_create') {
+    return args.path || args.fileName || args.title || null;
+  }
+  return null;
+}
+
+function PendingToolConfirmCard({ pendingConfirmation, onApprove, onDismiss, theme }) {
+  const [busy, setBusy] = useState(false);
+  const parsed = parsePendingConfirmation(pendingConfirmation);
+  if (!parsed?.toolName) return null;
+
+  const isTerminal = parsed.toolName === 'terminal_pc_run_command' || parsed.toolName === 'terminal_termux_run_command';
+  const detail = isTerminal ? parsed.args?.command : describePendingToolArgs(parsed.toolName, parsed.args);
+
+  const handleApprove = async () => {
+    setBusy(true);
+    await onApprove();
+    setBusy(false);
+  };
+
+  return (
+    <View style={[styles.confirmCard, { backgroundColor: theme.dangerSoft, borderColor: theme.dangerBorder }]}>
+      <View style={styles.confirmCardHeader}>
+        <Ionicons name="warning-outline" size={15} color={theme.dangerText} />
+        <Text style={[styles.confirmCardTitle, { color: theme.dangerText }]}>Needs your approval</Text>
+      </View>
+      <Text style={[styles.confirmCardReason, { color: theme.textSecondary }]}>
+        {parsed.reason || 'This action is irreversible or makes a change and needs confirmation.'}
+      </Text>
+      {!!detail && (
+        <View style={[styles.confirmCardCommandBox, { borderColor: theme.dangerBorder }]}>
+          <Text style={[styles.confirmCardCommandText, { color: theme.textPrimary }]} numberOfLines={4}>
+            {detail}
+          </Text>
+        </View>
+      )}
+      {isTerminal && (
+        <Text style={[styles.confirmCardBackend, { color: theme.textTertiary }]}>
+          Would run on: {parsed.toolName === 'terminal_pc_run_command' ? 'PC' : 'Termux'}
+        </Text>
+      )}
+      <View style={styles.confirmCardActions}>
+        <TouchableOpacity
+          style={[styles.confirmCardBtn, { borderColor: theme.border }]}
+          onPress={onDismiss}
+          disabled={busy}
+        >
+          <Text style={[styles.confirmCardBtnText, { color: theme.textSecondary }]}>Dismiss</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.confirmCardBtn, styles.confirmCardApproveBtn, { backgroundColor: theme.dangerText }]}
+          onPress={handleApprove}
+          disabled={busy}
+        >
+          {busy ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Text style={[styles.confirmCardBtnText, { color: '#fff' }]}>Approve{isTerminal ? ' & run' : ''}</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps, onOpenPlan, onApproveCommand, onDismissCommand }) {
   const isUser = message.role === 'user';
   const textColor = isUser ? theme.bubbleUserText : theme.bubbleAssistantText;
   const bubbleRef = useRef(null);
@@ -118,6 +286,58 @@ function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps
           </View>
         </TouchableOpacity>
 
+        {/* Set only on the one reply that came from the hierarchical
+            planning system (src/services/brain/backendBrain.js's
+            runHierarchicalPlan) - opens PlanScreen.js at this plan so the
+            person can see/approve/track the actual steps instead of just
+            reading the chat summary. See src/db/database.js's messages
+            migration comment for plan_id. */}
+        {!isUser && !message.is_error && !!message.plan_id && (
+          <TouchableOpacity
+            onPress={() => onOpenPlan?.(message.plan_id)}
+            style={[styles.viewPlanChip, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="list-outline" size={14} color={theme.textPrimary} />
+            <Text style={[styles.viewPlanChipText, { color: theme.textPrimary }]}>View Plan</Text>
+            <Ionicons name="chevron-forward" size={14} color={theme.textTertiary} />
+          </TouchableOpacity>
+        )}
+
+        {/* Set only on a reply that came from a time_get_current tool
+            call (src/services/toolOrchestrator.js) - renders a live,
+            second-by-second digital + analog clock instead of a static
+            time the person read once and which is already stale. See
+            src/db/database.js's messages migration comment for
+            clock_data. */}
+        {!isUser && !message.is_error && !!message.clock_data && (() => {
+          const clock = parseClockData(message.clock_data);
+          return clock ? (
+            <ClockWidget timezone={clock.timezone} label={clock.label} theme={theme} />
+          ) : null;
+        })()}
+
+        {!isUser && !message.is_error && !!message.reasoning_type && (
+          <ReasoningChip reasoningType={message.reasoning_type} reasoningTrace={message.reasoning_trace} theme={theme} />
+        )}
+
+        {/* Set on a reply where ANY confirmable tool call was refused
+            (a RISKY terminal command per commandSafety.js, or a
+            WRITE_TOOL/DESTRUCTIVE_TOOL - GitHub, filesystem, PDF, Office -
+            in 'default'/'acceptEdits' mode per permissionModes.js) - the
+            flat tool loop's human-in-the-loop gate (see
+            SYSTEM_COMPONENTS.md / HARDENING_NOTES.md). Approve re-invokes
+            the exact call (terminal commands with confirmed: true; every
+            other tool directly); Dismiss just clears it. */}
+        {!isUser && !message.is_error && !!message.pending_confirmation && (
+          <PendingToolConfirmCard
+            pendingConfirmation={message.pending_confirmation}
+            onApprove={() => onApproveCommand?.(message.id)}
+            onDismiss={() => onDismissCommand?.(message.id)}
+            theme={theme}
+          />
+        )}
+
         {/* Always-visible inline action row under assistant replies (not
             errors - regenerating/liking/reading a plain error message
             doesn't make sense). See MessageActions.js. */}
@@ -145,41 +365,46 @@ function getGreeting() {
  * raw backend detail string (which is deliberately verbose/technical -
  * useful for debugging, not for a live progress UI).
  */
-function formatBrowsingStepLabel(step) {
-  if (!step) return 'Browsing…';
+function formatBrowsingStepLabel(stepInfo) {
+  if (!stepInfo?.action) return 'Browsing…';
+  const { action } = stepInfo;
 
-  if (step.kind === 'tool_call') {
-    const toolName = (step.detail || '').split('(')[0];
-    const urlMatch = step.detail.match(/"url":\s*"([^"]+)"/);
-    const host = urlMatch ? urlMatch[1].replace(/^https?:\/\//, '').split('/')[0] : null;
-
-    switch (toolName) {
-      case 'search': return 'Searching…';
-      case 'open_url': return host ? `Opening ${host}…` : 'Opening page…';
-      case 'click': return 'Clicking…';
-      case 'type_text': return 'Typing…';
-      case 'scroll': return 'Scrolling…';
-      case 'screenshot': return 'Taking a screenshot…';
-      case 'download_file': return 'Downloading file…';
-      case 'go_back': return 'Going back…';
-      default: return 'Browsing…';
+  switch (action.action) {
+    case 'navigate': {
+      try {
+        return `Opening ${new URL(action.url).hostname.replace('www.', '')}…`;
+      } catch (e) {
+        return 'Opening page…';
+      }
     }
+    case 'click': return 'Clicking…';
+    case 'fill': return 'Typing…';
+    case 'selectOption': return 'Selecting an option…';
+    case 'setChecked': return 'Toggling a checkbox…';
+    case 'submitForm': return 'Submitting…';
+    case 'scrollTo': return 'Scrolling…';
+    case 'waitForSelector': return 'Waiting for the page…';
+    case 'extractPageText': return 'Reading the page…';
+    case 'extractTables': return 'Reading a table…';
+    case 'newTab': return 'Opening a new tab…';
+    case 'switchTab': return 'Switching tabs…';
+    case 'closeTab': return 'Closing a tab…';
+    case 'goBack': return 'Going back…';
+    case 'download': return 'Downloading a file…';
+    case 'needsHuman': return 'Needs your input…';
+    case 'finish': return 'Wrapping up…';
+    default: return 'Browsing…';
   }
-
-  if (step.kind === 'thinking') return 'Reviewing results…';
-  if (step.kind === 'error') return 'Retrying…';
-  if (step.kind === 'tool_result') return 'Reading page…';
-
-  return 'Browsing…';
 }
 
-export default function ChatScreen({ onOpenSidebar, userName = 'there' }) {
+export default function ChatScreen({ onOpenSidebar, onOpenPlan, userName = 'there' }) {
   const theme = useTheme();
   const {
     messages, isSending, error,
-    browsingSteps, browsingScreenshot,
+    browsingSteps, planProgress, planSteps, streamingText,
     sendMessage, clearError, editMessage,
     regenerateMessage, setFeedback,
+    approvePendingToolCall, dismissPendingConfirmation,
   } = useChatStore();
   const { preferences, loadPreferences, setBrowserAccessEnabled } = usePreferencesStore();
 
@@ -386,6 +611,9 @@ export default function ChatScreen({ onOpenSidebar, userName = 'there' }) {
             theme={theme}
             onLongPress={handleBubbleLongPress}
             onImagePress={setViewerImageUri}
+            onOpenPlan={onOpenPlan}
+            onApproveCommand={approvePendingToolCall}
+            onDismissCommand={dismissPendingConfirmation}
             actionsProps={{
               onCopyToast: (text) => toastRef.current?.show(text),
               onLike: handleLikeMessage,
@@ -408,17 +636,37 @@ export default function ChatScreen({ onOpenSidebar, userName = 'there' }) {
 
       {isSending && (
         <View style={styles.typingIndicator}>
-          {browsingSteps.length > 0 ? (
+          {streamingText ? (
+            // The CHAT route's reply streaming in token-by-token (see
+            // chatStore.js's onToken / backendClient.js's sendMessage).
+            // Unlike the step-label branches below this shows the actual
+            // in-progress answer text, so no numberOfLines truncation.
             <View style={styles.browsingProgress}>
-              {browsingScreenshot ? (
-                <Image
-                  source={{ uri: `data:image/jpeg;base64,${browsingScreenshot}` }}
-                  style={styles.browsingScreenshot}
-                  resizeMode="cover"
-                />
-              ) : (
-                <ActivityIndicator size="small" color={theme.textTertiary} />
-              )}
+              <Text style={[styles.typingText, { color: theme.textPrimary }]}>
+                {streamingText}
+              </Text>
+            </View>
+          ) : planSteps.length > 0 || planProgress ? (
+            // Live hierarchical-plan progress - a real checklist instead
+            // of a bare spinner while a plan builds (planProgress) or runs
+            // (planSteps). Previously onPlanProgress/onPlanStep were wired
+            // through orchestrator.js with no handler on the chatStore end,
+            // so this branch never had anything to show - see
+            // SYSTEM_COMPONENTS.md's state-management section.
+            <View style={styles.browsingProgress}>
+              <ActivityIndicator size="small" color={theme.textTertiary} />
+              <Text
+                style={[styles.typingText, { color: theme.textTertiary }]}
+                numberOfLines={1}
+              >
+                {planSteps.length > 0
+                  ? `✓ ${planSteps.length} step${planSteps.length === 1 ? '' : 's'} · ${planSteps[planSteps.length - 1]}`
+                  : planProgress}
+              </Text>
+            </View>
+          ) : browsingSteps.length > 0 ? (
+            <View style={styles.browsingProgress}>
+              <ActivityIndicator size="small" color={theme.textTertiary} />
               <Text
                 style={[styles.typingText, { color: theme.textTertiary }]}
                 numberOfLines={1}
@@ -676,6 +924,103 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     opacity: 0.6,
   },
+  viewPlanChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    marginTop: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  viewPlanChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reasoningChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    marginTop: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  reasoningChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reasoningTraceBox: {
+    marginTop: 6,
+    alignSelf: 'stretch',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  reasoningTraceText: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  confirmCard: {
+    marginTop: 8,
+    alignSelf: 'stretch',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  confirmCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  confirmCardTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  confirmCardReason: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 6,
+  },
+  confirmCardCommandBox: {
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  confirmCardCommandText: {
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  confirmCardBackend: {
+    fontSize: 11,
+    marginTop: 6,
+    fontWeight: '600',
+  },
+  confirmCardActions: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 10,
+  },
+  confirmCardBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmCardApproveBtn: {
+    borderWidth: 0,
+  },
+  confirmCardBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
   switchChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -714,11 +1059,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-  },
-  browsingScreenshot: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
   },
   attachmentPreview: {
     flexDirection: 'row',

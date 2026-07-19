@@ -1,4 +1,3 @@
-import 'react-native-url-polyfill/auto'; // required by @supabase/supabase-js on React Native - must load first
 import { registerRootComponent } from 'expo';
 
 import App from './App';

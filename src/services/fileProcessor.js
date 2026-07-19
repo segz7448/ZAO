@@ -7,16 +7,41 @@
  * matching the same contract as the AI orchestrator (utils/orchestrator.js).
  */
 
+import * as FileSystem from 'expo-file-system';
 import { categorizeFile, FILE_CATEGORY, getCategoryLabel, isPptx } from './fileTypes';
 import { extractPlainText, extractCsv } from './textExtraction';
 import { extractZipContents } from './zipHandler';
 import { extractPdfText } from '../files/pdfExtractor';
 import { extractDocxText } from '../files/officeExtractors';
+import { runOcrExtraction } from './backend/backendClient';
+
+/**
+ * Runs OCR (free/open-source Tesseract + PyMuPDF, on the PC backend - see
+ * server/ocr.js) on a file and returns plain extracted text, or null if
+ * OCR wasn't possible for any reason (backend unreachable, no text found,
+ * OCR dependencies not installed on the PC, etc). Never throws - OCR is
+ * always a best-effort fallback, not something that should break file
+ * attachment if it fails.
+ */
+async function attemptOcr(uri, name) {
+  try {
+    const base64Data = await FileSystem.readAsStringAsync(uri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const result = await runOcrExtraction(base64Data, name);
+    return result.success && result.data?.text ? result.data.text : null;
+  } catch (err) {
+    console.error('[FileProcessor] OCR attempt failed:', err);
+    return null;
+  }
+}
 
 /**
  * @param {object} file - { uri, name, mimeType, size }
- * @param {string} [userMessageText] - unused for images now (vision removed); kept in the
- * signature so callers don't need to change how they invoke this.
+ * @param {string} [userMessageText] - unused; there's no vision model so an
+ * image can't be answered about contextually, and every other category
+ * extracts its own text regardless of what the person typed alongside it.
+ * Kept in the signature so callers don't need to change how they invoke this.
  * @returns {Promise<{
  *   success: boolean,
  *   category: string,
@@ -48,10 +73,29 @@ export async function processAttachedFile(file, userMessageText = '') {
 
     switch (category) {
       case FILE_CATEGORY.IMAGE:
-        return processImage(uri, userMessageText);
+        return processImage(uri, name);
 
       case FILE_CATEGORY.PDF: {
         const result = await extractPdfText(uri);
+
+        // The local extractor is pattern-matching, not a real PDF parser -
+        // it can't read scanned/image-based PDFs at all (result.success:
+        // false) and flags a low text-to-filesize ratio as a warning
+        // (likely partially scanned). Either case is exactly what OCR is
+        // for, so fall back to it rather than surfacing a dead end.
+        if (!result.success || result.warning) {
+          const ocrText = await attemptOcr(uri, name);
+          if (ocrText) {
+            return {
+              success: true,
+              category, categoryLabel, isImage: false,
+              text: result.success ? `${result.text}\n\n${ocrText}` : ocrText,
+              truncated: false,
+              error: null,
+            };
+          }
+        }
+
         return {
           success: result.success,
           category, categoryLabel, isImage: false,
@@ -132,18 +176,23 @@ export async function processAttachedFile(file, userMessageText = '') {
 
 /**
  * Image handling: there's no vision model in ZAO (Gemini removed along
- * with every other cloud provider) - an attached image can't be "read" by
- * the AI. It still attaches and displays fine as a chat bubble though
- * (see ChatScreen.js / chatStore.js's copyAttachmentLocally) - this just
- * signals to chatStore that no text extraction happened, so it can attach
- * the image without trying to summarize its contents.
+ * with every other cloud provider), so the model can't "see" the image
+ * itself - only text that OCR (server-side, on the PC backend - see
+ * server/ocr.js) can pull out of it. The image still attaches and
+ * displays fine as a chat bubble regardless (see ChatScreen.js /
+ * chatStore.js's copyAttachmentLocally) - OCR is strictly best-effort on
+ * top of that: a screenshot of a document or a photo of a whiteboard gets
+ * its text extracted, a photo of a sunset just attaches with no text,
+ * same as before.
  */
-async function processImage() {
+async function processImage(uri, name) {
   const categoryLabel = getCategoryLabel(FILE_CATEGORY.IMAGE);
+  const ocrText = await attemptOcr(uri, name);
   return {
     success: true,
     category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true,
-    text: null, truncated: false,
+    text: ocrText,
+    truncated: false,
     error: null,
   };
 }
