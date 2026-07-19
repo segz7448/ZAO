@@ -1,0 +1,39 @@
+name: CI
+
+# Runs the test suite on every push and PR against main - the missing
+# safety net called out in review: without this, a silent bug in
+# planExecutor.js, commandSafety.js, or permissionModes.js (the
+# state-machine-heavy planning/terminal-safety code) could ship
+# unnoticed. Keep this fast and mechanical (install, test) - it's not
+# the place for deploy or release logic.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run test suite
+        run: npm run test:ci
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
