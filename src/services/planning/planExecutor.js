@@ -141,6 +141,20 @@ async function runStepTool(step, planId, { agentSession = null } = {}) {
     args = { path: step.target, target: step.target };
   }
 
+  // fs_create_file with no content isn't a tool-call bug to retry - it's
+  // a planning gap (the model never generated the file's text). Retrying
+  // the identical call just reproduces the same native "undefined" crash
+  // every time, so fail this immediately with a clear, actionable error
+  // instead of looping through recoveryPlanner.js on a call that can
+  // never succeed as-is.
+  if (resolvedToolName === 'fs_create_file' && typeof args.content !== 'string') {
+    const errorMessage = `This step was supposed to create "${step.target || 'a file'}" but no file content was generated for it. Re-run the request and ask ZAO to write the file directly in chat instead of through a plan.`;
+    const actionId = uuidv4();
+    await startStepAction(actionId, { stepId: step.id, planId, toolName: resolvedToolName, label: step.description, input: args });
+    await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    return { success: false, error: errorMessage, noRetry: true };
+  }
+
   // ---- Tier 4 of the trace model: log the REAL tool-call attempt ----
   // Logged BEFORE the call runs (not after) so a hang or thrown
   // exception still leaves a 'running' row behind rather than no record
@@ -399,115 +413,13 @@ export async function runExecutionPlan(planId, options = {}) {
  */
 async function handleStepFailure(plan, step, result, { onStep }) {
   const planId = plan.id;
+
+  if (result.noRetry) {
+    await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: result.error });
+    onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: result.error });
+    return 'ask_person';
+  }
+
   const previousAttempts = []; // recoveryPlanner reads retry_count directly off the step; a fuller implementation would also fetch getRecoveryAttempts(step.id) here for richer context
   const hasDependents = (plan.steps || []).some((s) => {
-    const deps = new Set([s.depends_on_step_id, ...((s.depends_on_step_ids || '').split(',').filter(Boolean))]);
-    return deps.has(step.id) && s.status === STEP_STATUS.PENDING;
-  });
-
-  const stepForRecovery = { ...step, error_message: result.error, hasDependents };
-  const decision = await planRecovery(stepForRecovery, { previousAttempts, isRisky: !!step.is_risky });
-
-  // Log this decision's reasoning as a chain LINK between the tool call
-  // that just failed and whatever happens next (another tool call,
-  // a skip, a pause) - this is what makes a step's trace a connected
-  // chain (tool_call -> reasoning -> tool_call -> ...) rather than a
-  // flat list of unrelated attempts. See plan_step_actions' schema
-  // comment in database.js.
-  await logStepReasoning(uuidv4(), { stepId: step.id, planId, reasoningText: decision.reasoning });
-
-  const attemptRecord = buildRecoveryAttemptRecord(planId, step.id, (step.retry_count || 0) + 1, decision);
-  await insertRecoveryAttempt(attemptRecord);
-
-  switch (decision.strategy) {
-    case RECOVERY_STRATEGIES.RETRY: {
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, retryCount: (step.retry_count || 0) + 1, errorMessage: null });
-      await resolveRecoveryAttempt(attemptRecord.id, 'succeeded');
-      return 'retried';
-    }
-    case RECOVERY_STRATEGIES.RETRY_WITH_BACKOFF: {
-      if (decision.waitMs) await sleep(decision.waitMs);
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, retryCount: (step.retry_count || 0) + 1, errorMessage: null });
-      await resolveRecoveryAttempt(attemptRecord.id, 'succeeded');
-      return 'retried';
-    }
-    case RECOVERY_STRATEGIES.ALTERNATE_APPROACH: {
-      // The alternate description is stored as the step's new error-free
-      // note and the step is reset to pending with an incremented retry
-      // count - a fuller implementation could re-run executionPlanner.js
-      // for just this one step with the alternate description as extra
-      // context; kept simple here so recovery always makes forward
-      // progress without another full planning round-trip.
-      await updatePlanStep(step.id, planId, {
-        status: STEP_STATUS.PENDING,
-        retryCount: (step.retry_count || 0) + 1,
-        errorMessage: null,
-        result: { note: `Retrying with alternate approach: ${decision.alternateAction?.description || 'see recovery log'}` },
-      });
-      await resolveRecoveryAttempt(attemptRecord.id, 'succeeded');
-      return 'retried';
-    }
-    case RECOVERY_STRATEGIES.SKIP_AND_CONTINUE: {
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED, errorMessage: result.error });
-      await resolveRecoveryAttempt(attemptRecord.id, 'succeeded');
-      onStep?.(`Skipped: ${step.description} (${decision.reasoning})`);
-      return 'skipped';
-    }
-    case RECOVERY_STRATEGIES.ABORT_PLAN: {
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.FAILED, errorMessage: result.error });
-      await resolveRecoveryAttempt(attemptRecord.id, 'failed');
-      return 'abort';
-    }
-    case RECOVERY_STRATEGIES.ASK_PERSON:
-    default: {
-      await resolveRecoveryAttempt(attemptRecord.id, 'abandoned');
-      return 'ask_person';
-    }
-  }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Approves a step that's awaiting_approval (either because it was risky,
- * or because recovery escalated to ask_person) and resumes the executor
- * loop for its plan. PlanScreen.js's "Approve & run" button calls
- * through planStore.js to this.
- */
-export async function approveStepAndResume(step, planId, options = {}) {
-  await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, errorMessage: null });
-  return runExecutionPlan(planId, options);
-}
-
-/** Rejects/skips an awaiting-approval step and resumes the loop - PlanScreen.js's "Skip this step" button. */
-export async function rejectStepAndResume(step, planId, options = {}) {
-  await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED });
-  return runExecutionPlan(planId, options);
-}
-
-/**
- * Accepts a checkpoint suggestion: resets checkpointBalancer.js's
- * pressure clock (last_checkpoint_at -> now) and resumes execution.
- * PlanScreen.js's "Mark checkpoint & continue" button - use this after
- * the person has actually verified/tested/zipped up what's been built
- * so far, same as image 4's real "Want me to zip this up?" moment.
- */
-export async function acceptCheckpointAndResume(planId, options = {}) {
-  await resolveCheckpointSuggestion(planId, 'accepted');
-  return runExecutionPlan(planId, options);
-}
-
-/**
- * Dismisses a checkpoint suggestion without resetting the pressure
- * clock - "not now, keep going" rather than "already checked". The same
- * accumulated (and growing) pressure will very likely trigger another
- * suggestion soon if the person keeps deferring, same as a person
- * ignoring an agent's "should we pause here?" and the agent noting it
- * again a few steps later rather than never asking again.
- */
-export async function dismissCheckpointAndResume(planId, options = {}) {
-  await resolveCheckpointSuggestion(planId, 'dismissed');
-  return runExecutionPlan(planId, options);
-}
+  

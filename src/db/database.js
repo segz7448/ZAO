@@ -678,6 +678,40 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_edit_checkpoints_created
         ON edit_checkpoints (created_at DESC);
 
+      -- Folder checkpoints - one BATCH per destructive/overwriting
+      -- folder-level operation (fs_delete on a directory,
+      -- fs_replace_folder), independent of edit_checkpoints (which is
+      -- strictly per-file). folder_checkpoints is the batch header;
+      -- folder_checkpoint_entries has one row per file that existed
+      -- under root_path at snapshot time, each with its own base64
+      -- content, so the whole folder can be restored atomically -
+      -- "delete this folder and go back to how it looked before" -
+      -- rather than one file at a time.
+      CREATE TABLE IF NOT EXISTS folder_checkpoints (
+        id TEXT PRIMARY KEY NOT NULL,
+        conversation_id TEXT,
+        root_path TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('delete', 'replace')),
+        file_count INTEGER NOT NULL DEFAULT 0,
+        rewound INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_folder_checkpoints_created
+        ON folder_checkpoints (created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS folder_checkpoint_entries (
+        id TEXT PRIMARY KEY NOT NULL,
+        batch_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        content_b64 TEXT,
+        is_dir INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (batch_id) REFERENCES folder_checkpoints(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_folder_checkpoint_entries_batch
+        ON folder_checkpoint_entries (batch_id);
+
       -- Hooks - lifecycle interception, matching Claude Code's
       -- PreToolUse/PostToolUse/SessionStart shape. 'command' is a real
       -- shell command run through the terminal tools ZAO already has
@@ -1563,7 +1597,7 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
         const value = (key === 'browser_access_enabled' || key === 'memory_enabled') ? (patch[key] ? 1 : 0) : patch[key];
@@ -2739,6 +2773,74 @@ export async function markCheckpointsRewound(path, fromCreatedAt) {
     return { success: true, error: null };
   } catch (err) {
     console.error('[DB] markCheckpointsRewound failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR' };
+  }
+}
+
+// ---------- Folder checkpoints (batch, whole-directory) ----------
+// Mirrors edit_checkpoints' shape/conventions above, but one row per
+// batch (folder_checkpoints) plus one row per file swept into it
+// (folder_checkpoint_entries) - see checkpointManager.snapshotFolder()
+// and filesystemTool.rewindFolderCheckpoint() for how these get written
+// and restored.
+
+export async function recordFolderCheckpoint({ id, conversationId = null, rootPath, operation, entries }) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED' };
+    const now = Date.now();
+    await db.runAsync(
+      `INSERT INTO folder_checkpoints (id, conversation_id, root_path, operation, file_count, rewound, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      [id, conversationId, rootPath, operation, entries.length, now]
+    );
+    for (const entry of entries) {
+      await db.runAsync(
+        `INSERT INTO folder_checkpoint_entries (id, batch_id, relative_path, content_b64, is_dir) VALUES (?, ?, ?, ?, ?)`,
+        [`${id}_${entry.relativePath}`.slice(0, 500), id, entry.relativePath, entry.contentB64 || null, entry.isDir ? 1 : 0]
+      );
+    }
+    return { success: true, error: null };
+  } catch (err) {
+    console.error('[DB] recordFolderCheckpoint failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR' };
+  }
+}
+
+/** Newest folder-checkpoint batches - the "restore whole folder" list Settings > Checkpoints reads. */
+export async function getRecentFolderCheckpoints(limit = 20) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: [] };
+    const rows = await db.getAllAsync(`SELECT * FROM folder_checkpoints WHERE rewound = 0 ORDER BY created_at DESC LIMIT ?`, [limit]);
+    return { success: true, data: rows || [], error: null };
+  } catch (err) {
+    console.error('[DB] getRecentFolderCheckpoints failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: [] };
+  }
+}
+
+export async function getFolderCheckpoint(id) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: null };
+    const batch = await db.getFirstAsync(`SELECT * FROM folder_checkpoints WHERE id = ?`, [id]);
+    if (!batch) return { success: true, data: null, error: null };
+    const entries = await db.getAllAsync(`SELECT * FROM folder_checkpoint_entries WHERE batch_id = ?`, [id]);
+    return { success: true, data: { ...batch, entries: entries || [] }, error: null };
+  } catch (err) {
+    console.error('[DB] getFolderCheckpoint failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: null };
+  }
+}
+
+export async function markFolderCheckpointRewound(id) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED' };
+    await db.runAsync(`UPDATE folder_checkpoints SET rewound = 1 WHERE id = ?`, [id]);
+    return { success: true, error: null };
+  } catch (err) {
+    console.error('[DB] markFolderCheckpointRewound failed:', err);
     return { success: false, error: err?.message || 'UNKNOWN_ERROR' };
   }
 }

@@ -34,6 +34,8 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
     humanReason = null,
     fullScreen = false,
     frameBase64 = null,
+    connected = false,
+    connectionError = null,
     onExpand = () => {},
     onResumeAfterHuman = () => {},
   } = props;
@@ -74,7 +76,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
   if (fullScreen) {
     return (
       <View style={StyleSheet.absoluteFill}>
-        <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={awaitingHuman} />
+        <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={awaitingHuman} connected={connected} connectionError={connectionError} isRunning={isRunning} />
         {awaitingHuman && (
           <ManualControlBar
             reason={humanReason}
@@ -108,7 +110,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
 
       {!minimized && (
         <View style={styles.viewportWrap}>
-          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} />
+          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} connected={connected} connectionError={connectionError} isRunning={isRunning} />
         </View>
       )}
     </Animated.View>

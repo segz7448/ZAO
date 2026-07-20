@@ -48,6 +48,7 @@ import * as xlsxTool from './office/xlsxTool';
 import * as pptxTool from './office/pptxTool';
 import * as pcTerminalTool from './terminal/pcTerminalTool';
 import * as termuxTerminalTool from './terminal/termuxTerminalTool';
+import * as pcFilePullTool from './terminal/pcFilePullTool';
 import { checkTerminalStatus } from './terminal/terminalRouter';
 import * as webSearchTool from './search/webSearchTool';
 import * as timeTool from './time/timeTool';
@@ -243,11 +244,35 @@ const FILESYSTEM_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'fs_delete',
-      description: 'Deletes a file or folder on the device.',
+      description: "Deletes a file or folder on the device. Deleting a FOLDER automatically snapshots every file under it first (a 'folder checkpoint') and returns a folderCheckpointId in the result - pass that id to fs_rewind_folder_checkpoint later to restore the whole folder exactly as it was, in one call.",
       parameters: {
         type: 'object',
         properties: { path: { type: 'string' } },
         required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fs_rewind_folder_checkpoint',
+      description: "Restores an entire folder from a folder checkpoint - undoes a folder delete (or an in-progress rebuild/replace of a folder) by recreating every file exactly as it was at that checkpoint. This is the 'delete the folder and go back to the last checkpoint' operation: pass the folderCheckpointId returned by the fs_delete call that removed it (or from fs_list_folder_checkpoints if it's from an earlier turn). Overwrites anything currently at those paths, so use the newest relevant checkpoint unless told otherwise.",
+      parameters: {
+        type: 'object',
+        properties: { folderCheckpointId: { type: 'string' } },
+        required: ['folderCheckpointId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fs_list_folder_checkpoints',
+      description: 'Lists recent folder checkpoints (batch snapshots taken automatically before a folder delete), newest first - each with its id, root path, file count, and when it was taken. Use this to find the right folderCheckpointId to pass to fs_rewind_folder_checkpoint when it was not returned earlier in this conversation.',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'number', description: 'Max results, default 20.' } },
+        required: [],
       },
     },
   },
@@ -591,28 +616,37 @@ const OFFICE_TOOL_SCHEMAS = [
   },
 ];
 
-// Two terminal tools, giving the model real routing choice rather than a
-// single fixed backend:
-//   - terminal_pc_run_command: full system access on the person's PC
-//     (Git Bash/cmd/PowerShell toolchain, APK builds, Docker, AI
-//     inference, video processing, Android emulator, Visual Studio) via
-//     the PC backend's /terminal/run route (see server/terminal.js and
-//     src/services/terminal/pcTerminalTool.js). Requires the PC backend to
-//     be reachable (LAN or Remote/Cloudflare tunnel).
-//   - terminal_termux_run_command: lightweight, always-on-device via
-//     Termux's RUN_COMMAND (see src/services/terminal/termuxTerminalTool.js).
+// Two terminal tools, but NOT a symmetric choice - PC is the full,
+// primary terminal (cmd/PowerShell/Git Bash/Python, auto-selected per
+// command by the PC backend itself - see chooseShell() in
+// server/terminal.js); Termux is fallback-only, used automatically when
+// the PC backend is unreachable, or reachable but the PC itself has no
+// internet for a command that needs it:
+//   - terminal_pc_run_command: the full terminal. One command in, the
+//     PC backend (server/terminal.js) figures out on its own whether it
+//     needs cmd.exe, powershell.exe, Git Bash, or a raw Python
+//     interpreter, and runs it there - Docker, APK builds, Android
+//     emulator, Visual Studio, AI inference, video processing, unix-style
+//     pipelines, PowerShell cmdlets, all of it. Pass `shell` explicitly
+//     only to override a wrong auto-detected guess. Requires the PC
+//     backend to be reachable (LAN or Remote/Cloudflare tunnel).
+//   - terminal_termux_run_command: on-device fallback via Termux's
+//     RUN_COMMAND (see src/services/terminal/termuxTerminalTool.js) -
+//     use it ONLY when terminal_check_status says the PC is unreachable,
+//     or says the PC has no internet and this specific command needs
+//     internet (npm/pip install, git pull/clone/push, curl, downloads).
 //     Requires the one-time Termux setup (allow-external-apps + accepting
 //     Android's RUN_COMMAND permission prompt once).
 //   - terminal_check_status: cheap status check the model should call
-//     before deciding which of the two to use, since PC reachability and
-//     PC internet access can both change between messages (see
+//     before running anything on Termux, since PC reachability and PC
+//     internet access can both change between messages (see
 //     terminalRouter.js).
 const TERMINAL_TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
       name: 'terminal_check_status',
-      description: "Checks whether the PC backend is currently reachable and whether the PC itself has internet access right now, plus a plain-language routing recommendation. Call this BEFORE running a shell command whenever you're not already certain which terminal (PC or Termux) is the right choice for the task - status can change between messages.",
+      description: "Checks whether the PC backend is currently reachable and whether the PC itself has internet access right now, plus a plain-language routing recommendation. Call this BEFORE falling back to terminal_termux_run_command, since PC status can change between messages - the default assumption should always be that terminal_pc_run_command is available.",
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -620,7 +654,26 @@ const TERMINAL_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'terminal_pc_run_command',
-      description: 'Runs a real shell command via cmd.exe on the person\'s PC - full system access including Git Bash/PowerShell-equivalent tooling, multiple Python versions (python39, python311, etc.), APK builds, Docker, Android emulator, Visual Studio builds, video processing, and AI inference. Best for heavy/resource-intensive tasks. Requires the PC backend to be reachable - if it isn\'t, this returns a clear connection error instead of pretending the command ran. Use terminal_check_status first if unsure.',
+      description: "Runs a real shell command on the person's PC - the full terminal. The PC backend auto-detects which shell the command actually needs (cmd.exe, PowerShell, Git Bash, or a raw Python interpreter) and runs it there, so just send the command as you normally would; only set `shell` explicitly if an auto-detected run used the wrong one. This is the default/primary terminal for everything - APK builds, Docker, Android emulator, Visual Studio builds, video processing, AI inference, npm/pip installs, git operations, PowerShell cmdlets, unix-style pipelines, multiple Python versions (python39, python311, etc.). Requires the PC backend to be reachable - if it isn't, this returns a clear connection error instead of pretending the command ran; fall back to terminal_termux_run_command in that case.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          shell: {
+            type: 'string',
+            enum: ['cmd', 'powershell', 'gitbash', 'python'],
+            description: 'Optional. Only set this to force a specific shell - otherwise the PC backend auto-detects the right one for the command.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'terminal_termux_run_command',
+      description: 'Runs a real shell command directly on the phone via Termux. This is the FALLBACK terminal only - use it when terminal_check_status shows the PC backend is unreachable (everything routes here until it\'s back), or shows the PC is reachable but currently has no internet and this specific command needs internet (npm/pip install, git pull/clone/push, curl, downloads). Do not use this as a "lighter" alternative when the PC is up and online - terminal_pc_run_command handles everything in that case. Requires Termux to be installed with the one-time RUN_COMMAND permission granted - if not yet granted, this returns an error with the exact setup command instead of pretending the command ran. Not suited for heavy tasks (APK builds, Docker, emulators, video processing) - the phone doesn\'t have the resources.',
       parameters: {
         type: 'object',
         properties: { command: { type: 'string' } },
@@ -631,12 +684,27 @@ const TERMINAL_TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
-      name: 'terminal_termux_run_command',
-      description: 'Runs a real shell command directly on the phone via Termux - lightweight and always available on-device (doesn\'t depend on the PC backend). Best for small, fast operations: git pull, npm install, simple Python scripts, curl, ssh, small file downloads. Also the right choice when the PC backend is unreachable or the PC has no internet access. Requires Termux to be installed with the one-time RUN_COMMAND permission granted - if not yet granted, this returns an error with the exact setup command instead of pretending the command ran. Not suited for heavy tasks (APK builds, Docker, emulators, video processing) - the phone doesn\'t have the resources.',
+      name: 'pc_list_directory',
+      description: "Lists a folder on the PC (e.g. after running a build with terminal_pc_run_command) so you can see what it actually produced - node_modules, a built .apk, a bundle, etc. - before pulling a specific file down with pc_pull_file. Path is relative to the PC's configured project root; omit it to list that root. Files created by a PC command do NOT automatically appear on the phone - this is how you find them.",
       parameters: {
         type: 'object',
-        properties: { command: { type: 'string' } },
-        required: ['command'],
+        properties: { path: { type: 'string', description: 'Relative path on the PC, e.g. "android/app/build/outputs/apk/release". Omit for the root.' } },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_pull_file',
+      description: "Pulls one file from the PC and saves it into the person's phone project folder. Use this after a PC build (npm install, gradlew assembleRelease, a webpack/expo build, etc.) to get the actual output - an APK, a bundle, a zip - onto the device, since PC-side files are invisible to the phone otherwise. Use pc_list_directory first if you're not sure of the exact file name/path the build produced.",
+      parameters: {
+        type: 'object',
+        properties: {
+          pcPath: { type: 'string', description: 'Path to the file on the PC, relative to the PC project root, e.g. "android/app/build/outputs/apk/release/app-release.apk".' },
+          devicePath: { type: 'string', description: 'Where to save it on the phone, relative to the granted project folder, e.g. "builds/app-release.apk".' },
+        },
+        required: ['pcPath', 'devicePath'],
       },
     },
   },
@@ -939,6 +1007,14 @@ export const TOOL_REGISTRY = {
     run: (args) => filesystemTool.deleteEntry(args.path),
     label: (args) => `Deleted ${args.path}`,
   },
+  fs_rewind_folder_checkpoint: {
+    run: (args) => filesystemTool.rewindFolderCheckpoint(args.folderCheckpointId),
+    label: () => 'Restored folder from checkpoint',
+  },
+  fs_list_folder_checkpoints: {
+    run: (args) => filesystemTool.listFolderCheckpoints(args.limit || 20).then((data) => ({ success: true, data, error: null })),
+    label: () => 'Listed folder checkpoints',
+  },
   fs_rename: {
     run: (args) => filesystemTool.renameEntry(args.path, args.newName),
     label: (args) => `Renamed ${args.path} to ${args.newName}`,
@@ -1061,12 +1137,20 @@ export const TOOL_REGISTRY = {
     label: () => 'Checked terminal status',
   },
   terminal_pc_run_command: {
-    run: (args) => pcTerminalTool.runCommand(args.command),
+    run: (args) => pcTerminalTool.runCommand(args.command, { shell: args.shell || null }),
     label: (args) => `Ran on PC: ${args.command}`,
   },
   terminal_termux_run_command: {
     run: (args) => termuxTerminalTool.runCommand(args.command),
     label: (args) => `Ran on Termux: ${args.command}`,
+  },
+  pc_list_directory: {
+    run: (args) => pcFilePullTool.listDirectory(args.path || ''),
+    label: (args) => `Listed PC folder: ${args.path || '(root)'}`,
+  },
+  pc_pull_file: {
+    run: (args) => pcFilePullTool.pullFile(args.pcPath, args.devicePath),
+    label: (args) => `Pulled ${args.pcPath} from PC to ${args.devicePath}`,
   },
   agent_spawn_subagents: {
     // The (context, onStep) this needs comes from runToolTask's closure -
@@ -1135,6 +1219,8 @@ function eventTypeForTool(functionName) {
     fs_create_file: 'file_created',
     fs_create_folder: 'file_created',
     fs_delete: 'file_deleted',
+    fs_rewind_folder_checkpoint: 'file_modified',
+    fs_list_folder_checkpoints: 'file_browsed',
     fs_rename: 'file_modified',
     fs_move: 'file_modified',
     fs_zip: 'file_created',
@@ -1163,6 +1249,8 @@ function eventTypeForTool(functionName) {
     terminal_check_status: 'terminal_attempted',
     terminal_pc_run_command: 'terminal_attempted',
     terminal_termux_run_command: 'terminal_attempted',
+    pc_list_directory: 'file_browsed',
+    pc_pull_file: 'file_created',
     agent_spawn_subagents: 'subagent_run',
     agent_create_worktree: 'worktree_created',
     agent_list_worktrees: 'worktree_listed',
@@ -1273,7 +1361,9 @@ For "what time is it" / "what's the time in [place]" requests, call time_get_cur
 
 For any task with 3 or more distinct steps, call todo_write first to lay out the plan (one item 'in_progress', the rest 'pending'), then call it again as each step's status changes - this is how the person sees live progress instead of silence until everything finishes.
 
-Terminal has TWO backends and you choose between them: terminal_pc_run_command (full system access on the person's PC - Git Bash/cmd/PowerShell tooling, multiple Python versions, APK builds, Docker, Android emulator, Visual Studio builds, video processing, AI inference - best for anything heavy) and terminal_termux_run_command (lightweight, runs directly on the phone - git pull, quick npm install, simple scripts, curl, ssh, small downloads - always available even when the PC isn't). Call terminal_check_status first whenever you're not already confident which one fits: it tells you if the PC backend is reachable and whether the PC itself currently has internet access. If the PC is unreachable, or reachable but offline, route accordingly - use Termux for lightweight/internet-dependent work, and if a request genuinely needs something only the PC can do (a heavy build, Docker, the emulator) while the PC is down, tell the person clearly rather than attempting a workaround that won't actually work.
+Terminal defaults to the PC: terminal_pc_run_command is the full terminal - full system access, and the PC backend itself auto-detects whether a command needs cmd.exe, PowerShell, Git Bash, or a raw Python interpreter, so just send the command normally (only set `shell` explicitly to override a wrong guess). Use it for everything by default - APK builds, Docker, Android emulator, Visual Studio, video processing, AI inference, npm/pip installs, git operations, quick scripts, all of it. terminal_termux_run_command is fallback-ONLY, not a second everyday option: use it only when terminal_check_status shows the PC backend is unreachable (route everything there until it's back), or shows the PC is reachable but currently has no internet for a command that needs it (npm/pip install, git pull/clone/push, curl, downloads). Call terminal_check_status first whenever you're about to use Termux, or aren't sure the PC is reachable, since status can change between messages - but don't call it before routine PC commands when nothing suggests the PC might be down. If a request genuinely needs something only the PC can do (a heavy build, Docker, the emulator) while the PC is unreachable, tell the person clearly rather than attempting a workaround that won't actually work.
+
+The PC and the phone are separate filesystems: anything a PC command produces (npm install's node_modules, a built APK from gradlew, a webpack bundle) stays on the PC's own disk and is NOT visible on the phone automatically. After a PC build the person actually wants on their device, use pc_list_directory to find the real output path, then pc_pull_file to copy it into their phone project folder - don't tell them a build "is done and ready" if the artifact they need is still only sitting on the PC.
 
 ${permissionMode === 'plan' ? "You are currently in PLAN MODE - read-only. You can read, search, and lay out a plan (todo_write), but every tool that would create/edit/delete/run something will be refused. Explain what you WOULD do; don't attempt to actually do it yet.\n\n" : ''}${githubUsername ? `Their GitHub username is "${githubUsername}" - use this as the owner for new repos unless they specify an organization instead.` : 'No GitHub username is on file yet - ask for it if a GitHub action needs an owner and none is given in the request.'}
 
@@ -1623,7 +1713,9 @@ export async function approveAndRunPendingTool(pendingConfirmation) {
   });
 
   const result = isTerminal
-    ? await (toolName === 'terminal_pc_run_command' ? pcTerminalTool.runCommand : termuxTerminalTool.runCommand)(args.command, { confirmed: true })
+    ? await (toolName === 'terminal_pc_run_command'
+        ? pcTerminalTool.runCommand(args.command, { confirmed: true, shell: args.shell || null })
+        : termuxTerminalTool.runCommand(args.command, { confirmed: true }))
     : await toolDef.run(args);
 
   await endSpan(spanId, { status: result.success ? 'ok' : 'error', errorMessage: result.success ? null : (result.error?.message || result.error || null) });

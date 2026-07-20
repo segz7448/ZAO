@@ -44,14 +44,15 @@ Each step must specify:
 - description: plain-language description of what this step does (shown to the person as the narration line - distinct from reasoning, which is shown separately as the step's collapsed "thought process")
 - action: the specific action/tool-call name this step maps to (e.g. "fs_create_file", "github_commit_files", "terminal_run_command") - your best guess at the real tool, the executor will resolve the exact function
 - target: the file path / repo / URL / command this step acts on
+- content: REQUIRED whenever action is "fs_create_file" - the FULL, complete, working text to write into that file (real code/config/text, not a placeholder or a description of what it should contain). Omit this field entirely for every other action.
 - dependsOnStepIndex: 0-based index of another step in THIS list that must finish first, if any - omit if this step has no same-list prerequisite (it may still depend on something from an earlier task; that's handled separately)
 
-Keep each step small enough that if it fails on its own, the failure is easy to localize - don't bundle unrelated actions into one step.
+Keep each step small enough that if it fails on its own, the failure is easy to localize - don't bundle unrelated actions into one step. A step whose action is "fs_create_file" is USELESS without real content - never emit one without it.
 
 Respond with ONLY a JSON object, no markdown fences, no commentary:
 {
   "steps": [
-    { "reasoning": "...", "domain": "files", "description": "...", "action": "fs_create_file", "target": "path/to/file", "dependsOnStepIndex": null }
+    { "reasoning": "...", "domain": "files", "description": "...", "action": "fs_create_file", "target": "path/to/file", "content": "...full file text...", "dependsOnStepIndex": null }
   ]
 }`;
 
@@ -82,7 +83,7 @@ async function expandTaskToRawSteps(task) {
     ];
 
     const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
-      maxTokens: 900,
+      maxTokens: 2000,
       temperature: 0.2,
     });
 
@@ -100,6 +101,7 @@ async function expandTaskToRawSteps(task) {
         domain: normalizeDomain(s.domain),
         action: s.action || null,
         target: s.target || null,
+        content: typeof s.content === 'string' ? s.content : null,
         subtaskTitle: unit.isSubtask ? unit.title : null,
         localDependsOnIndex: Number.isInteger(s.dependsOnStepIndex) ? offset + s.dependsOnStepIndex : null,
       });

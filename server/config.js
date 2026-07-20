@@ -54,11 +54,29 @@ module.exports = {
   // a real exposure, not a theoretical one.
   DEFAULT_AUTH_TOKEN: 'change-me-to-a-real-secret',
 
-  // Default shell used by the /terminal/run route. cmd per your setup -
-  // your different Python versions are reachable as separate PATH commands
-  // (python39, python311, etc.) so no extra config is needed here for
-  // that.
+  // Default/fallback shell used by the /terminal/run route when
+  // auto-detection (see chooseShell() in terminal.js) can't tell which
+  // of cmd/powershell/gitbash a command is meant for. Your different
+  // Python versions are reachable as separate PATH commands (python39,
+  // python311, etc.) through any of these shells, so no extra config is
+  // needed for that.
   TERMINAL_SHELL: process.env.ZAO_TERMINAL_SHELL || 'cmd',
+
+  // Set to 'false' to disable auto-detection entirely and always use
+  // TERMINAL_SHELL - useful if the heuristics in chooseShell() ever
+  // guess wrong for your workflow and you'd rather pin one shell.
+  TERMINAL_AUTO_SHELL: process.env.ZAO_TERMINAL_AUTO_SHELL !== 'false',
+
+  // powershell.exe is on PATH on every Windows install, so this rarely
+  // needs changing. pwsh.exe (PowerShell 7+) works too if that's what
+  // you have installed - just override the env var.
+  POWERSHELL_BIN: process.env.ZAO_POWERSHELL_BIN || 'powershell.exe',
+
+  // Git for Windows' bash.exe is NOT on PATH by default - this is the
+  // standard install location. Override if yours is a portable/custom
+  // Git install. Bash-style commands (unix pipes, $(...), ./script.sh,
+  // export FOO=bar, chmod, etc.) get routed here automatically.
+  GIT_BASH_PATH: process.env.ZAO_GIT_BASH_PATH || 'C:\\Program Files\\Git\\bin\\bash.exe',
 
   // Working directory terminal commands run from by default.
   TERMINAL_CWD: process.env.ZAO_TERMINAL_CWD || 'C:\\Users\\User',
@@ -85,4 +103,21 @@ module.exports = {
   // more-generous budget as OCR rather than TERMINAL_TIMEOUT_MS's
   // shorter default.
   DATA_TIMEOUT_MS: Number(process.env.ZAO_DATA_TIMEOUT_MS || 180000),
+
+  // PC <-> phone file bridge (see pcFiles.js / pcFilePullTool.js). The
+  // PC and the phone are separate filesystems - anything
+  // terminal_pc_run_command creates on the PC (npm install's
+  // node_modules, a built APK, a bundle) stays on the PC until
+  // explicitly pulled over. PC_BRIDGE_ROOT is the one folder /pc-fs/list
+  // and /pc-fs/read are allowed to reach into - defaults to
+  // TERMINAL_CWD (wherever your projects live) so you don't have to set
+  // it separately, but override it if your build outputs live somewhere
+  // else entirely.
+  PC_BRIDGE_ROOT: process.env.ZAO_PC_BRIDGE_ROOT || process.env.ZAO_TERMINAL_CWD || 'C:\\Users\\User',
+
+  // Single-pull size limit for /pc-fs/read, in bytes - it's one base64
+  // JSON response, not a stream, so this keeps a huge accidental read
+  // (an unzipped node_modules, a multi-GB video) from tying up the
+  // connection. Default 200MB comfortably covers a release APK.
+  PC_BRIDGE_MAX_FILE_BYTES: Number(process.env.ZAO_PC_BRIDGE_MAX_FILE_MB || 200) * 1024 * 1024,
 };

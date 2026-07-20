@@ -42,6 +42,7 @@ const { registerTerminalRoute } = require('./terminal');
 const { registerOcrRoute } = require('./ocr');
 const { registerWebSearchRoute } = require('./webSearch');
 const { registerDataRoute } = require('./data');
+const { registerPcFilesRoute } = require('./pcFiles');
 const { registerBrowserAgentStream } = require('./browserStream');
 const { shutdownBrowser } = require('./browserAgent');
 
@@ -372,6 +373,7 @@ registerTerminalRoute(app, config, log);
 registerOcrRoute(app, config, log);
 registerWebSearchRoute(app, config, log);
 registerDataRoute(app, config, log);
+registerPcFilesRoute(app, config, log);
 
 if (config.AUTH_TOKEN === config.DEFAULT_AUTH_TOKEN) {
   log('='.repeat(70));

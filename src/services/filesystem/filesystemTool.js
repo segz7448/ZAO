@@ -300,7 +300,46 @@ async function readEntryBase64IfExists(relativePath, baseDirUri) {
 }
 
 /**
+ * Writes base64 content directly to a binary file - the counterpart to
+ * createFile() (which is UTF8 text only) for anything that's actually
+ * bytes: an APK/bundle pulled from the PC file bridge (see
+ * pcFilePullTool.js), an image, a zip, etc. Same checkpoint-before-write
+ * safety as createFile, minus the syntax-check gate (binary content
+ * can't be parsed as JS/JSON anyway).
+ *
+ * @param {string} relativePath
+ * @param {string} contentB64 - base64-encoded bytes
+ * @param {string} [mimeType]
+ */
+export async function writeBinaryFileFromBase64(relativePath, contentB64, mimeType = 'application/octet-stream') {
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  const previousContentB64 = await readEntryBase64IfExists(relativePath, baseDirUri);
+  const checkpointId = await checkpointManager.snapshot({ path: relativePath, operation: 'create', previousContentB64 });
+
+  const prepared = await getOrCreateFileUriForTools(relativePath, mimeType);
+  if (!prepared.success) return prepared;
+
+  try {
+    await FileSystem.writeAsStringAsync(prepared.data.uri, contentB64, { encoding: FileSystem.EncodingType.Base64 });
+    return { success: true, data: { path: relativePath, uri: prepared.data.uri, checkpointId }, error: null };
+  } catch (err) {
+    return { success: false, data: null, error: { message: err?.message || `Could not write ${relativePath}.` } };
+  }
+}
+
+/**
  * Deletes a file or folder at a path relative to the granted directory.
+ *
+ * Folders get a BATCH checkpoint instead of the usual per-file one: every
+ * file under the folder is snapshotted (base64 content, relative path)
+ * BEFORE anything is deleted, as one folder_checkpoints row via
+ * checkpointManager.snapshotFolder(). That's what makes "delete the
+ * latest folder and go back to the last checkpoint" one atomic call
+ * (rewindFolderCheckpoint() below) instead of restoring N separate
+ * per-file checkpoints by hand. A plain file delete is unchanged - still
+ * the lightweight per-file snapshot() path.
  */
 export async function deleteEntry(relativePath) {
   const baseDirUri = await getGrantedDirUri();
@@ -309,6 +348,30 @@ export async function deleteEntry(relativePath) {
   const entryUri = await findEntryUri(relativePath, baseDirUri);
   if (!entryUri) {
     return { success: false, data: null, error: { message: `${relativePath} does not exist.` } };
+  }
+
+  const info = await FileSystem.getInfoAsync(entryUri).catch(() => null);
+
+  if (info?.isDirectory) {
+    // Recursively collect every file under this folder, base64-encoded,
+    // before anything is touched. walkFiles() only returns files (not
+    // empty subfolders) - that's fine, since recreating a file with
+    // createIntermediateDirs rebuilds its parent folders automatically.
+    const files = await walkFiles(entryUri, relativePath);
+    const entries = [];
+    for (const file of files) {
+      const contentB64 = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 }).catch(() => null);
+      entries.push({ relativePath: file.relativePath, contentB64, isDir: false });
+    }
+
+    const folderCheckpointId = await checkpointManager.snapshotFolder({ rootPath: relativePath, operation: 'delete', entries });
+
+    try {
+      await StorageAccessFramework.deleteAsync(entryUri);
+      return { success: true, data: { path: relativePath, folderCheckpointId, fileCount: entries.length }, error: null };
+    } catch (err) {
+      return { success: false, data: null, error: { message: err?.message || `Could not delete folder ${relativePath}.` } };
+    }
   }
 
   const previousContentB64 = await readEntryBase64IfExists(relativePath, baseDirUri);
@@ -961,4 +1024,59 @@ export async function rewindToCheckpoint(checkpointId) {
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not rewind checkpoint ${checkpointId}.` } };
   }
+}
+
+/**
+ * Restores an entire folder in one shot, from a folder_checkpoints batch
+ * recorded by deleteEntry() right before a directory delete (see above).
+ * This is the "delete the latest folder and go back to the last
+ * checkpoint" operation: every file that existed under the folder gets
+ * recreated with its exact prior content, rebuilding the whole tree -
+ * not just one file.
+ *
+ * Note: this restores the files as they were AT THAT CHECKPOINT. If the
+ * folder was deleted and then something new was created at the same path
+ * afterward, this will overwrite that newer content - by design, the
+ * same "going back in time" trade-off a per-file rewind already has.
+ *
+ * @param {string} folderCheckpointId
+ */
+export async function rewindFolderCheckpoint(folderCheckpointId) {
+  const batch = await checkpointManager.getFolder(folderCheckpointId);
+  if (!batch) {
+    return { success: false, data: null, error: { message: 'Folder checkpoint not found.' } };
+  }
+
+  const baseDirUri = await getGrantedDirUri();
+  if (!baseDirUri) return requireAccessError();
+
+  const restored = [];
+  const failed = [];
+
+  for (const entry of batch.entries) {
+    if (entry.is_dir) continue; // walkFiles() never recorded bare dirs - files rebuild their own parents
+    if (entry.content_b64 == null) continue; // nothing to restore this file to
+    try {
+      const resolved = await resolveUri(entry.relative_path, baseDirUri, { createIntermediateDirs: true });
+      if (!resolved.success) { failed.push(entry.relative_path); continue; }
+      const fileUri = await StorageAccessFramework.createFileAsync(resolved.dirUri, resolved.fileName, guessMimeType(resolved.fileName));
+      await FileSystem.writeAsStringAsync(fileUri, entry.content_b64, { encoding: FileSystem.EncodingType.Base64 });
+      restored.push(entry.relative_path);
+    } catch {
+      failed.push(entry.relative_path);
+    }
+  }
+
+  await checkpointManager.markFolderRewound(folderCheckpointId);
+
+  return {
+    success: failed.length === 0,
+    data: { rootPath: batch.root_path, restoredCount: restored.length, failedCount: failed.length, failed },
+    error: failed.length ? { message: `${failed.length} file(s) could not be restored: ${failed.join(', ')}` } : null,
+  };
+}
+
+/** Newest folder-checkpoint batches, for a "restore whole folder" list in Settings > Checkpoints. */
+export async function listFolderCheckpoints(limit = 20) {
+  return checkpointManager.listRecentFolders(limit);
 }

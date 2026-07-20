@@ -3,27 +3,31 @@
  *
  * Runs REAL shell commands (npm install, pip install, gradlew
  * assembleRelease, APK builds, Docker, Visual Studio builds, etc.) on the
- * person's PC via cmd.exe - not a terminal-styled UI widget, not a fake
- * command interpreter.
+ * person's PC - not a terminal-styled UI widget, not a fake command
+ * interpreter.
  *
  * This is one of TWO terminal tools ZAO has - see also
  * termuxTerminalTool.js, which runs commands directly on the phone via
- * Termux instead.
+ * Termux instead, but ONLY as a fallback (see terminalRouter.js) - this
+ * tool is the default/primary/full terminal.
  *
- * ROLE: primary/heavy terminal. Full system access to whatever's on the
- * PC - Git Bash, cmd, PowerShell tooling, multiple Python versions, Docker,
- * Android emulator, AI inference, video processing. See terminalRouter.js
- * for how the model decides which of the two tools to use for a given
- * task, and how it automatically falls back to Termux when this one is
- * unreachable or the PC itself has no internet access.
+ * ROLE: full terminal. Full system access to whatever's on the PC - the
+ * PC backend (server/terminal.js) auto-detects which shell a given
+ * command actually needs (cmd.exe, powershell.exe, Git Bash, or a raw
+ * Python interpreter) and spawns it there, so this tool doesn't hardcode
+ * one shell - Docker, Android emulator, AI inference, video processing,
+ * multiple Python versions, unix-style pipelines, PowerShell cmdlets, all
+ * of it. See terminalRouter.js for how the model falls back to Termux
+ * only when this is unreachable or the PC itself has no internet access.
  *
  * Sends the command over HTTP to the PC backend's /terminal/run route
- * (see server/terminal.js), which runs it there via cmd.exe and returns
- * real stdout/stderr/exit code. No Termux install, no RUN_COMMAND
+ * (see server/terminal.js's chooseShell()), which auto-picks the shell,
+ * runs the command there, and returns real stdout/stderr/exit code plus
+ * which shell it used (shellUsed). No Termux install, no RUN_COMMAND
  * permission dance, no native module needed for this path - the PC
  * backend runs the command synchronously and hands back the result in one
  * HTTP response. The trade-off is the command runs on whichever PC is
- * configured in Settings > Backend Connection, using the shell/Python
+ * configured in Settings > Backend Connection, using the shells/Python
  * versions installed there, not whatever's on the phone.
  */
 
@@ -54,7 +58,7 @@ const DEFAULT_TIMEOUT_MS = 120000; // 2 minutes - generous for npm/pip installs,
  * @returns {Promise<{success, data: {stdout, stderr, exitCode}|null, error}>}
  */
 export async function runCommand(command, options = {}) {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, workingDirectory = null, confirmed = false } = options;
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, workingDirectory = null, confirmed = false, shell = null } = options;
 
   const safety = checkCommandSafety(command);
   if (safety.blocked) {
@@ -77,18 +81,19 @@ export async function runCommand(command, options = {}) {
   const result = await runTerminalCommand(command, {
     cwd: workingDirectory || undefined,
     timeoutMs,
+    shell: shell || undefined,
   });
 
   if (!result.success) {
     return { success: false, data: null, error: result.error };
   }
 
-  const { exitCode, timedOut, stdout, stderr } = result.data;
+  const { exitCode, timedOut, stdout, stderr, shellUsed } = result.data;
 
   if (timedOut) {
     return {
       success: false,
-      data: { stdout: (stdout || '').trim(), stderr: (stderr || '').trim(), exitCode },
+      data: { stdout: (stdout || '').trim(), stderr: (stderr || '').trim(), exitCode, shellUsed },
       error: { message: `Command did not finish within ${Math.round(timeoutMs / 1000)}s and was killed.`, exitCode },
     };
   }
@@ -98,9 +103,13 @@ export async function runCommand(command, options = {}) {
   // Real success/failure, with the actual output either way - a failing
   // command (missing dependency, wrong Python version, etc.) is reported
   // honestly with its real stderr, never hidden or reframed as a success.
+  // shellUsed tells the model (and you, in logs) which of
+  // cmd/powershell/gitbash/python actually ran it - useful when a
+  // command fails because the auto-detected shell guessed wrong, so the
+  // next attempt can pass an explicit `shell` override instead.
   return {
     success: succeeded,
-    data: { stdout: (stdout || '').trim(), stderr: (stderr || '').trim(), exitCode },
+    data: { stdout: (stdout || '').trim(), stderr: (stderr || '').trim(), exitCode, shellUsed },
     error: succeeded ? null : { message: (stderr || '').trim() || `Command exited with code ${exitCode}`, exitCode },
   };
 }

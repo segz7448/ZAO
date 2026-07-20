@@ -350,6 +350,7 @@ export async function runTerminalCommand(command, options = {}) {
           command,
           cwd: options.cwd,
           timeoutMs: options.timeoutMs || TERMINAL_TIMEOUT_MS,
+          shell: options.shell || undefined,
         }),
       }),
       (options.timeoutMs || TERMINAL_TIMEOUT_MS) + 10000, // small buffer over the server's own timeout
@@ -383,7 +384,82 @@ export async function runTerminalCommand(command, options = {}) {
   }
 }
 
-const WEB_SEARCH_TIMEOUT_MS = 20 * 1000; // small buffer over the server's own SEARCH_TIMEOUT_MS (server/webSearch.js)
+/**
+ * Lists a folder on the PC via the backend's /pc-fs/list route - the
+ * "what did that npm install / build actually produce" step before
+ * pulling a specific file down with readPcFile(). Path is relative to
+ * server/config.js's PC_BRIDGE_ROOT.
+ * @param {string} [relativePath]
+ * @returns {Promise<{success, data: {path, entries: Array<{name, isDir, size}>}|null, error}>}
+ */
+export async function listPcDirectory(relativePath = '') {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/pc-fs/list?path=${encodeURIComponent(relativePath)}`, { headers: authHeaders(token) }),
+      HEALTH_TIMEOUT_MS,
+      'PC file listing timed out'
+    );
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { success: false, data: null, error: { message: json?.error?.message || `PC returned ${response.status}.` } };
+    }
+    return { success: true, data: json, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the PC backend to list files." : err?.message || 'PC file listing failed.' },
+    };
+  }
+}
+
+/**
+ * Reads one file's bytes (base64) from the PC via the backend's
+ * /pc-fs/read route - how a build artifact (an APK, a bundle) that
+ * terminal_pc_run_command produced on the PC actually gets pulled onto
+ * the phone. Pair with filesystemTool.writeBinaryFileFromBase64() to
+ * save it into the phone's own SAF folder - see pcFilePullTool.js.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @returns {Promise<{success, data: {path, size, contentB64}|null, error}>}
+ */
+export async function readPcFile(relativePath) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/pc-fs/read?path=${encodeURIComponent(relativePath)}`, { headers: authHeaders(token) }),
+      TERMINAL_TIMEOUT_MS,
+      'PC file read timed out'
+    );
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { success: false, data: null, error: { message: json?.error?.message || `PC returned ${response.status}.` } };
+    }
+    return { success: true, data: json, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the PC backend to read the file." : err?.message || 'PC file read failed.' },
+    };
+  }
+}
 
 /**
  * Runs a live web search via the backend's /web/search route (DuckDuckGo

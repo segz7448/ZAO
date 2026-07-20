@@ -79,7 +79,7 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypa
 // always allowed outside 'plan' mode since they can't change anything.
 const WRITE_TOOLS = new Set([
   'fs_create_file', 'fs_create_folder', 'fs_edit_file', 'fs_rename', 'fs_move',
-  'fs_zip', 'fs_extract_zip',
+  'fs_zip', 'fs_extract_zip', 'pc_pull_file',
   'github_create_repo', 'github_commit_files', 'github_create_branch',
   'github_create_pull_request', 'github_create_release',
   'pdf_create', 'pdf_merge', 'pdf_split', 'docx_create', 'xlsx_create', 'csv_create', 'pptx_create',
@@ -89,7 +89,7 @@ const WRITE_TOOLS = new Set([
 // checkpoints (deleting something ZAO never snapshotted a "before" for in
 // the same way an edit gets one) - stays gated in 'acceptEdits' even
 // though ordinary edits don't.
-const DESTRUCTIVE_TOOLS = new Set(['fs_delete']);
+const DESTRUCTIVE_TOOLS = new Set(['fs_delete', 'fs_rewind_folder_checkpoint']);
 
 const TERMINAL_TOOLS = new Set(['terminal_pc_run_command', 'terminal_termux_run_command']);
 

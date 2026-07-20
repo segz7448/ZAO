@@ -337,12 +337,26 @@ function BackendConnectionSection({ preferences, theme }) {
   const setBackendRemoteUrl = usePreferencesStore((s) => s.setBackendRemoteUrl);
   const setBackendAuthToken = usePreferencesStore((s) => s.setBackendAuthToken);
 
-  const mode = preferences?.backend_mode || 'lan';
+  const savedMode = preferences?.backend_mode || 'lan';
+  // Local "draft" mode - lets the person pick LAN or Remote and fill in
+  // its fields before anything is written to the store/DB. Only Save
+  // commits it. Re-syncs from the saved value whenever it changes
+  // underneath us (e.g. preferences reload).
+  const [mode, setMode] = useState(savedMode);
   const [lanUrlValue, setLanUrlValue] = useState(preferences?.backend_lan_url || '');
   const [remoteUrlValue, setRemoteUrlValue] = useState(preferences?.backend_remote_url || '');
   const [tokenValue, setTokenValue] = useState(preferences?.backend_auth_token || '');
   const [status, setStatus] = useState({ connected: false, ready: false, model: null });
   const [checking, setChecking] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setMode(savedMode);
+    setLanUrlValue(preferences?.backend_lan_url || '');
+    setRemoteUrlValue(preferences?.backend_remote_url || '');
+    setTokenValue(preferences?.backend_auth_token || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token]);
 
   const check = async () => {
     setChecking(true);
@@ -353,7 +367,34 @@ function BackendConnectionSection({ preferences, theme }) {
 
   useEffect(() => {
     check();
-  }, [mode, preferences?.backend_lan_url, preferences?.backend_remote_url]);
+  }, [savedMode, preferences?.backend_lan_url, preferences?.backend_remote_url]);
+
+  // Anything unsaved? Compares the draft against what's actually
+  // persisted, so the Save button only lights up when there's something
+  // to commit and "Check again" always reflects the last SAVED settings,
+  // not whatever's mid-edit in the boxes.
+  const isDirty =
+    mode !== savedMode ||
+    (mode === 'lan' ? lanUrlValue.trim() !== (preferences?.backend_lan_url || '') : remoteUrlValue.trim() !== (preferences?.backend_remote_url || '')) ||
+    tokenValue.trim() !== (preferences?.backend_auth_token || '');
+
+  const handleSave = async () => {
+    setSaving(true);
+    await setBackendMode(mode);
+    if (mode === 'lan') {
+      // Let people type a bare IP:port - no need to remember the http://
+      // prefix. If they do include a scheme (http:// or https://), leave
+      // it alone.
+      let url = lanUrlValue.trim();
+      if (url && !/^https?:\/\//i.test(url)) url = `http://${url}`;
+      await setBackendLanUrl(url);
+    } else {
+      await setBackendRemoteUrl(remoteUrlValue.trim());
+    }
+    await setBackendAuthToken(tokenValue.trim());
+    setSaving(false);
+    check();
+  };
 
   const pillColor = status.ready ? '#DCFCE7' : status.connected ? '#FEF3C7' : '#FEE2E2';
   const pillTextColor = status.ready ? '#166534' : status.connected ? '#92400E' : '#991B1B';
@@ -378,28 +419,53 @@ function BackendConnectionSection({ preferences, theme }) {
         )}
       </View>
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 }}>
-        <Text style={[styles.keyLabel, { color: theme.textPrimary, fontSize: 14 }]}>
-          {mode === 'remote' ? 'Remote (Cloudflare tunnel)' : 'LAN (home WiFi)'}
-        </Text>
-        <Switch
-          value={mode === 'remote'}
-          onValueChange={(isRemote) => setBackendMode(isRemote ? 'remote' : 'lan')}
-        />
+      {/* Single either/or picker - LAN or Remote, never both at once. */}
+      <View style={{ flexDirection: 'row', marginTop: 12, gap: 8 }}>
+        <TouchableOpacity
+          onPress={() => setMode('lan')}
+          style={{
+            flex: 1,
+            paddingVertical: 10,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: mode === 'lan' ? theme.info : theme.borderStrong,
+            backgroundColor: mode === 'lan' ? theme.info + '20' : 'transparent',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: mode === 'lan' ? theme.info : theme.textSecondary, fontWeight: mode === 'lan' ? '600' : '400' }}>
+            LAN (home WiFi)
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => setMode('remote')}
+          style={{
+            flex: 1,
+            paddingVertical: 10,
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: mode === 'remote' ? theme.info : theme.borderStrong,
+            backgroundColor: mode === 'remote' ? theme.info + '20' : 'transparent',
+            alignItems: 'center',
+          }}
+        >
+          <Text style={{ color: mode === 'remote' ? theme.info : theme.textSecondary, fontWeight: mode === 'remote' ? '600' : '400' }}>
+            Remote (internet)
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {mode === 'lan' ? (
         <>
           <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
-            Your PC's local IP and port, e.g. http://192.168.1.42:8080. Use this on the same WiFi as your PC.
+            Your PC's local IP and port, e.g. 192.168.1.42:8080. Use this on the same WiFi as your PC.
           </Text>
           <TextInput
             style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-            placeholder="http://192.168.1.42:8080"
+            placeholder="192.168.1.42:8080"
             placeholderTextColor={theme.textTertiary}
             value={lanUrlValue}
             onChangeText={setLanUrlValue}
-            onBlur={() => setBackendLanUrl(lanUrlValue.trim())}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
@@ -416,7 +482,6 @@ function BackendConnectionSection({ preferences, theme }) {
             placeholderTextColor={theme.textTertiary}
             value={remoteUrlValue}
             onChangeText={setRemoteUrlValue}
-            onBlur={() => setBackendRemoteUrl(remoteUrlValue.trim())}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
@@ -433,7 +498,6 @@ function BackendConnectionSection({ preferences, theme }) {
         placeholderTextColor={theme.textTertiary}
         value={tokenValue}
         onChangeText={setTokenValue}
-        onBlur={() => setBackendAuthToken(tokenValue.trim())}
         autoCapitalize="none"
         autoCorrect={false}
         secureTextEntry
@@ -446,9 +510,24 @@ function BackendConnectionSection({ preferences, theme }) {
           ? 'The backend is reachable but the model is still loading - this can take a bit longer on first start. Check again shortly.'
           : "ZAO couldn't reach the PC backend with these settings. Make sure start.bat is running on your PC and the URL/token above are correct."}
       </Text>
-      <TouchableOpacity style={[styles.keyEditBtn, { marginTop: 12 }]} onPress={check} disabled={checking}>
-        <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Check again</Text>
-      </TouchableOpacity>
+
+      <View style={{ flexDirection: 'row', marginTop: 12, gap: 16, alignItems: 'center' }}>
+        <TouchableOpacity
+          style={[styles.keyEditBtn, { opacity: isDirty ? 1 : 0.4 }]}
+          onPress={handleSave}
+          disabled={!isDirty || saving}
+        >
+          <Text style={[styles.keyEditBtnText, { color: theme.info }]}>{saving ? 'Saving…' : 'Save'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.keyEditBtn} onPress={check} disabled={checking}>
+          <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Check again</Text>
+        </TouchableOpacity>
+      </View>
+      {isDirty && (
+        <Text style={[styles.helperText, { color: theme.textTertiary, marginTop: 6, fontSize: 12 }]}>
+          Unsaved changes - tap Save to apply.
+        </Text>
+      )}
     </View>
   );
 }
@@ -1242,7 +1321,7 @@ function BrowserAgentSection({ preferences, theme }) {
   return (
     <View style={styles.keyRow}>
       <View style={styles.keyRowHeader}>
-        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>On-device browser agent</Text>
+        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Browser agent</Text>
         <View style={[styles.statusPill, { backgroundColor: preferences.browser_access_enabled ? '#DCFCE7' : theme.surfaceAlt }]}>
           <Text style={[styles.statusPillText, { color: preferences.browser_access_enabled ? '#166534' : theme.textSecondary }]}>
             {preferences.browser_access_enabled ? 'On' : 'Off'}
@@ -1250,10 +1329,11 @@ function BrowserAgentSection({ preferences, theme }) {
         </View>
       </View>
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 4 }]}>
-        No setup needed here - there's no backend to configure anymore. Turn
-        this on or off anytime with the globe button in the chat composer.
-        A small live view of the browser appears while it's on, so you can
-        watch (or take over) whatever ZAO is doing.
+        This runs a real browser on your PC backend (see Backend Connection
+        above) and streams it live to your phone - your PC needs to be
+        reachable for it to work. Turn this on or off anytime with the globe
+        button in the chat composer. A small live view appears while it's
+        on, so you can watch (or take over) whatever ZAO is doing.
       </Text>
     </View>
   );

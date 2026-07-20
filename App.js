@@ -62,6 +62,8 @@ function AppShell() {
   const [frameBase64, setFrameBase64] = useState(null);
   const [awaitingHuman, setAwaitingHuman] = useState(false);
   const [humanReason, setHumanReason] = useState(null);
+  const [streamConnected, setStreamConnected] = useState(false);
+  const [streamConnectionError, setStreamConnectionError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -109,7 +111,11 @@ function AppShell() {
   // or the PC backend restarts (see browserAgentStream.js's own
   // reconnect-on-close handling for network blips).
   useEffect(() => {
-    if (!preferences?.browser_access_enabled) return;
+    if (!preferences?.browser_access_enabled) {
+      setStreamConnected(false);
+      setFrameBase64(null);
+      return;
+    }
     const stream = streamRef.current;
     setAgentSession(stream);
     stream.connect();
@@ -120,10 +126,16 @@ function AppShell() {
       setHumanReason(s.reason);
     });
     const offFrame = stream.on('frame', (data) => setFrameBase64(data));
+    const offConnection = stream.on('connectionChange', ({ connected, error }) => {
+      setStreamConnected(connected);
+      setStreamConnectionError(error || null);
+      if (!connected) setFrameBase64(null); // stale frame would look "live" even though the session behind it is gone
+    });
 
     return () => {
       offStatus();
       offFrame();
+      offConnection();
     };
   }, [preferences?.browser_access_enabled]);
 
@@ -293,6 +305,8 @@ function AppShell() {
           awaitingHuman={awaitingHuman}
           humanReason={humanReason}
           frameBase64={frameBase64}
+          connected={streamConnected}
+          connectionError={streamConnectionError}
           onExpand={() => setScreen('browserAgent')}
           onResumeAfterHuman={() => streamRef.current.resumeAfterHuman()}
         />
