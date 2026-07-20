@@ -15,7 +15,7 @@
  */
 
 import React, { useRef, useState, useCallback } from 'react';
-import { View, Image, StyleSheet, PanResponder } from 'react-native';
+import { View, Image, Text, StyleSheet, PanResponder } from 'react-native';
 
 // Must match server/browserAgent.js's AgentSession context viewport
 // exactly - manual tap coordinates are computed relative to this, then
@@ -28,8 +28,11 @@ const STREAM_VIEWPORT = { width: 412, height: 915 };
  * @param {string|null} props.frameBase64 - latest JPEG frame, base64-encoded (no data: prefix)
  * @param {import('./browserAgentStream').BrowserAgentStream} props.stream - the connected stream client, for sending manual taps
  * @param {boolean} props.interactive - whether taps should actually be sent (true while awaitingHuman; false while the agent is autonomously working, so an accidental tap doesn't fight the model mid-task)
+ * @param {boolean} [props.connected] - whether the WebSocket to the PC is currently open
+ * @param {string|null} [props.connectionError] - human-readable reason the connection isn't open, if known
+ * @param {boolean} [props.isRunning] - whether a task is actively running on the PC session right now
  */
-export default function BrowserStreamView({ frameBase64, stream, interactive = false }) {
+export default function BrowserStreamView({ frameBase64, stream, interactive = false, connected = false, connectionError = null, isRunning = false }) {
   const [layoutSize, setLayoutSize] = useState({ width: STREAM_VIEWPORT.width, height: STREAM_VIEWPORT.height });
 
   const onLayout = useCallback((e) => {
@@ -70,7 +73,15 @@ export default function BrowserStreamView({ frameBase64, stream, interactive = f
           resizeMode="contain"
         />
       ) : (
-        <View style={[StyleSheet.absoluteFill, styles.placeholder]} />
+        <View style={[StyleSheet.absoluteFill, styles.placeholder]}>
+          <Text style={styles.placeholderText}>
+            {!connected
+              ? connectionError || "Can't reach the PC backend - check Settings > Backend Connection"
+              : isRunning
+              ? 'Connecting to the live view…'
+              : "Connected - waiting for a task. Type one below and tap Send."}
+          </Text>
+        </View>
       )}
       {/* Transparent touch-capture layer - only actually forwards taps to the PC when interactive is true, but always present so onLayout has a stable measurement surface. */}
       <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers} />
@@ -86,5 +97,14 @@ const styles = StyleSheet.create({
   },
   placeholder: {
     backgroundColor: '#1a1a1a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  placeholderText: {
+    color: '#999',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });
