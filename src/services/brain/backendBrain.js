@@ -25,7 +25,7 @@ import {
   buildPlan as coordinatorBuildPlan,
 } from '../planning/planCoordinator';
 import { runExecutionPlan } from '../planning/planExecutor';
-import { getPlan, updatePlanStatus } from '../../db/database';
+import { getPlan, updatePlanStatus, getPreferences } from '../../db/database';
 import { PLAN_STATUS, STEP_STATUS } from '../planning/planTypes';
 import { withProceduralHint } from '../memory/proceduralMemory';
 
@@ -177,6 +177,38 @@ export async function runHierarchicalPlan(goalText, context = {}) {
       status: PLAN_STATUS.COMPLETED,
       error: null,
     };
+  }
+
+  // Whether this plan-level gate even applies: 'auto'/'bypassPermissions'
+  // mean every WRITE_TOOL and risky terminal command already auto-runs at
+  // the per-step level (permissionModes.js), so pausing the WHOLE PLAN
+  // here first - before a single step is even attempted - directly
+  // contradicts that setting. Someone who turned auto-run on doesn't
+  // expect a "create a folder" goal to sit at awaiting_approval; they
+  // expect it to just happen. 'plan' mode still gets no bypass here (it's
+  // read-only by definition, so proposing without running is exactly
+  // right), and 'default'/'acceptEdits' keep the existing propose-first
+  // behavior since those modes still expect a look-before-you-run gate
+  // for anything above their own auto-run tier.
+  const prefsResult = await getPreferences().catch(() => null);
+  const permissionMode = prefsResult?.data?.permission_mode || 'default';
+  const skipsPlanGate = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
+
+  if (skipsPlanGate) {
+    return runApprovedPlan(rootPlanId, executionPlanIds, {
+      githubToken,
+      onStep: context.onStep,
+      onAwaitingApproval: context.onAwaitingApproval,
+      shouldContinue: context.shouldContinue,
+    }).then((result) => ({
+      success: result.success,
+      content: result.content,
+      rootPlanId,
+      planId: executionPlanIds.length === 1 ? executionPlanIds[0] : rootPlanId,
+      status: result.status,
+      error: result.error,
+      clockData: result.clockData,
+    }));
   }
 
   // Mark every leaf as awaiting the person's go-ahead. Deliberately NOT

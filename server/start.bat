@@ -35,6 +35,13 @@ setlocal
 
 cd /d "%~dp0"
 
+REM Everything terminal_pc_run_command and pc_fs_* create (folders,
+REM scaffolded projects, etc.) is written relative to this root - see
+REM config.js's PC_BRIDGE_ROOT comment. Set to Downloads so anything ZAO
+REM creates shows up where you're actually looking for it. Change this
+REM path if you'd rather it use a different folder.
+if not defined ZAO_PC_BRIDGE_ROOT set "ZAO_PC_BRIDGE_ROOT=%USERPROFILE%\Downloads"
+
 where cloudflared >nul 2>nul
 if %errorlevel% neq 0 (
     if exist "%~dp0cloudflared.exe" (

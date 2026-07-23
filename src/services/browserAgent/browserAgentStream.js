@@ -39,6 +39,7 @@ export class BrowserAgentStream {
     this.running = false;
     this.awaitingHuman = false;
     this.humanReason = null;
+    this.tabs = []; // [{tabId, url, title, active}] - kept in sync via 'status' messages, see BrowserAgentScreen.js's tab strip / address bar
     this._listeners = { frame: new Set(), status: new Set(), step: new Set(), taskResult: new Set(), connectionChange: new Set() };
     this._reconnectTimer = null;
     this._intentionalClose = false;
@@ -87,6 +88,7 @@ export class BrowserAgentStream {
           this.running = msg.running;
           this.awaitingHuman = msg.awaitingHuman;
           this.humanReason = msg.reason;
+          this.tabs = msg.tabs || [];
           this._emit('status', msg);
           break;
         case 'step':
@@ -197,5 +199,25 @@ export class BrowserAgentStream {
   /** Manual single key press (Enter, Tab, Backspace, etc.). */
   manualKey(key) {
     return this._send({ type: 'manualKey', key });
+  }
+
+  /** Address bar: navigate the active tab directly, without going through the model. Accepts a bare domain ("example.com") same as typing into a real browser's address bar - the PC side normalizes it into a full URL. */
+  navigateTo(url) {
+    return this._send({ type: 'navigateTo', url });
+  }
+
+  /** Tab strip: switch which tab is active. */
+  switchTab(tabId) {
+    return this._send({ type: 'switchTab', tabId });
+  }
+
+  /** Tab strip: "+" button. */
+  newTab(url) {
+    return this._send({ type: 'newTab', url });
+  }
+
+  /** Tab strip: "x" on a tab. */
+  closeTab(tabId) {
+    return this._send({ type: 'closeTab', tabId });
   }
 }

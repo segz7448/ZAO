@@ -64,6 +64,7 @@ Respond with ONLY a single JSON object, no other text, matching one of:
 {"action": "waitForSelector", "selector": "css-selector", "timeoutMs": 8000}
 {"action": "extractPageText"}
 {"action": "extractTables"}
+{"action": "checkConsole", "limit": 50}
 {"action": "newTab", "url": "https://..."}
 {"action": "switchTab", "tabId": "tab_..."}
 {"action": "closeTab", "tabId": "tab_..."}
@@ -85,6 +86,12 @@ Rules:
 - Use "download" for a link/button that triggers a file download - this
   waits for the download to complete and saves it, returning the saved
   path.
+- Use "checkConsole" to see the active tab's captured browser console
+  messages, page errors, and failed network requests - useful when
+  debugging a page that isn't behaving as expected. You'll also see a
+  short "N console error(s) since last step" note automatically after
+  any action that produced new errors, even without asking - call
+  checkConsole when you see that note if you need the actual details.
 - If a page hasn't loaded yet or an element you expected isn't there, use
   waitForSelector or re-check the interactive elements rather than
   guessing an id that might not exist yet.
@@ -157,6 +164,7 @@ class AgentSession {
     this.humanReason = null;
     this.context = null;
     this.pages = new Map(); // tabId -> Page
+    this.consoleLogs = new Map(); // tabId -> array of {type, text, ts} - rolling buffer, see _newTab
     this.activeTabId = null;
     this.onFrame = onFrame || (() => {}); // called with a screenshot buffer whenever the view changes - see browserStream.js
     this._tabCounter = 0;
@@ -180,10 +188,56 @@ class AgentSession {
     const tabId = this._makeTabId();
     this.pages.set(tabId, page);
     this.activeTabId = tabId;
+    this._attachConsoleCapture(tabId, page);
     if (url && url !== 'about:blank') {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     }
     return tabId;
+  }
+
+  /**
+   * CONSOLE ACCESS (not a devtools panel in the UI itself - the agent's
+   * own eyes on it instead, per the "should have console like access
+   * where my agent can have access to it" ask). Always capturing in the
+   * background for every tab from the moment it's created - console
+   * messages, uncaught page errors, and failed network requests - kept
+   * as a small rolling buffer per tab (not persisted, cleared on tab
+   * close) rather than surfaced anywhere by default. Two ways this
+   * actually reaches the model:
+   *   1. On request - the "checkConsole" action dumps the active tab's
+   *      buffer verbatim.
+   *   2. Automatically on error - _extractElements()'s observation
+   *      (returned after every action) folds in a short "N console
+   *      error(s) since last step" note whenever new ERROR-level
+   *      entries or pageerrors showed up, WITHOUT dumping the full
+   *      text - see _newConsoleErrorsSince(). This is the "surface only
+   *      if something errors" behavior: enough for the model to notice
+   *      and decide to call checkConsole for the details, not a wall of
+   *      text on every single step.
+   */
+  _attachConsoleCapture(tabId, page) {
+    const MAX_ENTRIES = 200;
+    const log = [];
+    this.consoleLogs.set(tabId, log);
+    const push = (entry) => {
+      log.push({ ...entry, ts: Date.now() });
+      if (log.length > MAX_ENTRIES) log.shift();
+    };
+    page.on('console', (msg) => {
+      push({ kind: 'console', type: msg.type(), text: msg.text() });
+    });
+    page.on('pageerror', (err) => {
+      push({ kind: 'pageerror', type: 'error', text: err?.message || String(err) });
+    });
+    page.on('requestfailed', (req) => {
+      push({ kind: 'requestfailed', type: 'error', text: `${req.method()} ${req.url()} - ${req.failure()?.errorText || 'failed'}` });
+    });
+  }
+
+  /** Count of error-level console entries pushed after the given timestamp - used to decide whether to fold an error note into the next observation without dumping the full log. */
+  _newConsoleErrorsSince(tabId, sinceTs) {
+    const log = this.consoleLogs.get(tabId) || [];
+    return log.filter((e) => e.ts > sinceTs && (e.type === 'error' || e.kind === 'pageerror' || e.kind === 'requestfailed')).length;
   }
 
   _activePage() {
@@ -322,6 +376,11 @@ class AgentSession {
         });
         return { tables };
       }
+      case 'checkConsole': {
+        const log = this.consoleLogs.get(this.activeTabId) || [];
+        const entries = log.slice(-(action.limit || 50)).map((e) => ({ type: e.kind === 'console' ? e.type : e.kind, text: e.text }));
+        return { consoleLog: entries, totalCaptured: log.length };
+      }
       case 'newTab': {
         const newTabId = await this._newTab(action.url || 'about:blank');
         return { newTabId, elements: await this._extractElements() };
@@ -332,6 +391,7 @@ class AgentSession {
       case 'closeTab': {
         const page = this.pages.get(action.tabId);
         if (page) { await page.close().catch(() => {}); this.pages.delete(action.tabId); }
+        this.consoleLogs.delete(action.tabId);
         if (this.activeTabId === action.tabId) {
           this.activeTabId = this.pages.keys().next().value || null;
         }
@@ -419,11 +479,20 @@ class AgentSession {
         };
       }
 
+      const beforeActionTs = Date.now();
       let observation;
       try {
         observation = await this._executeAction(action);
       } catch (err) {
         observation = { error: err?.message || String(err) };
+      }
+
+      // Auto-surface, not auto-dump: note that new console/page errors
+      // happened so the model can decide to call checkConsole, without
+      // flooding every single observation with the full log text.
+      const newErrorCount = this._newConsoleErrorsSince(this.activeTabId, beforeActionTs);
+      if (newErrorCount > 0 && observation && typeof observation === 'object') {
+        observation.consoleNote = `${newErrorCount} console error(s)/failed request(s) since last step - call checkConsole for details.`;
       }
 
       this.history.push({ role: 'user', content: JSON.stringify(observation), __isObservation: true });
@@ -528,6 +597,61 @@ class AgentSession {
     this.isRunning = false;
   }
 
+  /**
+   * ADDRESS BAR + TABS (phone UI): these four methods are the direct,
+   * person-driven equivalent of the model's own newTab/switchTab/
+   * closeTab/navigate actions above - same underlying tab map, just
+   * triggered by a tap on the phone instead of a model decision. Safe to
+   * call whether or not a task is currently running (e.g. opening a new
+   * tab mid-task), matching manualClick/manualType's existing "always
+   * available, not just during awaitingHuman" behavior.
+   */
+
+  /** Every open tab's id + current url/title, active one flagged - what BrowserAgentScreen's tab strip renders. */
+  async getTabsInfo() {
+    const tabs = [];
+    for (const [tabId, page] of this.pages.entries()) {
+      tabs.push({
+        tabId,
+        url: page.url(),
+        title: await page.title().catch(() => ''),
+        active: tabId === this.activeTabId,
+      });
+    }
+    return tabs;
+  }
+
+  /** Direct navigation from the address bar - normalizes a bare "example.com" into a full URL the same way a real browser's address bar does. */
+  async navigateActiveTab(rawUrl) {
+    await this._ensureContext();
+    const page = this._activePage();
+    if (!page || !rawUrl) return;
+    const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  }
+
+  /** Tapping a tab in the strip. */
+  async switchToTab(tabId) {
+    if (this.pages.has(tabId)) this.activeTabId = tabId;
+  }
+
+  /** The "+" new-tab button. */
+  async openNewTab(url) {
+    await this._ensureContext();
+    return this._newTab(url || 'about:blank');
+  }
+
+  /** The "x" on a tab in the strip. */
+  async closeTabById(tabId) {
+    const page = this.pages.get(tabId);
+    if (page) await page.close().catch(() => {});
+    this.pages.delete(tabId);
+    this.consoleLogs.delete(tabId);
+    if (this.activeTabId === tabId) {
+      this.activeTabId = this.pages.keys().next().value || null;
+    }
+  }
+
   async destroy() {
     this._stopStreaming();
     for (const page of this.pages.values()) {
@@ -535,6 +659,7 @@ class AgentSession {
     }
     if (this.context) await this.context.close().catch(() => {});
     this.pages.clear();
+    this.consoleLogs.clear();
     this.context = null;
   }
 }

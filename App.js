@@ -64,6 +64,7 @@ function AppShell() {
   const [frameBase64, setFrameBase64] = useState(null);
   const [awaitingHuman, setAwaitingHuman] = useState(false);
   const [humanReason, setHumanReason] = useState(null);
+  const [browserTabs, setBrowserTabs] = useState([]); // [{tabId, url, title, active}] - for BrowserAgentScreen's address bar + tab strip
   // Full-screen browser zoom, owned here since it's shared between
   // BrowserAgentPiP (renders the actually-zoomed stream) and
   // BrowserAgentScreen (renders the +/- controls that change it) - two
@@ -152,6 +153,7 @@ function AppShell() {
       setIsAgentRunning(s.running);
       setAwaitingHuman(s.awaitingHuman);
       setHumanReason(s.reason);
+      setBrowserTabs(s.tabs || []);
     });
     const offFrame = stream.on('frame', (data) => setFrameBase64(data));
     const offConnection = stream.on('connectionChange', ({ connected, error }) => {
@@ -227,8 +229,16 @@ function AppShell() {
   const handleOpenBrowserAgent = (url) => {
     if (url) {
       streamRef.current.runTask(`Go to ${url}`);
+      setScreen('browserAgent');
+      return;
     }
-    setScreen('browserAgent');
+    // No explicit url: this is the globe-icon tap from ChatScreen, which
+    // should TOGGLE between full-screen and PiP (tap again while already
+    // full-screen collapses back to chat + PiP), not always force
+    // full-screen. A url is only ever passed when something else (e.g. a
+    // chat action) explicitly wants full-screen opened, so that path still
+    // always goes full-screen.
+    setScreen((prev) => (prev === 'browserAgent' ? 'chat' : 'browserAgent'));
   };
 
   const handleCloseBrowserAgent = () => {
@@ -408,6 +418,7 @@ function AppShell() {
           stream={streamRef.current}
           isAgentRunning={isAgentRunning}
           awaitingHuman={awaitingHuman}
+          tabs={browserTabs}
           zoom={browserFullScreenZoom}
           onZoomChange={setBrowserFullScreenZoom}
           onClose={handleCloseBrowserAgent}

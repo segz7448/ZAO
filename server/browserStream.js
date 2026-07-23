@@ -6,7 +6,7 @@
  *
  *   PC -> phone:
  *     { type: 'frame', data: '<base64 jpeg>' }              - live screenshot, ~2fps while a task/manual session is active
- *     { type: 'status', running, awaitingHuman, reason }     - agent state changes
+ *     { type: 'status', running, awaitingHuman, reason, tabs }  - agent state changes; tabs is [{tabId, url, title, active}] for the address-bar/tab-strip UI
  *     { type: 'step', step, action }                         - one action the model just took, for the live action-log
  *     { type: 'taskResult', success, answer, error, needsHuman, reason }  - task finished/paused
  *
@@ -17,6 +17,10 @@
  *     { type: 'manualClick', x, y }                           - tap-to-click on the live view (coordinates relative to the 412x915 streamed viewport)
  *     { type: 'manualType', text }                            - type into whatever's focused
  *     { type: 'manualKey', key }                              - press a single key (Enter, Tab, Backspace, etc.)
+ *     { type: 'navigateTo', url }                              - address-bar navigation on the active tab
+ *     { type: 'switchTab', tabId }                             - tap a tab in the strip
+ *     { type: 'newTab', url }                                  - "+" button in the tab strip
+ *     { type: 'closeTab', tabId }                              - "x" on a tab in the strip
  *
  * Auth: the same Bearer token as every other route, but WebSocket can't
  * carry custom headers from React Native's WebSocket implementation
@@ -63,13 +67,15 @@ function registerBrowserAgentStream(httpServer, config, log, sendToModel) {
       }
     });
 
-    const sendStatus = () => {
+    const sendStatus = async () => {
       if (ws.readyState !== ws.OPEN) return;
+      const tabs = await session.getTabsInfo().catch(() => []);
       ws.send(JSON.stringify({
         type: 'status',
         running: session.isRunning,
         awaitingHuman: session.awaitingHuman,
         reason: session.humanReason,
+        tabs,
       }));
     };
 
@@ -89,22 +95,22 @@ function registerBrowserAgentStream(httpServer, config, log, sendToModel) {
       try {
         switch (msg.type) {
           case 'runTask': {
-            sendStatus();
+            await sendStatus();
             const result = await session.runTask(msg.task, sendToModel, onStep);
-            sendStatus();
+            await sendStatus();
             ws.send(JSON.stringify({ type: 'taskResult', ...result }));
             break;
           }
           case 'resumeAfterHuman': {
-            sendStatus();
+            await sendStatus();
             const result = await session.resumeAfterHuman(sendToModel, onStep);
-            sendStatus();
+            await sendStatus();
             ws.send(JSON.stringify({ type: 'taskResult', ...result }));
             break;
           }
           case 'cancel':
             session.cancel();
-            sendStatus();
+            await sendStatus();
             break;
           case 'manualClick':
             await session.manualClick(msg.x, msg.y);
@@ -114,6 +120,22 @@ function registerBrowserAgentStream(httpServer, config, log, sendToModel) {
             break;
           case 'manualKey':
             await session.manualKey(msg.key);
+            break;
+          case 'navigateTo':
+            await session.navigateActiveTab(msg.url || '');
+            await sendStatus();
+            break;
+          case 'switchTab':
+            await session.switchToTab(msg.tabId);
+            await sendStatus();
+            break;
+          case 'newTab':
+            await session.openNewTab(msg.url);
+            await sendStatus();
+            break;
+          case 'closeTab':
+            await session.closeTabById(msg.tabId);
+            await sendStatus();
             break;
           default:
             log(`Browser agent stream: unknown message type "${msg.type}"`);

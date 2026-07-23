@@ -27,7 +27,7 @@
  */
 
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme/useTheme';
@@ -36,10 +36,25 @@ const ZOOM_STEP = 0.25;
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 1;
 
-export default function BrowserAgentScreen({ stream, isAgentRunning = false, awaitingHuman = false, zoom = 0.5, onZoomChange, onClose }) {
+export default function BrowserAgentScreen({ stream, isAgentRunning = false, awaitingHuman = false, tabs = [], zoom = 0.5, onZoomChange, onClose }) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const [taskText, setTaskText] = useState('');
+  const [addressText, setAddressText] = useState('');
+  const [editingAddress, setEditingAddress] = useState(false);
+
+  const activeTab = tabs.find((t) => t.active) || tabs[0] || null;
+  const displayedUrl = editingAddress ? addressText : (activeTab?.url && activeTab.url !== 'about:blank' ? activeTab.url : '');
+
+  const handleAddressFocus = () => {
+    setAddressText(activeTab?.url && activeTab.url !== 'about:blank' ? activeTab.url : '');
+    setEditingAddress(true);
+  };
+
+  const handleAddressSubmit = () => {
+    if (addressText.trim()) stream?.navigateTo(addressText.trim());
+    setEditingAddress(false);
+  };
 
   const handleSendTask = () => {
     if (!taskText.trim() || !stream) return;
@@ -59,7 +74,7 @@ export default function BrowserAgentScreen({ stream, isAgentRunning = false, awa
       <View
         style={[
           styles.topFrame,
-          { backgroundColor: theme.surfaceAlt, borderBottomColor: theme.border, paddingTop: insets.top + 14 },
+          { backgroundColor: theme.surfaceAlt, borderBottomColor: theme.border, paddingTop: insets.top + 6 },
         ]}
       >
         <View style={styles.topFrameRow}>
@@ -85,6 +100,76 @@ export default function BrowserAgentScreen({ stream, isAgentRunning = false, awa
             <Ionicons name="close" size={20} color={theme.textPrimary} />
           </TouchableOpacity>
         </View>
+
+        {/* TAB STRIP: mirrors a standard mobile browser's tab row - one
+            chip per open Playwright tab (tabs come from the PC session's
+            real tab map, see server/browserAgent.js's getTabsInfo), tap
+            to switch, "x" to close, "+" to open a fresh about:blank tab.
+            Hidden entirely when there's only ever been the one default
+            tab, so it doesn't add clutter for the common case. */}
+        {tabs.length > 1 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabStrip} contentContainerStyle={styles.tabStripContent}>
+            {tabs.map((tab) => (
+              <TouchableOpacity
+                key={tab.tabId}
+                onPress={() => stream?.switchTab(tab.tabId)}
+                style={[
+                  styles.tabChip,
+                  { backgroundColor: tab.active ? theme.background : 'transparent', borderColor: theme.border },
+                ]}
+              >
+                <Text style={[styles.tabChipText, { color: tab.active ? theme.textPrimary : theme.textTertiary }]} numberOfLines={1}>
+                  {tab.title || tab.url || 'New tab'}
+                </Text>
+                {tabs.length > 1 && (
+                  <TouchableOpacity onPress={() => stream?.closeTab(tab.tabId)} hitSlop={6} style={styles.tabChipClose}>
+                    <Ionicons name="close" size={12} color={tab.active ? theme.textSecondary : theme.textTertiary} />
+                  </TouchableOpacity>
+                )}
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity onPress={() => stream?.newTab()} hitSlop={8} style={[styles.tabChip, styles.tabChipNew, { borderColor: theme.border }]}>
+              <Ionicons name="add" size={16} color={theme.textSecondary} />
+            </TouchableOpacity>
+          </ScrollView>
+        )}
+
+        {/* ADDRESS BAR: read-only display of the active tab's real URL
+            most of the time (the agent drives navigation autonomously),
+            becomes an editable field on tap for direct manual
+            navigation - same "tap to edit, Enter/Go to navigate" pattern
+            as a standard browser's omnibox. Sends through
+            stream.navigateTo(), which normalizes a bare domain into a
+            full URL PC-side (see server/browserAgent.js's
+            navigateActiveTab). */}
+        <TouchableOpacity
+          activeOpacity={editingAddress ? 1 : 0.7}
+          onPress={editingAddress ? undefined : handleAddressFocus}
+          style={[styles.addressBar, { backgroundColor: theme.background, borderColor: theme.border }]}
+        >
+          <Ionicons name="lock-closed-outline" size={12} color={theme.textTertiary} style={styles.addressLockIcon} />
+          {editingAddress ? (
+            <TextInput
+              style={[styles.addressInput, { color: theme.textPrimary }]}
+              value={addressText}
+              onChangeText={setAddressText}
+              onSubmitEditing={handleAddressSubmit}
+              onBlur={() => setEditingAddress(false)}
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              placeholder="Search or enter address"
+              placeholderTextColor={theme.textTertiary}
+              returnKeyType="go"
+              selectTextOnFocus
+            />
+          ) : (
+            <Text style={[styles.addressText, { color: displayedUrl ? theme.textSecondary : theme.textTertiary }]} numberOfLines={1}>
+              {displayedUrl || 'No page loaded yet'}
+            </Text>
+          )}
+        </TouchableOpacity>
 
         <View style={styles.topFrameControlsRow}>
           <View style={[styles.zoomControl, { backgroundColor: theme.background }]}>
@@ -152,11 +237,11 @@ const styles = StyleSheet.create({
   },
   topFrame: {
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomLeftRadius: 20,
-    borderBottomRightRadius: 20,
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    gap: 10,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+    gap: 6,
     elevation: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -201,9 +286,9 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   closeBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -247,6 +332,58 @@ const styles = StyleSheet.create({
   },
   taskBarWrap: {
     justifyContent: 'flex-end',
+  },
+  tabStrip: {
+    maxHeight: 34,
+  },
+  tabStripContent: {
+    gap: 6,
+    paddingRight: 4,
+    alignItems: 'center',
+  },
+  tabChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    maxWidth: 130,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  tabChipNew: {
+    maxWidth: 30,
+    paddingHorizontal: 7,
+    justifyContent: 'center',
+  },
+  tabChipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  tabChipClose: {
+    marginLeft: 2,
+  },
+  addressBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  addressLockIcon: {
+    opacity: 0.8,
+  },
+  addressText: {
+    flex: 1,
+    fontSize: 13,
+  },
+  addressInput: {
+    flex: 1,
+    fontSize: 13,
+    padding: 0,
   },
   taskBar: {
     flexDirection: 'row',
