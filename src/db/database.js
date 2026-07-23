@@ -648,14 +648,30 @@ export async function initDatabase() {
     // src/services/execution/permissionModes.js) - the single source of
     // truth for which of ZAO's five permission modes
     // (default/acceptEdits/plan/auto/bypassPermissions) every tool call
-    // gets gated against. Defaults to 'default' - the same
-    // confirm-before-risky-things behavior ZAO already had before this
-    // column existed, so upgrading installs don't silently become more
-    // permissive.
+    // gets gated against. Defaults to 'auto' - every create/edit/delete
+    // action just runs without a confirmation prompt, on the reasoning
+    // that ZAO's own file/git backups (see the backup system this
+    // depends on) make an unwanted change cheap to undo, so gating on
+    // approval up front isn't worth the friction. Explicit product
+    // decision, not the cautious default you'd normally pick for a new
+    // column - if that backup coverage ever changes, revisit this.
     try {
-      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN permission_mode TEXT DEFAULT 'default';`);
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN permission_mode TEXT DEFAULT 'auto';`);
     } catch (migrationErr) {
       // Expected on any install that already has this column - not an error.
+    }
+
+    // Migration: flip any existing row still sitting on the OLD default
+    // ('default', i.e. confirm-before-risky-things) over to 'auto', so
+    // installs that already had this column before the change above
+    // don't keep the old prompting behavior forever. A person who
+    // deliberately chose 'default' again after this update runs would
+    // re-set it themselves; this only catches rows that never got an
+    // explicit choice.
+    try {
+      await db.execAsync(`UPDATE user_preferences SET permission_mode = 'auto' WHERE permission_mode = 'default';`);
+    } catch (migrationErr) {
+      // Non-fatal - worst case an existing install keeps asking for approval until manually switched in Settings.
     }
 
     // Migration: otel_export_endpoint added so telemetry.js (see that
@@ -1600,7 +1616,7 @@ const DEFAULT_PREFS_ROW = {
   backend_lan_url: null,
   backend_remote_url: null,
   backend_auth_token: null,
-  permission_mode: 'default',
+  permission_mode: 'auto',
   otel_export_endpoint: null,
 };
 

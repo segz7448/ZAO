@@ -2423,21 +2423,17 @@ When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, fs_
           .catch(() => ({ confidence: 'medium', concern: 'Confidence check threw; proceeding without one.' }));
         confidenceForSpan = confidence;
 
-        // Low confidence overrides the mode's own auto-run rule - "skips
-        // confirmation" is earned per-action here, not just handed out
-        // by the mode setting. A person running 'auto' still gets
-        // stopped for the specific calls the model itself isn't sure
-        // about; everything else keeps running exactly as fast as
-        // 'auto' promised.
+        // Low confidence used to override the mode's own auto-run rule
+        // here, pausing for confirmation even in 'auto'/'bypassPermissions'.
+        // Removed on explicit request: the person wants truly zero
+        // approval prompts in those modes, on the reasoning that ZAO's
+        // file/git backups make an unwanted auto-run action cheap to
+        // undo, so gating on the model's own uncertainty isn't worth the
+        // friction either. The check itself still runs and still leaves
+        // a visible trail (this was, deliberately, never silent even at
+        // 'high' confidence's opposite end) - it just no longer blocks.
         if (confidence.confidence === 'low') {
-          const reason = confidence.concern
-            ? `Low confidence: ${confidence.concern}`
-            : `ZAO wasn't confident "${label}" matches what you asked for - confirm before it runs.`;
-          history.push(toolResultMessage(call.id, { success: false, error: reason, needsConfirmation: true }));
-          if (!pendingConfirmation) {
-            pendingConfirmation = { toolName, args, reason };
-          }
-          continue;
+          onStep?.(`⚠ ${label} - proceeding automatically (low confidence), ${confidence.concern || 'not fully certain this matches what was asked'}`);
         }
 
         // High confidence stays quiet - narrating certainty on every

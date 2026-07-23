@@ -70,7 +70,7 @@ function AppShell() {
   // BrowserAgentScreen (renders the +/- controls that change it) - two
   // sibling components, neither a parent of the other. Starts at 50% on
   // every launch, not wherever a previous session left it.
-  const [browserFullScreenZoom, setBrowserFullScreenZoom] = useState(0.5);
+  const [browserFullScreenZoom, setBrowserFullScreenZoom] = useState(1);
   const [streamConnected, setStreamConnected] = useState(false);
   const [streamConnectionError, setStreamConnectionError] = useState(null);
 

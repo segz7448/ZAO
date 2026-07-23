@@ -19,7 +19,7 @@ const DEFAULT_PREFS = {
   backend_lan_url: null,
   backend_remote_url: null,
   backend_auth_token: null,
-  permission_mode: 'default',
+  permission_mode: 'auto',
   otel_export_endpoint: null,
 };
 

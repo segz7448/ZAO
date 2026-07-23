@@ -41,7 +41,7 @@ const SCREEN = Dimensions.get('window');
 const PIP_WIDTH = Math.round(SCREEN.width * 0.4);
 const PIP_HEIGHT = Math.round(PIP_WIDTH * (4 / 3)); // 3:4 - compact, not the full streamed-page shape
 const EDGE_MARGIN = 12;
-const DEFAULT_ZOOM = 0.5; // both PiP and full-screen start zoomed out to 50% on launch
+const DEFAULT_ZOOM = 1; // both PiP and full-screen start at 100% on launch
 
 const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
   const {
