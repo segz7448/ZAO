@@ -1,41 +1,23 @@
 /**
- * ZAO - Terminal Router
+ * ZAO - Terminal Status
  *
- * ZAO has TWO terminal tools, but they are NOT symmetric:
- *   - terminal_pc_run_command (pcTerminalTool.js) - the FULL terminal.
- *     The PC backend (server/terminal.js) auto-detects which shell a
- *     command actually needs - cmd.exe, PowerShell, Git Bash, or a raw
- *     Python interpreter - and runs it there. This is the default/
- *     primary terminal for everything: APK builds, Docker, AI inference,
- *     video processing, Android emulator, Visual Studio builds, npm/pip
- *     installs, git operations, PowerShell cmdlets, unix-style
- *     pipelines - the model never has to think about which shell, and
- *     no longer has to think "is this light enough for Termux" either.
- *   - terminal_termux_run_command (termuxTerminalTool.js) - FALLBACK
- *     ONLY, always-on-device. Used automatically when the PC is
- *     unreachable, or when the PC is reachable but has no internet
- *     right now and the command needs it.
+ * ZAO has exactly ONE terminal tool: terminal_pc_run_command
+ * (pcTerminalTool.js) - the full terminal. The PC backend
+ * (server/terminal.js) auto-detects which shell a command actually
+ * needs - cmd.exe, PowerShell, Git Bash, or a raw Python interpreter -
+ * and runs it there. This covers everything: APK builds, Docker, AI
+ * inference, video processing, Android emulator, Visual Studio builds,
+ * npm/pip installs, git operations, PowerShell cmdlets, unix-style
+ * pipelines - the model never has to think about which shell.
  *
- * The model still needs real, current status to route the fallback
- * case correctly, since "is the PC backend up" and "does the PC have
- * internet right now" can both change between messages.
- * terminal_check_status (below) is that tool: a cheap call the model
- * makes before falling back to Termux, returning both PC reachability/
- * internet status and a plain-language routing hint.
+ * There is no on-device fallback terminal. If the PC backend is
+ * unreachable, terminal commands simply cannot run right now - the
+ * model should say so plainly rather than attempting a workaround.
  *
- * This mirrors the person's own mental model exactly:
- *   PC online + has internet   -> terminal_pc_run_command for
- *                                  everything, PC auto-picks the shell
- *   PC online + no internet    -> PC still fine for offline/local tasks
- *                                  (AI inference, local builds), but
- *                                  anything needing internet (npm
- *                                  install, git pull, downloads) should
- *                                  go to Termux instead
- *   PC unreachable             -> everything falls back to Termux;
- *                                  heavy PC-only tasks (APK build, Docker,
- *                                  emulator) simply aren't possible right
- *                                  now and the model should say so rather
- *                                  than attempting them on Termux
+ * checkTerminalStatus() is a cheap call the model can make before a
+ * terminal command if it isn't sure the PC is currently reachable,
+ * returning both PC reachability/internet status and a plain-language
+ * recommendation.
  */
 
 import { checkBackendHealth } from '../backend/backendClient';
@@ -57,7 +39,7 @@ export async function checkTerminalStatus() {
       pcModelReady: false,
       pcInternetAvailable: null,
       recommendation:
-        "PC backend is unreachable right now. Use terminal_termux_run_command for everything until it's back - git pull, npm install, simple scripts, curl, ssh, downloads will work fine there. Heavy PC-only tasks (APK builds, Docker, Android emulator, video processing, Visual Studio builds, large model inference) are not possible until the PC backend is reachable again - tell the person clearly rather than attempting them on Termux.",
+        "PC backend is unreachable right now, so terminal_pc_run_command cannot run anything - there is no fallback terminal. Tell the person clearly that the PC backend needs to be reachable (check that start.bat is running and the connection settings are correct) before any terminal command can be attempted.",
     };
   }
 
@@ -75,7 +57,7 @@ export async function checkTerminalStatus() {
       pcModelReady: health.ready,
       pcInternetAvailable: false,
       recommendation:
-        "PC backend is reachable and is still the full terminal for everything offline (local file operations, already-downloaded builds, AI inference, local Docker/emulator work) - but the PC itself currently has no internet access. Route ONLY internet-dependent commands (npm install, pip install, git pull/clone/push, curl, downloads, anything hitting a remote registry or API) to terminal_termux_run_command instead; everything else stays on terminal_pc_run_command.",
+        "PC backend is reachable and terminal_pc_run_command still works for everything offline (local file operations, already-downloaded builds, AI inference, local Docker/emulator work) - but the PC itself currently has no internet access, so anything internet-dependent (npm install, pip install, git pull/clone/push, curl, downloads, anything hitting a remote registry or API) will fail until the PC's own internet connection is back. Tell the person if a requested command needs internet and this is the situation.",
     };
   }
 
@@ -84,6 +66,6 @@ export async function checkTerminalStatus() {
     pcModelReady: health.ready,
     pcInternetAvailable: pcInternetAvailable === true ? true : null,
     recommendation:
-      "PC backend is reachable and online. Use terminal_pc_run_command for everything - it auto-detects which shell (cmd/PowerShell/Git Bash/Python) each command needs. terminal_termux_run_command is fallback-only and shouldn't be used right now since the PC is fully available.",
+      "PC backend is reachable and online. Use terminal_pc_run_command for everything - it auto-detects which shell (cmd/PowerShell/Git Bash/Python) each command needs.",
   };
 }

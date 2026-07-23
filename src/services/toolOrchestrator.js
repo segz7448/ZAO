@@ -25,7 +25,7 @@
  *
  * MIGRATION NOTE: this used to call runQwenCoderWithCascade, a 4-step
  * OpenRouter/Hugging Face fallback, and later a local llama.rn context.
- * Both are gone - the coder model is now served by a Termux-hosted
+ * Both are gone - the coder model is now served by a PC-hosted
  * backend (src/services/backend/backendClient.js) with no rate limit and
  * nothing to fall back to, so this calls it directly.
  *
@@ -47,10 +47,16 @@ import * as docxTool from './office/docxTool';
 import * as xlsxTool from './office/xlsxTool';
 import * as pptxTool from './office/pptxTool';
 import * as pcTerminalTool from './terminal/pcTerminalTool';
-import * as termuxTerminalTool from './terminal/termuxTerminalTool';
+import * as pcProcessTool from './terminal/pcProcessTool';
+import * as devPreviewTool from './terminal/devPreviewTool';
 import * as pcFilePullTool from './terminal/pcFilePullTool';
+import * as pcFilesystemTool from './terminal/pcFilesystemTool';
+import * as pcGitTool from './terminal/pcGitTool';
+import * as phoneUtilityTool from './phone/phoneUtilityTool';
 import { checkTerminalStatus } from './terminal/terminalRouter';
 import * as webSearchTool from './search/webSearchTool';
+import * as webFetchTool from './search/webFetchTool';
+import * as backgroundSessionTool from './session/backgroundSessionTool';
 import * as timeTool from './time/timeTool';
 import * as reminderService from './reminders/reminderService';
 import { withProceduralHintReported, recordProcedure } from './memory/proceduralMemory';
@@ -70,7 +76,7 @@ const MAX_TOOL_STEPS = 20;
 // rather than a plain re-invocation. Module-scope (not just local to
 // runToolTask) so approveAndRunPendingTool below can tell the two re-run
 // paths apart without redeclaring this list.
-const TERMINAL_TOOL_NAMES_MODULE = new Set(['terminal_pc_run_command', 'terminal_termux_run_command']);
+const TERMINAL_TOOL_NAMES_MODULE = new Set(['terminal_pc_run_command', 'pc_process_start', 'dev_server_start']);
 
 /**
  * OpenAI-style function-calling schema for every GitHub tool function.
@@ -207,6 +213,57 @@ const GITHUB_TOOL_SCHEMAS = [
           body: { type: 'string' },
         },
         required: ['owner', 'repo', 'tagName'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'github_list_workflow_runs',
+      description: "Lists recent GitHub Actions workflow runs for a repo - the way to check whether a push actually triggered CI and whether it passed, failed, or is still running. Call this after github_commit_files/github_create_pull_request if the repo has CI configured, rather than assuming a push succeeded just because the commit itself landed. Optionally filter to one workflow file (e.g. \"ci.yml\") or one branch.",
+      parameters: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string' },
+          repo: { type: 'string' },
+          workflowFile: { type: 'string', description: 'Optional. Filename of the workflow under .github/workflows/, e.g. "ci.yml". Omit to see runs across every workflow in the repo.' },
+          branch: { type: 'string', description: 'Optional. Only show runs for this branch.' },
+        },
+        required: ['owner', 'repo'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'github_get_workflow_run',
+      description: "Gets one workflow run's status/conclusion plus a per-job, per-failed-step breakdown - use this after github_list_workflow_runs shows a run that failed or is still in progress, to see WHICH job and step actually broke rather than just \"failure\". Pass the run's id from github_list_workflow_runs.",
+      parameters: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string' },
+          repo: { type: 'string' },
+          runId: { type: 'number', description: 'The workflow run id, from github_list_workflow_runs.' },
+        },
+        required: ['owner', 'repo', 'runId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'github_trigger_workflow',
+      description: "Manually triggers a workflow that's configured with an `on: workflow_dispatch` trigger (e.g. a deploy or build workflow meant to be run on demand, not just on push/PR). The target workflow file MUST declare workflow_dispatch in its own `on:` block, or GitHub rejects this with a clear error - it won't silently do nothing. This doesn't return a run id directly (GitHub doesn't hand one back synchronously); follow up with github_list_workflow_runs a moment later to find the run it started.",
+      parameters: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string' },
+          repo: { type: 'string' },
+          workflowFile: { type: 'string', description: 'Filename of the workflow under .github/workflows/, e.g. "deploy.yml".' },
+          ref: { type: 'string', description: 'Branch or tag to run the workflow on. Defaults to main.' },
+          inputs: { type: 'object', description: 'Optional. Key-value inputs matching the workflow_dispatch inputs the workflow file declares, if any.' },
+        },
+        required: ['owner', 'repo', 'workflowFile'],
       },
     },
   },
@@ -428,7 +485,7 @@ const FILESYSTEM_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'fs_check_project_syntax',
-      description: "Recursively syntax/JSX-checks every JS/JSX/TS/TSX/JSON file under a folder (skipping node_modules/.git/android/ios/build/dist/.expo) and lists every file that fails, with line/column. Call this before telling the person a project is ready, or before starting/building it. This same check also runs automatically as a gate right in front of terminal_pc_run_command/terminal_termux_run_command whenever the command actually starts or builds a project (npm start, expo start, npm run build, etc.) - that automatic gate blocks the run and hands back the exact errors instead of letting a broken project launch, so you'll typically only need to call this tool directly when you want to check proactively, e.g. before saying a task is done.",
+      description: "Recursively syntax/JSX-checks every JS/JSX/TS/TSX/JSON file under a folder (skipping node_modules/.git/android/ios/build/dist/.expo) and lists every file that fails, with line/column. Call this before telling the person a project is ready, or before starting/building it. This same check also runs automatically as a gate right in front of terminal_pc_run_command whenever the command actually starts or builds a project (npm start, expo start, npm run build, etc.) - that automatic gate blocks the run and hands back the exact errors instead of letting a broken project launch, so you'll typically only need to call this tool directly when you want to check proactively, e.g. before saying a task is done.",
       parameters: {
         type: 'object',
         properties: { path: { type: 'string', description: 'Folder to check, relative to the granted root. Leave empty to check everything.' } },
@@ -616,12 +673,10 @@ const OFFICE_TOOL_SCHEMAS = [
   },
 ];
 
-// Two terminal tools, but NOT a symmetric choice - PC is the full,
-// primary terminal (cmd/PowerShell/Git Bash/Python, auto-selected per
-// command by the PC backend itself - see chooseShell() in
-// server/terminal.js); Termux is fallback-only, used automatically when
-// the PC backend is unreachable, or reachable but the PC itself has no
-// internet for a command that needs it:
+// ZAO has exactly ONE terminal tool - PC is the full terminal
+// (cmd/PowerShell/Git Bash/Python, auto-selected per command by the PC
+// backend itself - see chooseShell() in server/terminal.js). There is
+// no on-device fallback terminal.
 //   - terminal_pc_run_command: the full terminal. One command in, the
 //     PC backend (server/terminal.js) figures out on its own whether it
 //     needs cmd.exe, powershell.exe, Git Bash, or a raw Python
@@ -629,24 +684,21 @@ const OFFICE_TOOL_SCHEMAS = [
 //     emulator, Visual Studio, AI inference, video processing, unix-style
 //     pipelines, PowerShell cmdlets, all of it. Pass `shell` explicitly
 //     only to override a wrong auto-detected guess. Requires the PC
-//     backend to be reachable (LAN or Remote/Cloudflare tunnel).
-//   - terminal_termux_run_command: on-device fallback via Termux's
-//     RUN_COMMAND (see src/services/terminal/termuxTerminalTool.js) -
-//     use it ONLY when terminal_check_status says the PC is unreachable,
-//     or says the PC has no internet and this specific command needs
-//     internet (npm/pip install, git pull/clone/push, curl, downloads).
-//     Requires the one-time Termux setup (allow-external-apps + accepting
-//     Android's RUN_COMMAND permission prompt once).
-//   - terminal_check_status: cheap status check the model should call
-//     before running anything on Termux, since PC reachability and PC
-//     internet access can both change between messages (see
-//     terminalRouter.js).
+//     backend to be reachable (LAN or Remote/Cloudflare tunnel) - if it
+//     isn't, terminal commands simply can't run right now.
+//   - terminal_check_status: cheap status check the model can call
+//     before running a command if it isn't sure the PC is currently
+//     reachable (see terminalRouter.js).
+//   - pc_process_start/status/logs/stop: for anything that shouldn't
+//     block on exiting (dev servers, watchers, long builds) - see
+//     pcProcessTool.js and server/processManager.js. terminal_pc_run_command
+//     waits for the command to finish; these don't.
 const TERMINAL_TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
       name: 'terminal_check_status',
-      description: "Checks whether the PC backend is currently reachable and whether the PC itself has internet access right now, plus a plain-language routing recommendation. Call this BEFORE falling back to terminal_termux_run_command, since PC status can change between messages - the default assumption should always be that terminal_pc_run_command is available.",
+      description: "Checks whether the PC backend is currently reachable and whether the PC itself has internet access right now, plus a plain-language status. There is no fallback terminal - if the PC backend is unreachable, terminal commands simply cannot run. Call this if you aren't sure the PC is currently reachable before attempting a command.",
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -654,7 +706,7 @@ const TERMINAL_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'terminal_pc_run_command',
-      description: "Runs a real shell command on the person's PC - the full terminal. The PC backend auto-detects which shell the command actually needs (cmd.exe, PowerShell, Git Bash, or a raw Python interpreter) and runs it there, so just send the command as you normally would; only set `shell` explicitly if an auto-detected run used the wrong one. This is the default/primary terminal for everything - APK builds, Docker, Android emulator, Visual Studio builds, video processing, AI inference, npm/pip installs, git operations, PowerShell cmdlets, unix-style pipelines, multiple Python versions (python39, python311, etc.). Requires the PC backend to be reachable - if it isn't, this returns a clear connection error instead of pretending the command ran; fall back to terminal_termux_run_command in that case.",
+      description: "Runs a real shell command on the person's PC - the full terminal, and the ONLY terminal ZAO has. The PC backend auto-detects which shell the command actually needs (cmd.exe, PowerShell, Git Bash, or a raw Python interpreter) and runs it there, so just send the command as you normally would; only set `shell` explicitly if an auto-detected run used the wrong one. Use it for everything - APK builds, Docker, Android emulator, Visual Studio builds, video processing, AI inference, npm/pip installs, git operations, PowerShell cmdlets, unix-style pipelines, multiple Python versions (python39, python311, etc.). Requires the PC backend to be reachable - if it isn't, this returns a clear connection error instead of pretending the command ran; there is no fallback to fall back to. Bash/Python-shell commands run inside a real isolated sandbox by default when Docker is available on the PC (see the returned `sandboxed` field) - leave hostAccess unset for ordinary commands so you get that isolation; only set hostAccess: true for something that genuinely needs the real PC (an APK build reaching the Android SDK, the emulator, Visual Studio, Docker itself).",
       parameters: {
         type: 'object',
         properties: {
@@ -664,19 +716,15 @@ const TERMINAL_TOOL_SCHEMAS = [
             enum: ['cmd', 'powershell', 'gitbash', 'python'],
             description: 'Optional. Only set this to force a specific shell - otherwise the PC backend auto-detects the right one for the command.',
           },
+          hostAccess: {
+            type: 'boolean',
+            description: 'Optional, defaults false. Set true to skip the sandbox and run directly on the real PC - needed for anything that has to touch real host state beyond the project folder (APK builds needing the Android SDK, the Android emulator, Visual Studio, Docker itself). Leave unset for ordinary commands so they get real sandbox isolation instead.',
+          },
+          allowNetwork: {
+            type: 'boolean',
+            description: "Optional, defaults false. The sandbox has no network access by default; npm/pip/git commands already get network turned on automatically without needing this. Only set this for something else that genuinely needs outbound access (curl, a script hitting an API) while still running sandboxed rather than with hostAccess: true.",
+          },
         },
-        required: ['command'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'terminal_termux_run_command',
-      description: 'Runs a real shell command directly on the phone via Termux. This is the FALLBACK terminal only - use it when terminal_check_status shows the PC backend is unreachable (everything routes here until it\'s back), or shows the PC is reachable but currently has no internet and this specific command needs internet (npm/pip install, git pull/clone/push, curl, downloads). Do not use this as a "lighter" alternative when the PC is up and online - terminal_pc_run_command handles everything in that case. Requires Termux to be installed with the one-time RUN_COMMAND permission granted - if not yet granted, this returns an error with the exact setup command instead of pretending the command ran. Not suited for heavy tasks (APK builds, Docker, emulators, video processing) - the phone doesn\'t have the resources.',
-      parameters: {
-        type: 'object',
-        properties: { command: { type: 'string' } },
         required: ['command'],
       },
     },
@@ -708,6 +756,533 @@ const TERMINAL_TOOL_SCHEMAS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_process_start',
+      description: "Starts a command as a BACKGROUND process on the PC and returns immediately with an id - use this instead of terminal_pc_run_command for anything meant to keep running (npm start, expo start, a dev server, a watcher, any long build you don't want to sit blocked on). terminal_pc_run_command waits for the command to exit, which means it will simply time out on anything that doesn't - this tool never blocks on that. After starting, use pc_process_status to check whether it's still running (and see its exit code once it stops), pc_process_logs to read its stdout/stderr, and pc_process_stop to kill it. A local notification fires automatically the moment a started process finishes or crashes, so you don't need to poll status just to find out - only poll when you actually need the current state or logs right now.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          label: { type: 'string', description: "Optional short description shown in the finished/crashed notification (e.g. \"expo dev server\"). Defaults to the command itself if omitted." },
+          cwd: { type: 'string', description: 'Optional working directory on the PC. Defaults to the configured project root.' },
+          shell: {
+            type: 'string',
+            enum: ['cmd', 'powershell', 'gitbash', 'python'],
+            description: 'Optional. Only set this to force a specific shell - otherwise the PC backend auto-detects the right one for the command.',
+          },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_process_status',
+      description: "Checks a background process's current status (running, exited, killed, or error) plus its exit code once it has stopped. Use the id returned by pc_process_start.",
+      parameters: {
+        type: 'object',
+        properties: { processId: { type: 'string' } },
+        required: ['processId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_process_logs',
+      description: "Tails a background process's captured stdout/stderr. Use the id returned by pc_process_start. Pass sinceIndex (from a previous call's returned nextIndex) to fetch only new lines since the last check instead of the whole buffer; omit it and set tail to just get the most recent N lines.",
+      parameters: {
+        type: 'object',
+        properties: {
+          processId: { type: 'string' },
+          tail: { type: 'number', description: 'Number of most recent log lines to return. Ignored if sinceIndex is set.' },
+          sinceIndex: { type: 'number', description: "Only return lines after this index - pass the previous call's nextIndex to poll incrementally." },
+        },
+        required: ['processId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_process_stop',
+      description: 'Stops a running background process on the PC (e.g. to shut down a dev server once you\'re done, or before restarting it with new code). Use the id returned by pc_process_start.',
+      parameters: {
+        type: 'object',
+        properties: {
+          processId: { type: 'string' },
+          signal: { type: 'string', description: "Optional OS signal to send, e.g. 'SIGTERM' (default) or 'SIGKILL' for a harder stop." },
+        },
+        required: ['processId'],
+      },
+    },
+  },
+];
+
+// Dev server + visual preview - closes a gap terminal_pc_run_command
+// can't: that tool runs a command to completion/timeout, which is wrong
+// for a dev server that's meant to keep running (npm start, vite, expo
+// start --web, python -m http.server, etc.). These three tools start
+// one as its own tracked background process, detect its local URL, and
+// screenshot the actual rendered page via the PC's shared Playwright
+// Chromium instance (server/browserAgent.js's getBrowser(), same
+// instance the browser agent uses) - so you can verify HTML/CSS
+// actually renders right instead of only reasoning from source.
+const DEV_PREVIEW_TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'dev_server_start',
+      description: "Starts a dev server (npm start, vite, expo start --web, python -m http.server, etc.) on the PC as its own tracked background process - NOT through terminal_pc_run_command, which would just block until its timeout kills the server since dev servers never exit on their own. Detects the server's local URL (http://localhost:PORT or http://127.0.0.1:PORT) from its stdout/stderr and returns it once found (or after ~30s, in which case the server is left running and reported as 'running_no_url_detected' rather than killed - a slow or unrecognized startup banner isn't the same as a failure). Calling this again with the exact same command reuses the already-running server instead of starting a duplicate. Runs the same syntax-check gate terminal_pc_run_command uses before starting/serving a project, so a broken project is reported with exact errors instead of \"starting\" something that immediately crashes. Follow this with dev_preview_screenshot (pass back the returned previewId) to actually see the rendered page.",
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'e.g. "npm start", "vite", "python -m http.server 8000".' },
+          cwd: { type: 'string', description: 'Optional. Working directory on the PC the server should run from - defaults to the configured terminal working directory.' },
+          port: { type: 'number', description: "Optional hint if the command names an explicit port (e.g. --port 3000) - still confirmed against the server's actual output rather than assumed." },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dev_preview_screenshot',
+      description: "Navigates to a running dev server (pass the previewId from dev_server_start) or any other URL, waits for the page to settle, and screenshots the actual rendered result - reusing the same Playwright Chromium instance the browser agent already keeps running on the PC. The image itself can't be seen by you directly (you're a text model), so this saves the PNG to the person's phone under zao-previews/ and returns its path along with real signal you CAN act on: the page title, the HTTP status code, and any browser console errors - e.g. a 404, a blank white page from a JS console error, or a successful render. Tell the person the screenshot was saved and summarize what the status/console signal implies; don't claim to have visually verified layout details you have no way to see.",
+      parameters: {
+        type: 'object',
+        properties: {
+          previewId: { type: 'string', description: 'From a prior dev_server_start call. Use this OR url, not both.' },
+          url: { type: 'string', description: 'An explicit URL to screenshot instead of a tracked dev server. Use this OR previewId, not both.' },
+          fullPage: { type: 'boolean', description: 'Optional, defaults false. Set true to capture the full scrollable page instead of just the viewport.' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dev_server_stop',
+      description: 'Stops a dev server previously started with dev_server_start, freeing its port. Kills the whole process tree (not just the npm/yarn wrapper), so an underlying node/vite process doesn\'t linger orphaned. Safe to call even if it already stopped on its own.',
+      parameters: {
+        type: 'object',
+        properties: { previewId: { type: 'string' } },
+        required: ['previewId'],
+      },
+    },
+  },
+];
+
+// PC filesystem tools - real file operations against the PC's own disk
+// (server/pcFiles.js's /pc-fs/* write routes), in the SAME location
+// terminal_pc_run_command already builds/runs projects. This is
+// distinct from the FILESYSTEM_TOOL_SCHEMAS (fs_*) above, which write
+// into the PHONE's on-device SAF folder - a different machine that
+// terminal_pc_run_command can't see. For any coding request (a
+// website, an app, a script, a multi-file project), use these pc_fs_*
+// tools, not fs_*, so the files land where they can actually be run,
+// built, or installed from.
+const PC_FILESYSTEM_TOOL_SCHEMAS = [
+  {
+    type: 'function',
+
+    function: {
+      name: 'pc_fs_scaffold_project',
+      description: "Creates a new project folder on the PC and writes every given file into it in one call - the normal way to start any multi-file coding request (a website, an app, a script with multiple modules). Prefer this over separate pc_fs_create_folder + pc_fs_create_file calls when you already know the full file list up front. Folder and file paths are relative to the PC's configured project root (same root terminal_pc_run_command's commands execute from).",
+      parameters: {
+        type: 'object',
+        properties: {
+          folderPath: { type: 'string', description: 'e.g. "my-landing-page"' },
+          files: {
+            type: 'array',
+            description: 'Every file to create, with paths relative to folderPath.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'e.g. "index.html" or "css/style.css" or "components/Header.js"' },
+                content: { type: 'string' },
+              },
+              required: ['path', 'content'],
+            },
+          },
+        },
+        required: ['folderPath', 'files'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_create_folder',
+      description: 'Creates a folder (and any missing parent folders) on the PC, relative to the configured project root. Use pc_fs_scaffold_project instead when you already know the files you\'re about to add.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_create_file',
+      description: "Creates (or, with overwrite:true, replaces) one text file with given content on the PC, relative to the configured project root. Creates any missing parent folders automatically. For a new multi-file project, prefer pc_fs_scaffold_project; use this for adding or replacing a single file in an existing project.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'e.g. myproject/src/App.js' },
+          content: { type: 'string' },
+          overwrite: { type: 'boolean', description: 'Optional, defaults false. Set true to replace a file that already exists.' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_edit_file',
+      description: "Makes a precise, targeted change to one existing text file on the PC by replacing an exact snippet with new text - like fs_edit_file, but for the PC filesystem. oldString must match the file's current content exactly and uniquely (include enough surrounding context to pin it down), or this returns an error instead of guessing. Read the file first (pc_list_directory to find it, terminal_pc_run_command with a quick `type`/`cat` to view it) so oldString is copied from the real current content.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          oldString: { type: 'string' },
+          newString: { type: 'string' },
+          replaceAll: { type: 'boolean', description: 'Optional, defaults false. Set true if oldString intentionally appears more than once and every occurrence should change.' },
+        },
+        required: ['path', 'oldString', 'newString'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_read_file',
+      description: "Reads an existing text file's exact current content on the PC. Use this before pc_fs_edit_file so oldString is copied from the real content, not guessed - and before telling the person what's in a file.",
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_delete',
+      description: 'Deletes a file, or a folder and everything in it, on the PC. No undo - same trust level as running rm/del via terminal_pc_run_command. (A checkpoint is captured automatically first - see pc_fs_rewind_checkpoint if this turns out to be a mistake.)',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_rename',
+      description: 'Renames a file or folder on the PC within its current parent folder.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          newName: { type: 'string', description: 'Plain new name, not a path.' },
+        },
+        required: ['path', 'newName'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_move',
+      description: 'Moves a file or folder on the PC into a different destination folder.',
+      parameters: {
+        type: 'object',
+        properties: {
+          sourcePath: { type: 'string' },
+          destinationFolderPath: { type: 'string', description: 'Use "" for the project root itself.' },
+          keepOriginal: { type: 'boolean', description: 'Optional, defaults false. Set true to copy instead of move.' },
+        },
+        required: ['sourcePath', 'destinationFolderPath'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_write_binary',
+      description: "Creates (or, with overwrite:true, replaces) one BINARY file on the PC from base64 content - the counterpart to pc_fs_create_file for images/icons/generated assets that aren't UTF-8 text (pc_fs_create_file would corrupt them). Creates any missing parent folders automatically.",
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          contentB64: { type: 'string', description: 'Base64-encoded bytes.' },
+          overwrite: { type: 'boolean' },
+        },
+        required: ['path', 'contentB64'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_grep',
+      description: 'Literal (case-insensitive by default) substring search across text files on the PC - finds where something is defined or used before deciding what to pc_fs_edit_file. Skips node_modules/.git/build/dist and binary-looking files automatically.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          path: { type: 'string', description: 'Optional, defaults to the whole project root.' },
+          caseSensitive: { type: 'boolean' },
+          maxResults: { type: 'integer', description: 'Optional, defaults 50, capped at 200.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_glob',
+      description: 'Finds files on the PC by name pattern (e.g. "**/*.test.js" or "src/**/*.css"). Supports *, **, ? only - no brace expansion or character classes.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string' },
+          path: { type: 'string', description: 'Optional, defaults to the whole project root.' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_list_checkpoints',
+      description: 'Lists recent PC filesystem checkpoints (newest first) - each one was captured automatically right before a pc_fs_write_file/edit/delete/rename/move/write_binary call mutated something on the PC. Check this before pc_fs_rewind_checkpoint to find the right id.',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'integer', description: 'Optional, defaults 20.' } },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_rewind_checkpoint',
+      description: "Restores whatever a PC filesystem checkpoint captured - puts a file/folder back to its exact content right before that mutation, or removes what a create introduced if it didn't exist before. No redo once rewound. Use pc_fs_list_checkpoints first to find the right checkpointId.",
+      parameters: {
+        type: 'object',
+        properties: { checkpointId: { type: 'string' } },
+        required: ['checkpointId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_zip',
+      description: 'Zips an entire folder on the PC into a real .zip file - skips node_modules/.git/.zao-checkpoints/dist/build automatically. Use to package a finished project, or before pc_pull_file brings a build down to the phone.',
+      parameters: {
+        type: 'object',
+        properties: {
+          folderPath: { type: 'string' },
+          zipPath: { type: 'string', description: 'e.g. "myproject.zip" or "out/myproject.zip"' },
+        },
+        required: ['folderPath', 'zipPath'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_extract_zip',
+      description: 'Unpacks an existing .zip on the PC into a destination folder - a downloaded starter/template, or something the person dropped into the project folder.',
+      parameters: {
+        type: 'object',
+        properties: {
+          zipPath: { type: 'string' },
+          destinationFolderPath: { type: 'string', description: 'Use "" for the project root itself.' },
+        },
+        required: ['zipPath', 'destinationFolderPath'],
+      },
+    },
+  },
+];
+
+// PC git tools (server/pcGit.js) - structured git operations via
+// execFile (no shell string, no quoting risk for commit messages/branch
+// names) rather than the model building `git commit -m "..."` shell
+// strings for terminal_pc_run_command. `path` in every one of these is
+// a project folder relative to the PC's configured project root.
+const PC_GIT_TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_init',
+      description: 'Initializes a new git repository in a folder on the PC (creates the folder first if needed).',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_status',
+      description: 'Gets the current git status of a PC repo - current branch, ahead/behind counts vs its upstream, and every changed/untracked file with its status code. Check this before deciding what to pc_git_add/pc_git_commit.',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_add',
+      description: 'Stages files for commit in a PC repo. Omit both files and all (or pass all:true) to stage everything changed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Specific file paths to stage, relative to path.' },
+          all: { type: 'boolean' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_commit',
+      description: 'Commits currently staged changes in a PC repo with the given message. Run pc_git_add first if nothing is staged yet.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, message: { type: 'string' } },
+        required: ['path', 'message'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_push',
+      description: 'Pushes committed changes from a PC repo to a remote (default "origin"). Set setUpstream:true the first time a new branch is pushed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          remote: { type: 'string', description: 'Optional, defaults "origin".' },
+          branch: { type: 'string', description: 'Optional - defaults to the current branch if omitted.' },
+          setUpstream: { type: 'boolean' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_pull',
+      description: 'Pulls the latest changes into a PC repo from a remote (default "origin").',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          remote: { type: 'string', description: 'Optional, defaults "origin".' },
+          branch: { type: 'string' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_checkout',
+      description: 'Switches a PC repo to a different branch, optionally creating it first.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          branch: { type: 'string' },
+          create: { type: 'boolean', description: 'Set true to create the branch as part of switching to it.' },
+        },
+        required: ['path', 'branch'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_remote_add',
+      description: 'Adds a git remote to a PC repo (or updates its URL if a remote with that name already exists) - e.g. pointing "origin" at a freshly created GitHub repo before the first push.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, name: { type: 'string' }, url: { type: 'string' } },
+        required: ['path', 'name', 'url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_log',
+      description: 'Gets recent commit history for a PC repo, newest first - hash, author, date, and subject for each commit.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, limit: { type: 'integer', description: 'Optional, defaults 20.' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_git_diff',
+      description: 'Gets the unstaged (or, with staged:true, staged) diff for a PC repo - the actual line-by-line changes, not just which files changed.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, staged: { type: 'boolean' } },
+        required: ['path'],
+      },
+    },
+  },
+];
+
+// Phone-native utility tools - small actions on the phone itself that
+// aren't filesystem operations: putting text on the clipboard, and
+// handing an existing file to Android's native share sheet.
+const PHONE_UTILITY_TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'phone_clipboard_copy',
+      description: 'Copies text to the phone\'s clipboard - use when the person asks to copy something (a command, a link, a snippet) rather than making them long-press and select it out of the chat themselves.',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'phone_share_file',
+      description: "Opens Android's native share sheet for an existing file on the phone (relative to the SAF folder granted in Settings > Filesystem) - lets the person send it straight to WhatsApp, Drive, email, etc. Use fs_create_file/pc_fs_create_file plus pc_pull_file first if the file doesn't already exist on the phone.",
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Relative to the granted phone folder.' } },
+        required: ['path'],
+      },
+    },
+  },
 ];
 
 // web_search - lets the local coder model pull in real, current
@@ -731,6 +1306,78 @@ const WEB_SEARCH_TOOL_SCHEMAS = [
           maxResults: { type: 'integer', description: 'Defaults to 5, max 10' },
         },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: "Fetches ONE specific URL - from a web_search result, a link the person pasted, or docs you already know the address of - and returns its actual readable text content, not just a snippet. Use this after web_search when a result's snippet isn't enough to answer confidently, or any time the person gives you a URL directly. Won't work on pages that need JS to render their real content (a plain fetch, not a browser) - if the returned text looks empty/unhelpful for a JS-heavy site, say so rather than guessing at what the page contains.",
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full URL including https://' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+];
+
+// bgtask_* - resumable background sessions (see server/backgroundSessions.js).
+// Use for anything genuinely long (a big build, a multi-file refactor
+// across a large project, a research pass needing many searches/fetches)
+// where the person would reasonably want to close the app and check back
+// later rather than keep this conversation open and waiting. The session
+// runs entirely on the PC with its own smaller tool set (PC terminal/
+// filesystem/git/process, web search/fetch) - it has NO access to this
+// conversation's history, so bgtask_start's prompt must be complete and
+// self-contained, same bar as agent_spawn_subagents' prompt field.
+const BACKGROUND_SESSION_TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'bgtask_start',
+      description: "Starts a task running on the PC backend that KEEPS RUNNING after this conversation ends or the phone app closes - the person can check back later (in a fresh conversation, even) to see how it went. Use this for genuinely long-running work the person doesn't need to babysit turn-by-turn: a large build, a broad multi-file refactor, a research task needing many searches, anything you'd otherwise warn might take a while. Don't use this for anything quick enough to just finish in this turn. The prompt gets NO context from this conversation - write it as a complete, standalone instruction (paths, what already exists, what \"done\" looks like), exactly like a subagent's prompt.",
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'Complete, self-contained task description - this is ALL the context the session will have.' },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bgtask_check',
+      description: 'Checks a background session by id - its status (running/completed/failed/stopped), recent step log, and final answer if it finished. Use this when the person asks about a task they started earlier, or to check whether one you just started is still running.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'Session id, from bgtask_start or bgtask_list.' } },
+        required: ['id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bgtask_list',
+      description: 'Lists background sessions (newest first) with their status and last step - use this when the person asks what background tasks they have going, or if you only have a description of one and need to find its id.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bgtask_stop',
+      description: 'Stops a still-running background session by id before its next tool step.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
       },
     },
   },
@@ -995,6 +1642,18 @@ export const TOOL_REGISTRY = {
     run: (args) => githubTool.createRelease(args.owner, args.repo, args),
     label: (args) => `Created release ${args.tagName}`,
   },
+  github_list_workflow_runs: {
+    run: (args) => githubTool.listWorkflowRuns(args.owner, args.repo, { workflowFile: args.workflowFile, branch: args.branch }),
+    label: (args) => `Checked workflow runs for ${args.owner}/${args.repo}`,
+  },
+  github_get_workflow_run: {
+    run: (args) => githubTool.getWorkflowRun(args.owner, args.repo, args.runId),
+    label: (args) => `Checked workflow run ${args.runId}`,
+  },
+  github_trigger_workflow: {
+    run: (args) => githubTool.triggerWorkflowDispatch(args.owner, args.repo, args.workflowFile, { ref: args.ref, inputs: args.inputs }),
+    label: (args) => `Triggered workflow ${args.workflowFile}`,
+  },
   fs_create_file: {
     run: (args) => filesystemTool.createFile(args.path, args.content),
     label: (args) => `Created ${args.path}`,
@@ -1062,6 +1721,26 @@ export const TOOL_REGISTRY = {
   web_search: {
     run: (args) => webSearchTool.search(args.query, args.maxResults || 5),
     label: (args) => `Searched the web: "${args.query}"`,
+  },
+  web_fetch: {
+    run: (args) => webFetchTool.fetchUrl(args.url),
+    label: (args) => `Fetched ${args.url}`,
+  },
+  bgtask_start: {
+    run: (args) => backgroundSessionTool.start(args.prompt),
+    label: (args) => `Started background task: ${args.prompt.slice(0, 60)}${args.prompt.length > 60 ? '...' : ''}`,
+  },
+  bgtask_check: {
+    run: (args) => backgroundSessionTool.check(args.id),
+    label: (args) => `Checked background task ${args.id}`,
+  },
+  bgtask_list: {
+    run: () => backgroundSessionTool.list(),
+    label: () => 'Listed background tasks',
+  },
+  bgtask_stop: {
+    run: (args) => backgroundSessionTool.stop(args.id),
+    label: (args) => `Stopped background task ${args.id}`,
   },
   data_analyze_file: {
     run: (args) => dataAnalysisTool.analyzeFile(args.path, {
@@ -1137,12 +1816,36 @@ export const TOOL_REGISTRY = {
     label: () => 'Checked terminal status',
   },
   terminal_pc_run_command: {
-    run: (args) => pcTerminalTool.runCommand(args.command, { shell: args.shell || null }),
+    run: (args) => pcTerminalTool.runCommand(args.command, { shell: args.shell || null, hostAccess: args.hostAccess === true, allowNetwork: args.allowNetwork === true }),
     label: (args) => `Ran on PC: ${args.command}`,
   },
-  terminal_termux_run_command: {
-    run: (args) => termuxTerminalTool.runCommand(args.command),
-    label: (args) => `Ran on Termux: ${args.command}`,
+  pc_process_start: {
+    run: (args) => pcProcessTool.startProcess(args.command, { shell: args.shell || null, cwd: args.cwd || null, label: args.label || null }),
+    label: (args) => `Started background process on PC: ${args.command}`,
+  },
+  pc_process_status: {
+    run: (args) => pcProcessTool.checkStatus(args.processId),
+    label: (args) => `Checked status of process ${args.processId}`,
+  },
+  pc_process_logs: {
+    run: (args) => pcProcessTool.tailLogs(args.processId, { tail: args.tail, sinceIndex: args.sinceIndex }),
+    label: (args) => `Read logs for process ${args.processId}`,
+  },
+  pc_process_stop: {
+    run: (args) => pcProcessTool.stopProcess(args.processId, { signal: args.signal || undefined }),
+    label: (args) => `Stopped process ${args.processId}`,
+  },
+  dev_server_start: {
+    run: (args) => devPreviewTool.startServer(args.command, { workingDirectory: args.cwd || null, port: args.port || null }),
+    label: (args) => `Started dev server: ${args.command}`,
+  },
+  dev_preview_screenshot: {
+    run: (args) => devPreviewTool.screenshot({ previewId: args.previewId || null, url: args.url || null, fullPage: args.fullPage === true }),
+    label: (args) => `Screenshotted ${args.url || args.previewId || 'preview'}`,
+  },
+  dev_server_stop: {
+    run: (args) => devPreviewTool.stopServer(args.previewId),
+    label: (args) => `Stopped dev server ${args.previewId}`,
   },
   pc_list_directory: {
     run: (args) => pcFilePullTool.listDirectory(args.path || ''),
@@ -1151,6 +1854,114 @@ export const TOOL_REGISTRY = {
   pc_pull_file: {
     run: (args) => pcFilePullTool.pullFile(args.pcPath, args.devicePath),
     label: (args) => `Pulled ${args.pcPath} from PC to ${args.devicePath}`,
+  },
+  pc_fs_scaffold_project: {
+    run: (args) => pcFilesystemTool.scaffoldProject(args.folderPath, args.files || []),
+    label: (args) => `Created project ${args.folderPath} on PC (${(args.files || []).length} file${(args.files || []).length === 1 ? '' : 's'})`,
+  },
+  pc_fs_create_folder: {
+    run: (args) => pcFilesystemTool.createFolder(args.path),
+    label: (args) => `Created folder on PC: ${args.path}`,
+  },
+  pc_fs_create_file: {
+    run: (args) => pcFilesystemTool.createFile(args.path, args.content, { overwrite: !!args.overwrite }),
+    label: (args) => `Created ${args.path} on PC`,
+  },
+  pc_fs_edit_file: {
+    run: (args) => pcFilesystemTool.editFile(args.path, args.oldString, args.newString, { replaceAll: !!args.replaceAll }),
+    label: (args) => `Edited ${args.path} on PC`,
+  },
+  pc_fs_delete: {
+    run: (args) => pcFilesystemTool.deleteEntry(args.path),
+    label: (args) => `Deleted ${args.path} on PC`,
+  },
+  pc_fs_read_file: {
+    run: (args) => pcFilesystemTool.readFile(args.path),
+    label: (args) => `Read ${args.path} on PC`,
+  },
+  pc_fs_rename: {
+    run: (args) => pcFilesystemTool.renameEntry(args.path, args.newName),
+    label: (args) => `Renamed ${args.path} to ${args.newName} on PC`,
+  },
+  pc_fs_move: {
+    run: (args) => pcFilesystemTool.moveEntry(args.sourcePath, args.destinationFolderPath, { keepOriginal: !!args.keepOriginal }),
+    label: (args) => `Moved ${args.sourcePath} to ${args.destinationFolderPath || '/'} on PC`,
+  },
+  pc_fs_write_binary: {
+    run: (args) => pcFilesystemTool.writeBinaryFile(args.path, args.contentB64, { overwrite: !!args.overwrite }),
+    label: (args) => `Wrote binary file ${args.path} on PC`,
+  },
+  pc_fs_grep: {
+    run: (args) => pcFilesystemTool.grep(args.query, { path: args.path, caseSensitive: !!args.caseSensitive, maxResults: args.maxResults }),
+    label: (args) => `Searched PC project for "${args.query}"`,
+  },
+  pc_fs_glob: {
+    run: (args) => pcFilesystemTool.glob(args.pattern, { path: args.path }),
+    label: (args) => `Found files matching "${args.pattern}" on PC`,
+  },
+  pc_fs_list_checkpoints: {
+    run: (args) => pcFilesystemTool.listCheckpoints({ limit: args.limit }),
+    label: () => 'Listed recent PC checkpoints',
+  },
+  pc_fs_rewind_checkpoint: {
+    run: (args) => pcFilesystemTool.rewindCheckpoint(args.checkpointId),
+    label: (args) => `Rewound PC checkpoint ${args.checkpointId}`,
+  },
+  pc_fs_zip: {
+    run: (args) => pcFilesystemTool.zipFolder(args.folderPath, args.zipPath),
+    label: (args) => `Zipped ${args.folderPath} to ${args.zipPath} on PC`,
+  },
+  pc_fs_extract_zip: {
+    run: (args) => pcFilesystemTool.extractZip(args.zipPath, args.destinationFolderPath),
+    label: (args) => `Extracted ${args.zipPath} to ${args.destinationFolderPath || '/'} on PC`,
+  },
+  pc_git_init: {
+    run: (args) => pcGitTool.init(args.path),
+    label: (args) => `Initialized git repo at ${args.path} on PC`,
+  },
+  pc_git_status: {
+    run: (args) => pcGitTool.status(args.path),
+    label: (args) => `Checked git status of ${args.path} on PC`,
+  },
+  pc_git_add: {
+    run: (args) => pcGitTool.add(args.path, { files: args.files, all: args.all }),
+    label: (args) => `Staged files in ${args.path} on PC`,
+  },
+  pc_git_commit: {
+    run: (args) => pcGitTool.commit(args.path, args.message),
+    label: (args) => `Committed in ${args.path} on PC`,
+  },
+  pc_git_push: {
+    run: (args) => pcGitTool.push(args.path, { remote: args.remote, branch: args.branch, setUpstream: !!args.setUpstream }),
+    label: (args) => `Pushed ${args.path} from PC`,
+  },
+  pc_git_pull: {
+    run: (args) => pcGitTool.pull(args.path, { remote: args.remote, branch: args.branch }),
+    label: (args) => `Pulled ${args.path} on PC`,
+  },
+  pc_git_checkout: {
+    run: (args) => pcGitTool.checkout(args.path, args.branch, { create: !!args.create }),
+    label: (args) => `Checked out ${args.branch} in ${args.path} on PC`,
+  },
+  pc_git_remote_add: {
+    run: (args) => pcGitTool.remoteAdd(args.path, args.name, args.url),
+    label: (args) => `Set remote ${args.name} for ${args.path} on PC`,
+  },
+  pc_git_log: {
+    run: (args) => pcGitTool.log(args.path, { limit: args.limit }),
+    label: (args) => `Checked git log for ${args.path} on PC`,
+  },
+  pc_git_diff: {
+    run: (args) => pcGitTool.diff(args.path, { staged: !!args.staged }),
+    label: (args) => `Checked git diff for ${args.path} on PC`,
+  },
+  phone_clipboard_copy: {
+    run: (args) => phoneUtilityTool.copyToClipboard(args.text),
+    label: () => 'Copied to clipboard',
+  },
+  phone_share_file: {
+    run: (args) => phoneUtilityTool.shareFile(args.path),
+    label: (args) => `Opened share sheet for ${args.path}`,
   },
   agent_spawn_subagents: {
     // The (context, onStep) this needs comes from runToolTask's closure -
@@ -1197,10 +2008,14 @@ export const TOOL_REGISTRY = {
 function domainForTool(toolName) {
   if (toolName.startsWith('github_')) return 'github';
   if (toolName.startsWith('fs_')) return 'filesystem';
+  if (toolName.startsWith('pc_fs_')) return 'filesystem';
   if (toolName.startsWith('terminal_')) return 'terminal';
+  if (toolName.startsWith('dev_server_') || toolName === 'dev_preview_screenshot') return 'terminal';
+  if (toolName.startsWith('pc_')) return 'terminal';
   if (toolName.startsWith('pdf_')) return 'pdf';
   if (['docx_create', 'xlsx_create', 'csv_create', 'pptx_create'].includes(toolName)) return 'office';
-  if (toolName === 'web_search') return 'search';
+  if (toolName === 'web_search' || toolName === 'web_fetch') return 'search';
+  if (toolName.startsWith('bgtask_')) return 'background_session';
   if (toolName === 'data_analyze_file') return 'data';
   if (toolName.startsWith('reminder_')) return 'reminders';
   if (toolName.startsWith('agent_')) return 'agent';
@@ -1216,6 +2031,9 @@ function eventTypeForTool(functionName) {
     github_create_release: 'github_release_created',
     github_clone_repo: 'github_read',
     github_read_file: 'github_read',
+    github_list_workflow_runs: 'github_read',
+    github_get_workflow_run: 'github_read',
+    github_trigger_workflow: 'github_workflow_triggered',
     fs_create_file: 'file_created',
     fs_create_folder: 'file_created',
     fs_delete: 'file_deleted',
@@ -1233,6 +2051,11 @@ function eventTypeForTool(functionName) {
     fs_check_syntax: 'file_browsed',
     fs_check_project_syntax: 'file_browsed',
     web_search: 'web_search',
+    web_fetch: 'web_fetch',
+    bgtask_start: 'background_session_started',
+    bgtask_check: 'background_session_checked',
+    bgtask_list: 'background_session_listed',
+    bgtask_stop: 'background_session_stopped',
     time_get_current: 'time_checked',
     reminder_create: 'reminder_created',
     reminder_list: 'reminder_listed',
@@ -1248,9 +2071,40 @@ function eventTypeForTool(functionName) {
     pptx_create: 'file_created',
     terminal_check_status: 'terminal_attempted',
     terminal_pc_run_command: 'terminal_attempted',
-    terminal_termux_run_command: 'terminal_attempted',
+    dev_server_start: 'terminal_attempted',
+    dev_preview_screenshot: 'terminal_attempted',
+    dev_server_stop: 'terminal_attempted',
     pc_list_directory: 'file_browsed',
     pc_pull_file: 'file_created',
+    pc_fs_scaffold_project: 'file_created',
+    pc_fs_create_folder: 'file_created',
+    pc_fs_create_file: 'file_created',
+    pc_fs_edit_file: 'file_modified',
+    pc_fs_delete: 'file_deleted',
+    pc_fs_read_file: 'file_browsed',
+    pc_fs_rename: 'file_modified',
+    pc_fs_move: 'file_modified',
+    pc_fs_write_binary: 'file_created',
+    pc_fs_zip: 'file_created',
+    pc_fs_extract_zip: 'file_created',
+    pc_fs_grep: 'file_browsed',
+    pc_fs_glob: 'file_browsed',
+    pc_fs_list_checkpoints: 'file_browsed',
+    pc_fs_rewind_checkpoint: 'file_modified',
+    pc_fs_zip: 'file_created',
+    pc_fs_extract_zip: 'file_created',
+    pc_git_init: 'file_modified',
+    pc_git_status: 'file_browsed',
+    pc_git_add: 'file_modified',
+    pc_git_commit: 'file_modified',
+    pc_git_push: 'file_modified',
+    pc_git_pull: 'file_modified',
+    pc_git_checkout: 'file_modified',
+    pc_git_remote_add: 'file_modified',
+    pc_git_log: 'file_browsed',
+    pc_git_diff: 'file_browsed',
+    phone_clipboard_copy: 'general',
+    phone_share_file: 'general',
     agent_spawn_subagents: 'subagent_run',
     agent_create_worktree: 'worktree_created',
     agent_list_worktrees: 'worktree_listed',
@@ -1345,15 +2199,27 @@ export async function runToolTask(userRequest, context = {}, onStep = null) {
 
   const systemPrompt = `You are ZAO's project manager. The person describes what they want in plain language; you decide which tool functions to call, in what order, to accomplish it - they should never need to name a specific function or press a button themselves.
 
-You have these kinds of tools available: GitHub (repos, commits, branches, PRs, releases), Filesystem (creating/moving/renaming/deleting/zipping files directly on the person's device, plus fs_read_file/fs_grep/fs_glob/fs_edit_file for precisely reading and editing existing code or text files), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file, for anything beyond a quick glance), PDF (create/merge/split), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file), Terminal, and Web Search - use whichever combination the request actually needs.${isSubagent ? '' : `
+You have these kinds of tools available: GitHub (repos, commits, branches, PRs, releases - operates through the GitHub API, not a local checkout), Filesystem (creating/moving/renaming/deleting/zipping files directly on the person's PHONE, plus fs_read_file/fs_grep/fs_glob/fs_edit_file for precisely reading and editing existing files there), PC Filesystem (pc_fs_scaffold_project/pc_fs_create_file/pc_fs_write_binary/pc_fs_edit_file/pc_fs_rename/pc_fs_move/pc_fs_delete/pc_fs_zip/pc_fs_extract_zip, plus pc_fs_read_file/pc_fs_grep/pc_fs_glob for reading and searching - real file operations on the PC's own disk, in the same place Terminal builds/runs things), PC Git (pc_git_init/status/add/commit/push/pull/checkout/remote_add/log/diff - a real local git repo on the PC, distinct from the GitHub tools above which never touch a local checkout), PC Process (pc_process_start/status/logs/stop - track a long-running background process on the PC by id, separate from the Terminal tool below which blocks until a command exits), Dev Preview (dev_server_start/stop and dev_preview_screenshot - start a dev server as a tracked background process, detect its localhost URL, and screenshot its actual rendered output - use this to run and preview a project's dev server), Phone utilities (phone_clipboard_copy to put text on the phone's clipboard, phone_share_file to open Android's native share sheet for a file already on the phone), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file, for anything beyond a quick glance), PDF (create/merge/split), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file), Terminal, Web Search, and Web Fetch - use whichever combination the request actually needs.
+
+Web Search finds candidate pages (title, URL, short snippet); Web Fetch (web_fetch) reads one specific URL in full - use web_fetch after a web_search result whose snippet isn't enough, or any time the person gives you a URL directly. It's a plain fetch, not a browser, so it won't see content a page only renders via JS.
+
+Background Sessions (bgtask_start/bgtask_check/bgtask_list/bgtask_stop): for a task big enough that the person would reasonably want to close the app and check back later instead of waiting on this conversation - a large build, a broad multi-file refactor, a research pass needing many searches - call bgtask_start instead of doing it inline. It runs on the PC backend independently of this conversation and the phone connection, with its own smaller tool set (PC terminal/filesystem/git/process, web search/fetch); tell the person you've kicked it off in the background and how to check on it (bgtask_check with the id, or bgtask_list if they come back without it). The prompt you give bgtask_start gets NO context from this conversation - write it complete and self-contained, exactly like a subagent's prompt.${isSubagent ? '' : `
 
 You can also spawn subagents (agent_spawn_subagents) for genuinely independent sub-parts of a bigger task - each one runs in its own isolated context in parallel and reports back only its final answer. Use this for real parallelism (e.g. three unrelated files at once), not for ordinary sequential steps.
 
 If the person wants to work on two branches of the same project at once without them interfering, use agent_create_worktree (agent_list_worktrees to see what's already active) - it forks off a new, isolated conversation for the branch.`}
 
+CODING REQUESTS (a website, an app, a script, anything with real source files - HTML/CSS/JS, components, modules): use the PC Filesystem tools (pc_fs_*), NOT fs_* - fs_* writes to the phone, a different machine Terminal can't see or build from. For a new project, call pc_fs_scaffold_project once with the folder name and every file's path+content together, so the folder and all its files land in one place before you ever need to npm install or run anything. Only fall back to pc_fs_create_folder + separate pc_fs_create_file calls if you don't have the full file list up front (e.g. the person wants to see one file before you write the rest). Once code exists, pc_fs_read_file then pc_fs_edit_file makes one precise, targeted change rather than rewriting a whole file - use pc_fs_grep to find where something is defined/used and pc_fs_glob to find files by name pattern first. pc_fs_write_binary is for anything that isn't UTF-8 text (a generated icon/favicon/image) - pc_fs_create_file would corrupt binary bytes. pc_fs_rename/pc_fs_move reorganize an existing project without a full delete+recreate. pc_fs_zip packages a finished project into a single .zip (e.g. before pc_pull_file brings it down to the phone, or just to hand the person something shareable); pc_fs_extract_zip unpacks a downloaded template or starter project - the PC has no zip/unzip of its own to shell out to via terminal_pc_run_command, so use these instead of a terminal command. Every mutating pc_fs_* call snapshots the file first, so if an edit or delete goes wrong, pc_fs_list_checkpoints then pc_fs_rewind_checkpoint puts it back - mention this to the person if something needs undoing rather than trying to reconstruct it from memory. fs_* stays for the phone side: files the person already has on-device, or something you're explicitly asked to save to their phone rather than build/run.
+
+VERSION CONTROL for a PC project: use pc_git_* (a real local repo via execFile, not a shell string), not GitHub's github_commit_files - that API tool never touches a local checkout, so it and a real git repo on the PC would silently drift apart if mixed for the same project. pc_git_init once at the start, pc_git_status before deciding what to stage, pc_git_add then pc_git_commit for each meaningful chunk of work (write real, specific commit messages, not "update"), and pc_git_push when the person wants it on GitHub (pc_git_remote_add first if origin isn't set yet - use github_create_repo to actually create the empty GitHub repo, then point pc_git_remote_add's url at it).
+
+PREVIEWING what a project actually looks like: dev_server_start runs `npm start`/`npx serve .`/etc. in the background as its own tracked process (terminal_pc_run_command would just hang waiting for it to exit, since dev servers don't exit) and auto-detects its localhost URL from stdout/stderr, returning it once found (or reporting 'running_no_url_detected' after ~30s rather than killing it, if it's just slow to print a recognizable banner). Calling it again with the same command reuses the already-running server instead of starting a duplicate. Follow up with dev_preview_screenshot (pass the returned previewId, or an explicit url) to see the real rendered page - it also reports the page title, HTTP status, and any browser console errors, so a blank page or a 404 shows up as real signal instead of a guess. dev_server_stop when done, or before starting a conflicting server on the same port.
+
+LONG-RUNNING BACKGROUND WORK on the PC that isn't a dev server (a long build, a batch job, anything you don't want to block Terminal's timeout on): use pc_process_start, then pc_process_status/pc_process_logs to check on it and pc_process_stop when done.
+
 When changing an EXISTING file, prefer fs_read_file then fs_edit_file over fs_create_file - fs_edit_file makes one precise, targeted change and fails safely if what you're replacing isn't unique in the file, instead of risking an unrelated rewrite. Use fs_grep to find where something is defined/used across a project, and fs_glob to find files by name pattern (e.g. all .test.js files) before deciding what to touch.
 
-Every fs_create_file and fs_edit_file call against a .js/.jsx/.ts/.tsx/.json file is automatically syntax/JSX-checked with a real parser before anything is written - if the content is broken, the call fails with the exact line/column instead of saving bad code, so fix the reported error and retry rather than treating it as a system problem. Before telling the person a project is ready, or before running/building it, call fs_check_project_syntax - the same check also runs automatically right before terminal_pc_run_command/terminal_termux_run_command whenever the command starts or builds a project (npm start, expo start, npm run build, etc.), and blocks the run with the exact errors if anything fails.
+Every fs_create_file and fs_edit_file call against a .js/.jsx/.ts/.tsx/.json file is automatically syntax/JSX-checked with a real parser before anything is written - if the content is broken, the call fails with the exact line/column instead of saving bad code, so fix the reported error and retry rather than treating it as a system problem. Before telling the person a project is ready, or before running/building it, call fs_check_project_syntax - the same check also runs automatically right before terminal_pc_run_command whenever the command starts or builds a project (npm start, expo start, npm run build, etc.), and blocks the run with the exact errors if anything fails.
 
 Use web_search for anything time-sensitive, current, or that you're not confident about from what you already know - current events, prices, library versions, docs, unfamiliar topics.
 
@@ -1361,13 +2227,17 @@ For "what time is it" / "what's the time in [place]" requests, call time_get_cur
 
 For any task with 3 or more distinct steps, call todo_write first to lay out the plan (one item 'in_progress', the rest 'pending'), then call it again as each step's status changes - this is how the person sees live progress instead of silence until everything finishes.
 
-Terminal defaults to the PC: terminal_pc_run_command is the full terminal - full system access, and the PC backend itself auto-detects whether a command needs cmd.exe, PowerShell, Git Bash, or a raw Python interpreter, so just send the command normally (only set `shell` explicitly to override a wrong guess). Use it for everything by default - APK builds, Docker, Android emulator, Visual Studio, video processing, AI inference, npm/pip installs, git operations, quick scripts, all of it. terminal_termux_run_command is fallback-ONLY, not a second everyday option: use it only when terminal_check_status shows the PC backend is unreachable (route everything there until it's back), or shows the PC is reachable but currently has no internet for a command that needs it (npm/pip install, git pull/clone/push, curl, downloads). Call terminal_check_status first whenever you're about to use Termux, or aren't sure the PC is reachable, since status can change between messages - but don't call it before routine PC commands when nothing suggests the PC might be down. If a request genuinely needs something only the PC can do (a heavy build, Docker, the emulator) while the PC is unreachable, tell the person clearly rather than attempting a workaround that won't actually work.
+Terminal: terminal_pc_run_command is the full terminal and the only one ZAO has - full system access, and the PC backend itself auto-detects whether a command needs cmd.exe, PowerShell, Git Bash, or a raw Python interpreter, so just send the command normally (only set \`shell\` explicitly to override a wrong guess). Use it for everything - APK builds, Docker, Android emulator, Visual Studio, video processing, AI inference, npm/pip installs, git operations, quick scripts, all of it. If terminal_pc_run_command fails because the PC backend is unreachable, call terminal_check_status to confirm, then tell the person clearly that terminal commands aren't possible right now rather than attempting a workaround that won't actually work - there is no fallback terminal.
 
-The PC and the phone are separate filesystems: anything a PC command produces (npm install's node_modules, a built APK from gradlew, a webpack bundle) stays on the PC's own disk and is NOT visible on the phone automatically. After a PC build the person actually wants on their device, use pc_list_directory to find the real output path, then pc_pull_file to copy it into their phone project folder - don't tell them a build "is done and ready" if the artifact they need is still only sitting on the PC.
+Dev server + visual preview: NEVER start a dev server (npm start, vite, expo start --web, python -m http.server, etc.) with terminal_pc_run_command - it runs to completion/timeout and a dev server never completes, so that just wastes the call and leaves nothing running. Use dev_server_start instead, which tracks it as a background process and hands back its local URL. Then call dev_preview_screenshot with that previewId to actually render the page and see whether the HTML/CSS looks right - you can't view the image yourself, but the returned page title, HTTP status, and browser console errors tell you concretely whether it loaded, 404'd, or threw JS errors, and the PNG itself is saved to the person's phone for them to look at. Call dev_server_stop when you're done with it so the port doesn't stay held.
+
+GitHub Actions: github_commit_files/github_create_pull_request landing successfully only means the commit itself was written - it says nothing about whether CI passed. If the repo has workflows configured, call github_list_workflow_runs afterward (filtered to the branch you just pushed) to see whether a run actually started and what its status is; don't report a task as "done" on the strength of the commit alone if CI exists and hasn't been checked. If a run shows status "in_progress", say so plainly rather than guessing at the outcome. If a run's conclusion is "failure", call github_get_workflow_run with its id to see exactly which job/step broke before reporting back. github_trigger_workflow only works on workflows that declare workflow_dispatch in their own \`on:\` block - a push-triggered workflow can't be manually dispatched this way.
+
+The PC and the phone are separate filesystems. Source code and project files you create for a coding request should go through pc_fs_* (see above), so they're already on the PC where Terminal can build/run them. The remaining gap is BUILD OUTPUT: anything a PC command produces that pc_fs_* didn't write itself (npm install's node_modules, a built APK from gradlew, a webpack bundle) stays on the PC's own disk and is NOT visible on the phone automatically. After a PC build the person actually wants on their device, use pc_list_directory to find the real output path, then pc_pull_file to copy it into their phone project folder - don't tell them a build "is done and ready" if the artifact they need is still only sitting on the PC.
 
 ${permissionMode === 'plan' ? "You are currently in PLAN MODE - read-only. You can read, search, and lay out a plan (todo_write), but every tool that would create/edit/delete/run something will be refused. Explain what you WOULD do; don't attempt to actually do it yet.\n\n" : ''}${githubUsername ? `Their GitHub username is "${githubUsername}" - use this as the owner for new repos unless they specify an organization instead.` : 'No GitHub username is on file yet - ask for it if a GitHub action needs an owner and none is given in the request.'}
 
-When generating file content (for fs_create_file or github_commit_files), write complete, working file content - not placeholders or "TODO" stubs. Once everything requested is actually done, give a short, plain-language summary of what was created/changed - don't just say "done", name what happened.`;
+When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, fs_create_file, or github_commit_files), write complete, working file content - not placeholders or "TODO" stubs. Once everything requested is actually done, give a short, plain-language summary of what was created/changed - don't just say "done", name what happened.`;
 
   // PROCEDURAL memory (src/services/memory/proceduralMemory.js): before
   // this, withProceduralHint() only ever fired inside the hierarchical
@@ -1404,29 +2274,46 @@ When generating file content (for fs_create_file or github_commit_files), write 
   // checklist bookkeeping about THIS run, not a reusable action).
   const executedSteps = [];
   // Set whenever a time_get_current call succeeds - carried through to
-  // the final return below so runToolTaskHandler (src/utils/
-  // orchestrator.js) can attach it to the reply, letting ChatScreen.js
-  // render a live ClockWidget on that specific bubble (same pattern as
-  // planId -> "View Plan" chip). Only the LAST successful time lookup
-  // wins if the model checks more than one place in a single turn -
-  // reasonable since the chat bubble can only show one widget.
+  // the final return below so a caller can attach it to a reply,
+  // letting ChatScreen.js render a live ClockWidget on that specific
+  // bubble (same pattern as planId -> "View Plan" chip). NOTE: this
+  // loop only runs as a top-level chat route in theory now -
+  // frontendBrain.js routes every tool-flavored message through
+  // backendBrain.js's HIERARCHICAL_PLAN instead (see its own comment),
+  // so in practice this field is only ever populated inside a
+  // subagentManager.js-spawned subagent today, whose caller
+  // (spawnSubagents' runOne()) doesn't read it - see
+  // backendBrain.js's runApprovedPlan()/findLastClockReading() for how
+  // the plan pipeline recovers an equivalent reading from a completed
+  // plan's own persisted step results instead. Only the LAST successful
+  // time lookup wins if the model checks more than one place in a
+  // single turn - reasonable since the chat bubble can only show one
+  // widget.
   let clockData = null;
   // Set the first time ANY tool call is refused specifically because it
   // needs human confirmation (permissionModes.js's requiresConfirmation -
   // a RISKY terminal command per commandSafety.js, OR a WRITE_TOOL /
   // DESTRUCTIVE_TOOL in 'default'/'acceptEdits' mode: a GitHub push, a
   // file delete, a generated document) - carried through to the final
-  // return below so runToolTaskHandler/chatStore can attach it to the
-  // reply as messages.pending_confirmation, letting ChatScreen.js render
-  // a real "Approve?" card instead of the call just failing closed with
-  // no way to ever run it. Only the FIRST one this turn is captured - if
-  // the model tries several confirmable calls in one turn, the person
-  // approves them one at a time (a fresh reply after each approval
-  // covers any that follow).
+  // return below so a caller can attach it to the reply as
+  // messages.pending_confirmation, letting ChatScreen.js render a real
+  // "Approve?" card instead of the call just failing closed with no way
+  // to ever run it. NOTE: same caveat as clockData above - this loop
+  // isn't reachable as a top-level chat route anymore, only as a
+  // subagentManager.js-spawned subagent (which discards this field), so
+  // in practice nothing surfaces this today. A tool-flavored request
+  // reached through ordinary chat goes through the hierarchical-plan
+  // pipeline instead, which has its own separate, fully-wired risk gate
+  // (planExecutor.js's is_risky -> 'awaiting_approval', approved via
+  // PlanScreen.js/planStore.js's approveStep()) rather than this
+  // mechanism. Only the FIRST one this turn is captured - if the model
+  // tries several confirmable calls in one turn, the person approves
+  // them one at a time (a fresh reply after each approval covers any
+  // that follow).
   //
   // FIX (previously terminal-only): this used to only fire for
   // TERMINAL_TOOL_NAMES, because runCommand's `confirmed` option
-  // (pcTerminalTool.js / termuxTerminalTool.js) was the only re-invocation
+  // (pcTerminalTool.js) was the only re-invocation
   // path that existed - see HARDENING_NOTES.md. That meant the flat tool
   // loop had human-in-the-loop for shell commands but NOT for GitHub,
   // filesystem, PDF, or Office tools: a risky call there just returned a
@@ -1438,7 +2325,7 @@ When generating file content (for fs_create_file or github_commit_files), write 
   let pendingConfirmation = null;
   const allSchemas = [
     ...GITHUB_TOOL_SCHEMAS, ...FILESYSTEM_TOOL_SCHEMAS, ...PDF_TOOL_SCHEMAS, ...OFFICE_TOOL_SCHEMAS,
-    ...TERMINAL_TOOL_SCHEMAS, ...WEB_SEARCH_TOOL_SCHEMAS, ...DATA_TOOL_SCHEMAS, ...TIME_TOOL_SCHEMAS, ...REMINDER_TOOL_SCHEMAS, ...TODO_TOOL_SCHEMAS,
+    ...TERMINAL_TOOL_SCHEMAS, ...DEV_PREVIEW_TOOL_SCHEMAS, ...PC_FILESYSTEM_TOOL_SCHEMAS, ...PC_GIT_TOOL_SCHEMAS, ...PHONE_UTILITY_TOOL_SCHEMAS, ...WEB_SEARCH_TOOL_SCHEMAS, ...BACKGROUND_SESSION_TOOL_SCHEMAS, ...DATA_TOOL_SCHEMAS, ...TIME_TOOL_SCHEMAS, ...REMINDER_TOOL_SCHEMAS, ...TODO_TOOL_SCHEMAS,
     // Recursion guard (subagentManager.js header): a subagent never sees
     // its own spawn tool.
     ...(isSubagent ? [] : SUBAGENT_TOOL_SCHEMAS),
@@ -1654,17 +2541,6 @@ When generating file content (for fs_create_file or github_commit_files), write 
 }
 
 /**
- * Backward-compatible wrapper matching the original GitHub-only call
- * signature (src/utils/orchestrator.js's github branch calls this name).
- * runToolTask above now handles both GitHub and Filesystem tools in one
- * pass regardless of which entry point is used - this just adapts the
- * older (userRequest, githubUsername, onStep) argument shape.
- */
-export async function runGithubTask(userRequest, githubUsername, onStep = null) {
-  return runToolTask(userRequest, { githubUsername }, onStep);
-}
-
-/**
  * Re-runs ONE tool call that runToolTask()'s flat loop previously refused
  * with requiresConfirmation (see pendingConfirmation above) - called only
  * from an explicit person tap on the "Approve" card ChatScreen.js renders
@@ -1702,7 +2578,11 @@ export async function approveAndRunPendingTool(pendingConfirmation) {
   }
 
   const label = isTerminal
-    ? (toolName === 'terminal_pc_run_command' ? `Ran on PC: ${args?.command}` : `Ran on Termux: ${args?.command}`)
+    ? (toolName === 'pc_process_start'
+        ? `Started background process on PC: ${args?.command}`
+        : toolName === 'dev_server_start'
+          ? `Started dev server: ${args?.command}`
+          : `Ran on PC: ${args?.command}`)
     : toolDef.label(args);
 
   const { spanId } = await startSpan({
@@ -1713,9 +2593,11 @@ export async function approveAndRunPendingTool(pendingConfirmation) {
   });
 
   const result = isTerminal
-    ? await (toolName === 'terminal_pc_run_command'
-        ? pcTerminalTool.runCommand(args.command, { confirmed: true, shell: args.shell || null })
-        : termuxTerminalTool.runCommand(args.command, { confirmed: true }))
+    ? toolName === 'pc_process_start'
+      ? await pcProcessTool.startProcess(args.command, { confirmed: true, shell: args.shell || null, cwd: args.cwd || null, label: args.label || null })
+      : toolName === 'dev_server_start'
+        ? await devPreviewTool.startServer(args.command, { workingDirectory: args.cwd || null, port: args.port || null, confirmed: true })
+        : await pcTerminalTool.runCommand(args.command, { confirmed: true, shell: args.shell || null })
     : await toolDef.run(args);
 
   await endSpan(spanId, { status: result.success ? 'ok' : 'error', errorMessage: result.success ? null : (result.error?.message || result.error || null) });

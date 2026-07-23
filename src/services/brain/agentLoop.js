@@ -3,7 +3,7 @@
  *
  * BEFORE THIS FILE: orchestrator.js called frontendBrain.decideRoute()
  * ONCE per message, then executed exactly that one route
- * (CHAT/TOOL_TASK/BROWSING/HIERARCHICAL_PLAN) and returned - a single
+ * (CHAT/BROWSING/HIERARCHICAL_PLAN) and returned - a single
  * up-front routing decision, not a loop. That meant a message couldn't
  * fluidly shift mid-turn: "check the repo's open issues and then look
  * up how other projects fixed the one about X" would classify as
@@ -66,20 +66,23 @@ Say done:false only if the ORIGINAL request clearly has a distinct part that thi
 
 /**
  * @param {object} params - same shape orchestrator.js already builds;
- *   see its own JSDoc for what each field is used for. This function
+ *   see its own JSDoc for what each field is used for, including
+ *   `browserAgentActive` (passed straight through to decideRoute() -
+ *   see frontendBrain.js's own JSDoc for what it does with it). This function
  *   does not change orchestrator.js's external contract - it's called
  *   FROM orchestrator.js in place of the old single decideRoute+switch
  *   block, and returns the same result shape orchestrator.js already
  *   returns to the UI.
- * @param {object} handlers - the four route handlers
- *   ({ runChat, runToolTask, runBrowsing, runHierarchicalPlan }),
+ * @param {object} handlers - the three route handlers
+ *   ({ runChat, runBrowsing, runHierarchicalPlan }),
  *   injected so this file doesn't import
  *   toolOrchestrator/backendBrain/reasoningEngine directly and stays
  *   testable/reusable. Each receives (effectiveMessage, paramsWithContext)
  *   and returns the same { success, data, error } shape orchestrator.js
  *   already produces for that route. paramsWithContext carries a new
  *   `standingContext` array (system-role blocks from
- *   projectInstructions.js/autoMemoryNotes.js) that each handler is
+ *   projectInstructions.js/autoMemoryNotes.js, plus a web-search hint
+ *   block when the composer's web-search toggle is on) that each handler is
  *   responsible for prepending to whatever history/messages it builds -
  *   this file gathers that context once per turn but doesn't reach into
  *   each handler's internal message construction itself.
@@ -91,13 +94,21 @@ Say done:false only if the ORIGINAL request clearly has a distinct part that thi
  * @returns {Promise<{ success, data, error }>}
  */
 export async function runAgentLoop(params, handlers, { isCancelled = () => false, onLoopStep = null } = {}) {
-  const { lastMessageText } = params;
+  const { lastMessageText, webSearchEnabled } = params;
 
   const [projectBlock, autoMemoryBlock] = await Promise.all([
     getProjectInstructionsBlock(),
     getAutoMemoryBlock(),
   ]);
-  const standingContext = [projectBlock, autoMemoryBlock].filter(Boolean);
+  // webSearchEnabled is the composer bar's web-search toggle (see
+  // ChatScreen.js) - the web_search tool is always available to the
+  // model regardless of this toggle, but when the person has explicitly
+  // switched it on for this message, that's a strong signal to actually
+  // use it rather than answer from what the model already knows.
+  const webSearchBlock = webSearchEnabled
+    ? { role: 'system', content: 'The person has turned on web search for this message. Prioritize calling the web_search tool to ground your answer in current information rather than answering from memory alone, unless the question is about something timeless that a search genuinely wouldn\'t improve (e.g. pure math, a definition, general advice).' }
+    : null;
+  const standingContext = [projectBlock, autoMemoryBlock, webSearchBlock].filter(Boolean);
 
   const attemptedRoutes = [];
   const priorResultsSummary = [];
@@ -123,7 +134,7 @@ export async function runAgentLoop(params, handlers, { isCancelled = () => false
       : `${lastMessageText}\n\n[Already done this turn: ${priorResultsSummary.join('; ')}]`;
 
     // ---- ACT ----
-    const { route, reason } = await decideRoute(effectiveMessage, attemptedRoutes);
+    const { route, reason } = await decideRoute(effectiveMessage, attemptedRoutes, { browserAgentActive: params.browserAgentActive });
     attemptedRoutes.push(route);
     onLoopStep?.({ route, reason, iteration });
 
@@ -173,8 +184,6 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
   switch (route) {
     case BRAIN_ROUTES.HIERARCHICAL_PLAN:
       return handlers.runHierarchicalPlan(effectiveMessage, params);
-    case BRAIN_ROUTES.TOOL_TASK:
-      return handlers.runToolTask(effectiveMessage, params);
     case BRAIN_ROUTES.BROWSING:
       return handlers.runBrowsing(effectiveMessage, params);
     case BRAIN_ROUTES.CHAT:
@@ -186,7 +195,6 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
 function summarizeForNextIteration(route, stepResult) {
   const label = {
     [BRAIN_ROUTES.HIERARCHICAL_PLAN]: 'ran a multi-step plan',
-    [BRAIN_ROUTES.TOOL_TASK]: 'ran a tool task',
     [BRAIN_ROUTES.BROWSING]: 'browsed the web',
   }[route] || 'took an action';
 

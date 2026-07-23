@@ -86,6 +86,22 @@ module.exports = {
   // forever.
   TERMINAL_TIMEOUT_MS: Number(process.env.ZAO_TERMINAL_TIMEOUT_MS || 120000),
 
+  // Real OS-level sandboxing for terminal commands (see sandbox.js) -
+  // gitbash/python-classified commands run inside an isolated Docker
+  // container instead of directly on the host, whenever Docker is
+  // available and the caller hasn't set hostAccess: true. Set to
+  // 'false' to disable entirely and always run on the host (the old
+  // behavior) - useful if Docker Desktop isn't installed, or if the
+  // container overhead isn't worth it for your workflow.
+  SANDBOX_ENABLED: process.env.ZAO_SANDBOX_ENABLED !== 'false',
+
+  // Resource limits applied to every sandboxed command - keeps a
+  // runaway or fork-bombing command capped to the container's own
+  // cgroup instead of able to take the whole PC down.
+  SANDBOX_MEMORY_LIMIT: process.env.ZAO_SANDBOX_MEMORY_LIMIT || '512m',
+  SANDBOX_CPU_LIMIT: process.env.ZAO_SANDBOX_CPU_LIMIT || '1.5',
+  SANDBOX_PIDS_LIMIT: process.env.ZAO_SANDBOX_PIDS_LIMIT || '256',
+
   // Python command used for OCR (see ocr.js / scripts/ocr_extract.py).
   // Same "just a PATH command" approach as TERMINAL_SHELL - if you have
   // multiple Python installs, point this at whichever one has

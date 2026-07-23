@@ -899,7 +899,7 @@ export async function checkFileSyntax(relativePath) {
  * This is what backs BOTH the fs_check_project_syntax tool (the model
  * calling it directly, e.g. "make sure everything's clean before I run
  * this") AND projectRunGate.js's automatic pre-run gate in front of
- * terminal_pc_run_command/terminal_termux_run_command - see that file's
+ * terminal_pc_run_command - see that file's
  * header for the one real caveat (it checks the SAF-granted folder on
  * the phone, which may or may not be the exact folder a PC-backend
  * command actually runs against).

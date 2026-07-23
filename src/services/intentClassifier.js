@@ -36,23 +36,40 @@ const VALID_INTENTS = new Set(['github', 'browsing', 'general']);
 const CLASSIFIER_SYSTEM_PROMPT = `Classify what this message actually needs, not what topic it's about. Respond with ONLY one JSON object, no markdown fences, no commentary:
 {"intent": "github" | "browsing" | "general"}
 
-- "github": the message is asking for a concrete action to actually be carried out - creating/editing/deleting a real file or folder, pushing/committing/branching/releasing on GitHub, running a terminal command, or producing a real PDF/Word/Excel/PowerPoint/zip file. Something must actually happen on the device or repo, not just be explained.
-- "browsing": the message needs real, CURRENT information from the live internet that the model's own training can't reliably answer - a specific webpage's current content, today's news, a current price, checking whether something is still true right now, or an explicit instruction to search/browse/visit a site.
+- "github": the message is asking for a concrete WRITE action to actually be carried out - creating/editing/deleting a real file or folder, pushing/committing/branching/releasing on GitHub, running a terminal command, or producing a real PDF/Word/Excel/PowerPoint/zip file. Something must actually be built, changed, or run on the device or repo, not just found or explained.
+- "browsing": the message needs real, CURRENT information from the live internet that the model's own training can't reliably answer - a specific webpage's current content, today's news, a current price, checking whether something is still true right now, or an explicit instruction to search/browse/visit/check a site. Purely looking something up or checking on something, with nothing being built or changed, is "browsing" even if the person also wants it summarized or explained afterward - that's still just reading, not writing.
 - "general": everything else - questions answerable from general knowledge, requests to write/explain/plan/brainstorm/debug-in-place, casual conversation, or coding help that doesn't require actually running anything.
 
-If a message could plausibly fit two categories, prefer "github" over "browsing" over "general" in that order, since those carry more specific commitments (an action, or a real-time fact) than a general chat answer does.`;
+If a message could plausibly fit two categories, prefer whichever one is CHEAPER to get wrong: "browsing" is one extra step; "github" can kick off a much larger multi-step plan. So when genuinely unsure between "github" and "browsing", pick "browsing" - a pure lookup/check request should never be escalated into a build/change/run pipeline on a guess. Only pick "github" when the message is unambiguous about wanting something actually created, changed, or run.`;
 
 /**
  * @param {string} messageText
+ * @param {object} [options]
+ * @param {boolean} [options.browserAgentActive] - true if the person
+ *   currently has a live browser agent session open (see App.js's
+ *   `browserAgentActive` - the full-screen view is open, a task is
+ *   running, or one is awaiting human input). Passed through as extra
+ *   context for the model to weigh, not a hard override - a message
+ *   sent while browsing is open that's genuinely unrelated (e.g. "what's
+ *   7 times 8") should still classify as "general", this just tips
+ *   genuinely ambiguous cases toward "browsing" rather than "github",
+ *   since the person is right there watching a live browser session and
+ *   a message like "check their pricing page too" almost certainly means
+ *   "browsing", not "create a file."
  * @returns {Promise<'github'|'browsing'|'general'>}
  */
-export async function classifyIntent(messageText) {
+export async function classifyIntent(messageText, options = {}) {
   const text = (messageText || '').trim();
   if (!text) return 'general';
 
+  const { browserAgentActive = false } = options;
+  const userContent = browserAgentActive
+    ? `[Context: the person currently has a live browser agent session open on their PC and is watching it.]\n\n${text}`
+    : text;
+
   const history = [
     { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
-    { role: 'user', content: text },
+    { role: 'user', content: userContent },
   ];
 
   try {

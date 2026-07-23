@@ -16,7 +16,7 @@ describe('plan mode - hard read-only floor', () => {
     'fs_create_file', 'fs_delete', 'fs_edit_file',
     'github_commit_files', 'github_create_repo',
     'pdf_create', 'docx_create', 'xlsx_create', 'pptx_create',
-    'terminal_pc_run_command', 'terminal_termux_run_command',
+    'terminal_pc_run_command',
   ])('refuses %s outright, with no confirmation escape hatch', (toolName) => {
     const decision = getToolPermissionDecision(toolName, {}, 'plan');
     expect(decision.allowed).toBe(false);

@@ -1,8 +1,8 @@
 /**
  * ZAO - projectRunGate.js tests
  *
- * Covers the automatic pre-run gate wired into both pcTerminalTool.js and
- * termuxTerminalTool.js: isProjectRunCommand's pattern matching (must
+ * Covers the automatic pre-run gate wired into pcTerminalTool.js:
+ * isProjectRunCommand's pattern matching (must
  * catch real "start/build/serve" commands without false-positiving on
  * unrelated ones - see the inline comments on each case below for why
  * each one is there) and checkBeforeProjectRun's block/pass decision

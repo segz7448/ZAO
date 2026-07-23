@@ -149,7 +149,7 @@ function PendingToolConfirmCard({ pendingConfirmation, onApprove, onDismiss, the
   const parsed = parsePendingConfirmation(pendingConfirmation);
   if (!parsed?.toolName) return null;
 
-  const isTerminal = parsed.toolName === 'terminal_pc_run_command' || parsed.toolName === 'terminal_termux_run_command';
+  const isTerminal = parsed.toolName === 'terminal_pc_run_command' || parsed.toolName === 'pc_process_start';
   const detail = isTerminal ? parsed.args?.command : describePendingToolArgs(parsed.toolName, parsed.args);
 
   const handleApprove = async () => {
@@ -176,7 +176,7 @@ function PendingToolConfirmCard({ pendingConfirmation, onApprove, onDismiss, the
       )}
       {isTerminal && (
         <Text style={[styles.confirmCardBackend, { color: theme.textTertiary }]}>
-          Would run on: {parsed.toolName === 'terminal_pc_run_command' ? 'PC' : 'Termux'}
+          Would run on: PC
         </Text>
       )}
       <View style={styles.confirmCardActions}>
@@ -397,11 +397,11 @@ function formatBrowsingStepLabel(stepInfo) {
   }
 }
 
-export default function ChatScreen({ onOpenSidebar, onOpenPlan, userName = 'there' }) {
+export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAgent, browserAgentActive = false, userName = 'there' }) {
   const theme = useTheme();
   const {
     messages, isSending, error,
-    browsingSteps, planProgress, planSteps, streamingText,
+    browsingSteps, planProgress, planSteps, streamingText, streamingThinking,
     sendMessage, clearError, editMessage,
     regenerateMessage, setFeedback,
     approvePendingToolCall, dismissPendingConfirmation,
@@ -519,7 +519,7 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, userName = 'ther
     const attachment = pendingAttachment;
     setInputText('');
     setPendingAttachment(null);
-    await sendMessage(text, attachment);
+    await sendMessage(text, attachment, { webSearchEnabled, browserAgentActive });
   };
 
   const handleCamera = async () => {
@@ -646,6 +646,21 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, userName = 'ther
                 {streamingText}
               </Text>
             </View>
+          ) : streamingThinking ? (
+            // The model is still inside <thinking> - stream its raw reasoning
+            // live instead of a bare "Thinking…" spinner (see chainOfThought.js's
+            // onThinking / extractStreamingThinking()). Swaps over to the
+            // streamingText branch above the moment <answer> opens. Italicized
+            // and dimmer than the real answer so it visually reads as
+            // in-progress/draft, same idea as Claude's collapsed thinking view.
+            <View style={styles.browsingProgress}>
+              <Text
+                style={[styles.typingText, { color: theme.textTertiary, fontStyle: 'italic' }]}
+                numberOfLines={2}
+              >
+                {streamingThinking.length > 220 ? `…${streamingThinking.slice(-220)}` : streamingThinking}
+              </Text>
+            </View>
           ) : planSteps.length > 0 || planProgress ? (
             // Live hierarchical-plan progress - a real checklist instead
             // of a bare spinner while a plan builds (planProgress) or runs
@@ -729,15 +744,12 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, userName = 'ther
             { backgroundColor: theme.surfaceAlt },
             preferences.browser_access_enabled && styles.browserToggleActive,
           ]}
-          onPress={() => setBrowserAccessEnabled(!preferences.browser_access_enabled)}
+          onPress={() => onOpenBrowserAgent?.()}
+          onLongPress={() => setBrowserAccessEnabled(!preferences.browser_access_enabled)}
           hitSlop={4}
           accessibilityRole="button"
           accessibilityState={{ selected: !!preferences.browser_access_enabled }}
-          accessibilityLabel={
-            preferences.browser_access_enabled
-              ? 'Browser access on. Tap to turn off.'
-              : 'Browser access off. Tap to turn on.'
-          }
+          accessibilityLabel="Open the live browser view. Long-press to toggle browser access."
         >
           <Ionicons
             name="globe-outline"

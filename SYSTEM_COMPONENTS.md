@@ -35,19 +35,16 @@ it's worth being precise about which is which:
    (`src/services/planning/planTypes.js`) to pick one of four routes:
    `HIERARCHICAL_PLAN`, `TOOL_TASK`, `BROWSING`, `CHAT`. This is the
    router `src/utils/orchestrator.js` actually calls on every message.
-3. **`src/services/terminal/terminalRouter.js`** - a narrower,
-   within-tool router. `checkTerminalStatus()` doesn't pick the route
-   itself; it hands the model live PC-reachability/internet status
-   plus a plain-language recommendation, and the model (steered by the
-   system prompt in `toolOrchestrator.js`) is the one that actually
-   decides `terminal_pc_run_command` vs.
-   `terminal_termux_run_command` per task. Routing logic lives in the
-   model's judgment, not a hardcoded table - deliberately, per that
-   file's own header comment.
+3. **`src/services/terminal/terminalRouter.js`** - `checkTerminalStatus()`
+   hands the model live PC-reachability/internet status plus a
+   plain-language summary before it calls `terminal_pc_run_command` -
+   there's only the one terminal tool now, so this isn't picking between
+   options, just telling the model whether that one tool is currently
+   usable.
 
 So: request → `frontendBrain.decideRoute()` (which brain/path) →, if it
-lands in `TOOL_TASK`, `toolOrchestrator.js`'s tool loop →, if a
-terminal tool is on the table, `terminalRouter.js` (which terminal).
+lands in `HIERARCHICAL_PLAN` and a step needs a terminal tool,
+`terminalRouter.js` first confirms the PC backend is reachable.
 Three routers, three different granularities, no single God-router.
 
 ## State management
@@ -148,7 +145,7 @@ This one's fully built, but scoped to exactly one surface:
   person (an interactive prompt, an auth flow, a permission dialog),
   there's currently no `needsHuman`-equivalent for it to call.
 - **Partial fix (terminal only)**: `src/services/terminal/commandSafety.js`
-  (new) now gates both `pcTerminalTool.js` and `termuxTerminalTool.js` -
+  (new) now gates `pcTerminalTool.js` -
   a destructive command (`rm -rf`, `git push --force`, `DROP TABLE`,
   etc.) is refused with `needsConfirmation: true` unless the call
   explicitly passes `confirmed: true`, and a handful of catastrophic

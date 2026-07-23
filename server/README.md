@@ -10,8 +10,10 @@ A small Node/Express server that:
 1. Spawns `llama-server` (from llama.cpp) as a child process, running
    Qwen2.5-Coder-3B.
 2. Exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
-3. Exposes `/terminal/run`, which runs real shell commands via `cmd.exe`
-   on this PC - this is what ZAO's Terminal tool calls.
+3. Exposes `/terminal/run`, which runs real shell commands on this PC -
+   auto-detecting cmd.exe, PowerShell, Git Bash, or a raw Python
+   interpreter per command (see `terminal.js`'s `chooseShell()`) - this is
+   what ZAO's Terminal tool calls, and the only terminal ZAO has.
 4. Exposes `/ocr/extract`, which runs free, open-source OCR (Tesseract via
    the `pytesseract` wrapper, with PyMuPDF rendering PDF pages to images
    first) in a Python subprocess - this is what lets ZAO read
@@ -22,8 +24,18 @@ A small Node/Express server that:
    head/filter/groupby - the thing SheetJS (used client-side just to
    *create* spreadsheets) can't do. See `scripts/data_analyze.py`'s
    header for the exact operation shape.
-6. Restarts `llama-server` automatically if it crashes.
-7. Requires an `Authorization: Bearer <token>` header on every request
+6. Exposes `/preview/start`, `/preview/screenshot`, `/preview/stop`, and
+   `/preview/list` (see `devPreview.js`) - starts a dev server (`npm
+   start`, `vite`, `python -m http.server`, etc.) as its own tracked
+   background process (unlike `/terminal/run`, which runs a command to
+   completion/timeout and can't usefully host something that never
+   exits), detects its local URL from stdout/stderr, and screenshots the
+   rendered page using the same shared Playwright Chromium instance the
+   browser agent already runs (see `browserAgent.js`'s `getBrowser()`) -
+   closes the loop on "does this actually render right" without you
+   checking manually.
+7. Restarts `llama-server` automatically if it crashes.
+8. Requires an `Authorization: Bearer <token>` header on every request
    except `/health`, since this server is reachable over LAN and the
    public internet (via the tunnel), not just loopback.
 

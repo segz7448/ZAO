@@ -16,8 +16,8 @@
  * NOT a linter (no unused-vars, no style rules, no type-checking beyond
  * "does the TS syntax itself parse") and NOT a bundler (no resolving
  * imports, no checking a module actually exists) - those need a real
- * toolchain (eslint/tsc) running via terminal_pc_run_command/
- * terminal_termux_run_command, which this app doesn't bundle. This is
+ * toolchain (eslint/tsc) running via terminal_pc_run_command, which this
+ * app doesn't bundle. This is
  * the same floor Claude Code's own tools guarantee before every write:
  * "what got saved is at least valid code," nothing more, nothing less.
  *
@@ -29,7 +29,7 @@
  *     for checking a file the model didn't just write, exposed as the
  *     fs_check_syntax/fs_check_project_syntax tools.
  *   - projectRunGate.js - the pre-run gate that blocks
- *     terminal_pc_run_command/terminal_termux_run_command from starting a
+ *     terminal_pc_run_command from starting a
  *     broken project.
  */
 import * as babelParser from '@babel/parser';

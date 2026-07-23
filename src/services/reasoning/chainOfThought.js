@@ -21,23 +21,35 @@ const COT_SYSTEM_PROMPT = `Think through this step by step before answering. Put
 /**
  * @param {Array<{role, content}>} history - full conversation so far, ending in the new user message
  * @param {(text: string) => void} [onToken] - called with the in-progress, person-facing
- *   answer text as it streams in. Nothing fires while the model is still inside
- *   <thinking> (that content is never meant to reach the bubble - see this file's
- *   header) - the first call only happens once an <answer> tag has opened. See
- *   extractStreamingAnswer() below for how a partial/still-arriving closing tag
- *   is kept from flashing into the visible text.
+ *   answer text as it streams in. The first call only happens once an <answer> tag has
+ *   opened. See extractStreamingAnswer() below for how a partial/still-arriving closing
+ *   tag is kept from flashing into the visible text.
+ * @param {(text: string) => void} [onThinking] - called with the in-progress reasoning
+ *   text WHILE the model is still inside <thinking>, so the UI can show the model's
+ *   live train of thought instead of a bare spinner (see extractStreamingThinking()).
+ *   Stops firing once <answer> opens - onToken takes over from there.
  * @returns {Promise<{success: boolean, content: string, trace: string|null, error: object|null}>}
  */
-export async function runChainOfThought(history, onToken) {
+export async function runChainOfThought(history, onToken, onThinking) {
   const augmented = withSystemPrompt(history, COT_SYSTEM_PROMPT);
+
+  const hasOnToken = typeof onToken === 'function';
+  const hasOnThinking = typeof onThinking === 'function';
 
   const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN25_CODER_3B, {
     maxTokens: 1024,
     temperature: 0.7,
-    onToken: typeof onToken === 'function'
+    onToken: (hasOnToken || hasOnThinking)
       ? (accumulatedRaw) => {
           const visible = extractStreamingAnswer(accumulatedRaw);
-          if (visible !== null) onToken(visible);
+          if (visible !== null) {
+            if (hasOnToken) onToken(visible);
+            return;
+          }
+          if (hasOnThinking) {
+            const thinkingSoFar = extractStreamingThinking(accumulatedRaw);
+            if (thinkingSoFar !== null) onThinking(thinkingSoFar);
+          }
         }
       : undefined,
   });
@@ -79,6 +91,46 @@ export function extractStreamingAnswer(rawTextSoFar) {
   // No complete closing tag yet - strip any trailing partial prefix of
   // "</answer>" (e.g. "<", "</", "</an") so it doesn't briefly appear.
   const CLOSE_TAG = '</answer>';
+  for (let len = Math.min(CLOSE_TAG.length - 1, visible.length); len > 0; len -= 1) {
+    if (visible.slice(-len).toLowerCase() === CLOSE_TAG.slice(0, len).toLowerCase()) {
+      visible = visible.slice(0, -len);
+      break;
+    }
+  }
+
+  return visible;
+}
+
+/**
+ * Same idea as extractStreamingAnswer() above, but for the <thinking> block
+ * instead: given raw model output accumulated so far, returns the reasoning
+ * text that's safe to show live (e.g. in a "🧠 Thinking…" box) right now, or
+ * null if nothing showable yet (still before/inside the opening <thinking>
+ * tag itself). Stops returning new text once <answer> opens - at that point
+ * extractStreamingAnswer() takes over and this should no longer be called.
+ * Guards against a partial "</thinking>" tag flashing into view the same way
+ * extractStreamingAnswer() guards against a partial "</answer>".
+ */
+export function extractStreamingThinking(rawTextSoFar) {
+  const openMatch = rawTextSoFar.match(/<thinking>/i);
+  if (!openMatch) return null;
+
+  let visible = rawTextSoFar.slice(openMatch.index + openMatch[0].length);
+
+  // <answer> has opened - the thinking phase is over, nothing new to show here.
+  if (/<answer>/i.test(visible)) {
+    const beforeAnswer = visible.split(/<answer>/i)[0];
+    return beforeAnswer.replace(/<\/thinking>\s*$/i, '').trim();
+  }
+
+  const closeMatch = visible.match(/<\/thinking>/i);
+  if (closeMatch) {
+    return visible.slice(0, closeMatch.index).trim();
+  }
+
+  // No complete closing tag yet - strip any trailing partial prefix of
+  // "</thinking>" so it doesn't briefly appear.
+  const CLOSE_TAG = '</thinking>';
   for (let len = Math.min(CLOSE_TAG.length - 1, visible.length); len > 0; len -= 1) {
     if (visible.slice(-len).toLowerCase() === CLOSE_TAG.slice(0, len).toLowerCase()) {
       visible = visible.slice(0, -len);

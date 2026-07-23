@@ -6,8 +6,7 @@ your PC (`/server`) via `llama-server` (llama.cpp) - handles chat, coding,
 reasoning, and tool-calling. The phone talks to it over LAN or a
 Cloudflare Quick Tunnel. Beyond chat, ZAO acts as an on-device agent: it
 can browse the web (via a Playwright agent also running on the PC), push
-code to GitHub, run real shell commands (on the PC or, for lighter tasks,
-via Termux on the phone), and create/read PDF/Word/Excel/PowerPoint files
+code to GitHub, run real shell commands on the PC, and create/read PDF/Word/Excel/PowerPoint files
 - all invoked automatically by the model deciding what a request needs,
 not through dedicated buttons.
 
@@ -61,12 +60,11 @@ src/
                               extract) under a folder granted once via Android's
                               Storage Access Framework.
     terminal/
-      pcTerminalTool.js           Heavy commands, run on the PC via the backend's
+      pcTerminalTool.js           The full terminal, and the only one ZAO
+                                has - runs on the PC via the backend's
                                 /terminal/run.
-      termuxTerminalTool.js        Light/fallback commands, run on the phone via
-                                Termux's RUN_COMMAND (native module, see plugins/).
       terminalRouter.js            Gives the model live PC-reachability/internet
-                                status; the model decides which of the two to use.
+                                status.
       commandSafety.js             Hard-blocks catastrophic commands (rm -rf /, mkfs,
                                 fork bombs); gates destructive-but-legitimate ones
                                 (rm -rf, git push --force, DROP TABLE) behind an
@@ -126,12 +124,6 @@ src/
                               MarkdownText, MessageActionMenu/Actions, Toast,
                               ImageViewerModal.
   theme/                        tokens.js (light+dark palettes) + useTheme.js.
-
-plugins/withTermuxRunCommand/    Expo config plugin: wires a native Kotlin module
-                              so termuxTerminalTool.js can reach Termux's
-                              RUN_COMMAND service (an Android Service, which
-                              expo-intent-launcher's Activity-only API can't reach
-                              on its own) - regenerated on every expo prebuild.
 
 server/                        PC backend (Node/Express) - see server/README.md.
   index.js                       Spawns/monitors llama-server, proxies
@@ -199,11 +191,10 @@ and shows a running checklist as it works.
   check on demand; the same project-wide check also runs automatically
   right before a terminal command that starts/builds a project
   (`projectRunGate.js`), blocking the run if anything fails.
-- **Terminal** - two paths, see `terminalRouter.js`: the PC backend (heavy
-  commands - builds, Docker, installs) and Termux on the phone (light/
-  fallback commands, requires Termux's own one-time `RUN_COMMAND`
-  permission setup). Zipping/unzipping works through either path already
-  - both are real shells, so `zip`/`unzip`/`tar` just work as plain
+- **Terminal** - the PC backend (`terminal_pc_run_command`, the only
+  terminal ZAO has - see `terminalRouter.js`) auto-detects cmd.exe,
+  PowerShell, Git Bash, or a raw Python interpreter per command, so
+  `zip`/`unzip`/`tar` just work as plain
   commands with no special-casing needed - in addition to the JS-level
   zip handling already in `zipHandler.js` (for reading an uploaded zip
   attachment) and `filesystemTool.js` (`fs_zip`/`fs_extract_zip`, for the

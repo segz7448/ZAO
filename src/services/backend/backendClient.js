@@ -2,7 +2,7 @@
  * ZAO - Backend Client
  *
  * The backend now runs on the person's PC (see /server in the repo root)
- * instead of on-device in Termux - the PC has real CPU headroom for
+ * instead of on-device - the PC has real CPU headroom for
  * Qwen2.5-Coder-3B and also hosts the Terminal/Filesystem/Office tools
  * against the person's actual PC filesystem.
  *
@@ -34,6 +34,9 @@ import { streamSSE } from '../../utils/sseClient';
 const HEALTH_TIMEOUT_MS = 4 * 1000;
 const COMPLETION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes - PC CPU inference is faster than phone, but still not instant, and LAN/tunnel hops add latency
 const TERMINAL_TIMEOUT_MS = 2 * 60 * 1000;
+const WEB_SEARCH_TIMEOUT_MS = 20 * 1000; // small buffer over the server's own SEARCH_TIMEOUT_MS (15s)
+const WEB_FETCH_TIMEOUT_MS = 25 * 1000; // small buffer over the server's own FETCH_TIMEOUT_MS (20s)
+const SESSION_TIMEOUT_MS = 15 * 1000; // these calls only start/poll a session or fetch its status - the actual work runs unbounded server-side
 
 const ERROR_TYPES = {
   BACKEND_UNREACHABLE: 'BACKEND_UNREACHABLE',
@@ -77,7 +80,7 @@ function withTimeout(promise, ms, timeoutMessage) {
  * Pings the PC backend's /health endpoint on whichever connection (LAN or
  * Remote) is currently active. Used at app launch/foreground, by Settings
  * to show a live connection indicator, and by terminalRouter.js to decide
- * PC vs Termux terminal routing - never throws.
+ * connection status - never throws.
  * @returns {Promise<{connected: boolean, ready: boolean, model: string|null, mode: string, internetAvailable: boolean|null}>}
  */
 export async function checkBackendHealth() {
@@ -351,6 +354,8 @@ export async function runTerminalCommand(command, options = {}) {
           cwd: options.cwd,
           timeoutMs: options.timeoutMs || TERMINAL_TIMEOUT_MS,
           shell: options.shell || undefined,
+          hostAccess: options.hostAccess === true || undefined,
+          allowNetwork: options.allowNetwork === true || undefined,
         }),
       }),
       (options.timeoutMs || TERMINAL_TIMEOUT_MS) + 10000, // small buffer over the server's own timeout
@@ -380,6 +385,331 @@ export async function runTerminalCommand(command, options = {}) {
           ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to run the command.`
           : err?.message || 'Terminal request failed.',
       },
+    };
+  }
+}
+
+const PREVIEW_START_TIMEOUT_MS = 35 * 1000; // slightly over the server's own URL_DETECT_TIMEOUT_MS (30s)
+const PREVIEW_SCREENSHOT_TIMEOUT_MS = 20 * 1000; // networkidle wait (15s) plus settle buffer
+
+/**
+ * Starts a dev server (npm start, vite, python -m http.server, etc.) as a
+ * tracked background process on the PC and waits for its local URL to be
+ * detected (see server/devPreview.js) - or for URL_DETECT_TIMEOUT_MS to
+ * elapse, in which case the server is left running and reported as
+ * 'running_no_url_detected' rather than killed, since a slow/unrecognized
+ * startup isn't the same as a failed one.
+ * @param {string} command
+ * @param {object} [options] - { cwd, port }
+ * @returns {Promise<{success, data: {previewId, url, status, output, pid}|null, error}>}
+ */
+export async function startDevServer(command, options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/preview/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ command, cwd: options.cwd, port: options.port }),
+      }),
+      PREVIEW_START_TIMEOUT_MS,
+      'Dev server start timed out waiting for a response.'
+    );
+
+    if (response.status === 401) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token.' } };
+    }
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => null);
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: errBody?.error?.message || `Dev server start failed (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    console.error('[BackendClient] startDevServer failed:', err);
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+        message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to start the dev server.` : err?.message || 'Dev server start failed.',
+      },
+    };
+  }
+}
+
+/**
+ * Screenshots a rendered page - either a running dev server (by
+ * previewId) or any arbitrary URL - via the PC's shared Playwright
+ * Chromium instance (see server/devPreview.js's screenshotUrl(), reusing
+ * server/browserAgent.js's getBrowser()).
+ * @param {object} options - { previewId, url, fullPage, viewportWidth, viewportHeight }
+ * @returns {Promise<{success, data: {screenshotBase64, title, finalUrl, httpStatus, consoleErrors}|null, error}>}
+ */
+export async function screenshotDevPreview(options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/preview/screenshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({
+          previewId: options.previewId,
+          url: options.url,
+          fullPage: options.fullPage === true || undefined,
+          viewportWidth: options.viewportWidth,
+          viewportHeight: options.viewportHeight,
+        }),
+      }),
+      PREVIEW_SCREENSHOT_TIMEOUT_MS,
+      'Dev preview screenshot timed out waiting for a response.'
+    );
+
+    if (response.status === 401) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token.' } };
+    }
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => null);
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: errBody?.error?.message || `Screenshot failed (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    console.error('[BackendClient] screenshotDevPreview failed:', err);
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+        message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to take the screenshot.` : err?.message || 'Screenshot failed.',
+      },
+    };
+  }
+}
+
+/**
+ * Stops a dev server previously started with startDevServer().
+ * @param {string} previewId
+ * @returns {Promise<{success, data: {success, alreadyStopped}|null, error}>}
+ */
+export async function stopDevServer(previewId) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/preview/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ previewId }),
+      }),
+      HEALTH_TIMEOUT_MS,
+      'Dev server stop timed out waiting for a response.'
+    );
+    if (response.status === 401) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token.' } };
+    }
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => null);
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: errBody?.error?.message || `Dev server stop failed (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    console.error('[BackendClient] stopDevServer failed:', err);
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+        message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to stop the dev server.` : err?.message || 'Dev server stop failed.',
+      },
+    };
+  }
+}
+
+/**
+ * Starts a command as a tracked BACKGROUND process on the PC (via the
+ * backend's /process/start route) and returns immediately with an id -
+ * unlike runTerminalCommand, this never waits for the command to exit.
+ * This is what makes "run npm start" (or any dev server/watcher) usable
+ * instead of a guaranteed 2-minute timeout - see
+ * src/services/terminal/pcProcessTool.js for the tool-calling wrapper.
+ * @param {string} command
+ * @param {object} [options] - { cwd, shell }
+ * @returns {Promise<{success, data: {id, shellUsed}|null, error}>}
+ */
+export async function startPcProcess(command, options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/process/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ command, cwd: options.cwd, shell: options.shell || undefined }),
+      }),
+      HEALTH_TIMEOUT_MS + 6000, // starting a process is a quick spawn, not a wait-for-exit - short timeout is enough
+      'Starting the process timed out waiting for a response.'
+    );
+
+    if (response.status === 401) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token.' } };
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: body?.error?.message || `Failed to start process (${response.status}).` } };
+    }
+
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    console.error('[BackendClient] startPcProcess failed:', err);
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+        message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to start the process.` : err?.message || 'Failed to start process.',
+      },
+    };
+  }
+}
+
+/**
+ * Checks a background process's current status via /process/:id/status.
+ * @param {string} processId
+ * @returns {Promise<{success, data: {status, exitCode, signal, startedAt, finishedAt, pid}|null, error}>}
+ */
+export async function getPcProcessStatus(processId) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  try {
+    const response = await withTimeout(fetch(`${baseUrl}/process/${processId}/status`, { headers: authHeaders(token) }), HEALTH_TIMEOUT_MS, 'Process status check timed out.');
+    if (response.status === 404) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'No process found with that id - it may have never started, or the PC backend has since restarted.' } };
+    }
+    if (!response.ok) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Failed to get process status (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode).` : err?.message || 'Failed to get process status.' },
+    };
+  }
+}
+
+/**
+ * Tails a background process's captured stdout/stderr via
+ * /process/:id/logs. Pass sinceIndex (from a previous call's
+ * nextIndex) to poll incrementally instead of re-fetching everything.
+ * @param {string} processId
+ * @param {object} [options] - { tail, sinceIndex }
+ * @returns {Promise<{success, data: {lines, nextIndex, status}|null, error}>}
+ */
+export async function getPcProcessLogs(processId, options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  const params = new URLSearchParams();
+  if (options.tail) params.set('tail', String(options.tail));
+  if (options.sinceIndex !== undefined && options.sinceIndex !== null) params.set('sinceIndex', String(options.sinceIndex));
+  const query = params.toString() ? `?${params.toString()}` : '';
+
+  try {
+    const response = await withTimeout(fetch(`${baseUrl}/process/${processId}/logs${query}`, { headers: authHeaders(token) }), HEALTH_TIMEOUT_MS, 'Process log fetch timed out.');
+    if (response.status === 404) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'No process found with that id.' } };
+    }
+    if (!response.ok) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Failed to get process logs (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode).` : err?.message || 'Failed to get process logs.' },
+    };
+  }
+}
+
+/**
+ * Stops a background process via /process/:id/stop.
+ * @param {string} processId
+ * @param {object} [options] - { signal }
+ * @returns {Promise<{success, data: {stopped:boolean}|{alreadyStopped:boolean,status:string}|null, error}>}
+ */
+export async function stopPcProcess(processId, options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/process/${processId}/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ signal: options.signal || undefined }),
+      }),
+      HEALTH_TIMEOUT_MS + 6000,
+      'Stopping the process timed out waiting for a response.'
+    );
+    if (response.status === 404) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'No process found with that id.' } };
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: body?.error?.message || `Failed to stop process (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (${mode === 'remote' ? 'Remote' : 'LAN'} mode) to stop the process.` : err?.message || 'Failed to stop process.' },
     };
   }
 }
@@ -462,6 +792,288 @@ export async function readPcFile(relativePath) {
 }
 
 /**
+ * Creates (or overwrites) one text file on the PC via /pc-fs/write -
+ * creates any missing parent folders along the way, so writing
+ * "myproject/src/App.js" works even before "myproject/src" exists. This
+ * is the primary way ZAO writes real project files now that development
+ * lives entirely on the PC - see pcFilesystemTool.js.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @param {string} content
+ * @param {{overwrite?: boolean}} [options]
+ * @returns {Promise<{success, data: {path, size, created}|null, error}>}
+ */
+export async function writePcFile(relativePath, content, options = {}) {
+  return postPcFilesJson('/pc-fs/write', { path: relativePath, content, overwrite: !!options.overwrite }, 'write the file');
+}
+
+/**
+ * Creates a folder (and any missing parent folders) on the PC via
+ * /pc-fs/mkdir - the usual first step of scaffolding a new project.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @returns {Promise<{success, data: {path}|null, error}>}
+ */
+export async function mkdirPc(relativePath) {
+  return postPcFilesJson('/pc-fs/mkdir', { path: relativePath }, 'create the folder');
+}
+
+/**
+ * Makes a precise, targeted change to one existing text file on the PC
+ * via /pc-fs/edit - oldString must match the file's current content
+ * exactly and uniquely (or replaceAll must be set), same contract as
+ * fs_edit_file's on-device version.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @param {string} oldString
+ * @param {string} newString
+ * @param {{replaceAll?: boolean}} [options]
+ * @returns {Promise<{success, data: {path, replacements, size}|null, error}>}
+ */
+export async function editPcFile(relativePath, oldString, newString, options = {}) {
+  return postPcFilesJson('/pc-fs/edit', { path: relativePath, oldString, newString, replaceAll: !!options.replaceAll }, 'edit the file');
+}
+
+/**
+ * Deletes a file, or a folder and everything in it, on the PC via
+ * /pc-fs/delete. No undo - same trust level as a terminal `rm`/`del`.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @returns {Promise<{success, data: {path, wasDirectory}|null, error}>}
+ */
+export async function deletePcEntry(relativePath) {
+  return postPcFilesJson('/pc-fs/delete', { path: relativePath }, 'delete the file/folder');
+}
+
+/**
+ * Renames a file or folder on the PC within its current parent
+ * directory, via /pc-fs/rename.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @param {string} newName - plain name, not a path
+ */
+export async function renamePcEntry(relativePath, newName) {
+  return postPcFilesJson('/pc-fs/rename', { path: relativePath, newName }, 'rename the file/folder');
+}
+
+/**
+ * Moves a file or folder on the PC into a different destination folder,
+ * via /pc-fs/move. Pass keepOriginal:true to copy instead of move.
+ * @param {string} sourcePath - relative to PC_BRIDGE_ROOT
+ * @param {string} destinationFolderPath - relative to PC_BRIDGE_ROOT ("" for the root itself)
+ * @param {{keepOriginal?: boolean}} [options]
+ */
+export async function movePcEntry(sourcePath, destinationFolderPath, options = {}) {
+  return postPcFilesJson('/pc-fs/move', { sourcePath, destinationFolderPath, keepOriginal: !!options.keepOriginal }, 'move the file/folder');
+}
+
+/**
+ * Creates (or, with overwrite:true, replaces) one binary file on the PC
+ * from base64 content, via /pc-fs/write-binary - the counterpart to
+ * writePcFile() for images/icons/generated assets that aren't UTF-8 text.
+ * @param {string} relativePath - relative to PC_BRIDGE_ROOT
+ * @param {string} contentB64
+ * @param {{overwrite?: boolean}} [options]
+ */
+export async function writeBinaryPcFile(relativePath, contentB64, options = {}) {
+  return postPcFilesJson('/pc-fs/write-binary', { path: relativePath, contentB64, overwrite: !!options.overwrite }, 'write the binary file');
+}
+
+/**
+ * Recursively zips a folder on the PC into a single .zip file, via
+ * /pc-fs/zip - the PC-side counterpart to filesystemTool.zipFolder()
+ * for packaging a finished project. Skips node_modules/.git/
+ * .zao-checkpoints automatically.
+ * @param {string} folderPath - relative to PC_BRIDGE_ROOT ("" for the project root)
+ * @param {string} zipOutputPath - relative to PC_BRIDGE_ROOT, e.g. "myproject.zip"
+ * @param {{overwrite?: boolean}} [options]
+ * @returns {Promise<{success, data: {folderPath, zipOutputPath, filesZipped, size}|null, error}>}
+ */
+export async function zipPc(folderPath, zipOutputPath, options = {}) {
+  return postPcFilesJson('/pc-fs/zip', { folderPath, zipOutputPath, overwrite: !!options.overwrite }, 'zip the folder');
+}
+
+/**
+ * Extracts a .zip file already on the PC into a destination folder, via
+ * /pc-fs/extract-zip - recreates the archive's internal folder
+ * structure. Handy for unpacking a downloaded template or starter
+ * project that terminal_pc_run_command pulled down (or that was written
+ * with writeBinaryPcFile()).
+ * @param {string} zipPath - relative to PC_BRIDGE_ROOT
+ * @param {string} destinationFolderPath - relative to PC_BRIDGE_ROOT ("" for the project root)
+ * @returns {Promise<{success, data: {zipPath, destinationFolderPath, filesExtracted}|null, error}>}
+ */
+export async function extractZipPc(zipPath, destinationFolderPath) {
+  return postPcFilesJson('/pc-fs/extract-zip', { zipPath, destinationFolderPath }, 'extract the ZIP file');
+}
+
+/**
+ * Literal substring search across text files on the PC, via /pc-fs/grep -
+ * finds where something is defined/used before deciding what to edit.
+ * @param {string} query
+ * @param {{path?: string, caseSensitive?: boolean, maxResults?: number}} [options]
+ */
+export async function grepPc(query, options = {}) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` } };
+  }
+  const params = new URLSearchParams({ query, path: options.path || '', maxResults: String(options.maxResults || 50) });
+  if (options.caseSensitive) params.set('caseSensitive', 'true');
+  return getPcFilesJson(`/pc-fs/grep?${params.toString()}`, 'search the project');
+}
+
+/**
+ * Finds files on the PC by name pattern (e.g. "**\/*.test.js"), via
+ * /pc-fs/glob. Supports *, **, ? - no brace expansion or character classes.
+ * @param {string} pattern
+ * @param {{path?: string}} [options]
+ */
+export async function globPc(pattern, options = {}) {
+  const params = new URLSearchParams({ pattern, path: options.path || '' });
+  return getPcFilesJson(`/pc-fs/glob?${params.toString()}`, 'find files');
+}
+
+/**
+ * Lists recent PC filesystem checkpoints (newest first) via
+ * /pc-fs/checkpoints - each one was recorded automatically right before
+ * a write/edit/delete/rename/move mutated something.
+ * @param {{limit?: number}} [options]
+ */
+export async function listPcCheckpoints(options = {}) {
+  const params = new URLSearchParams({ limit: String(options.limit || 20) });
+  return getPcFilesJson(`/pc-fs/checkpoints?${params.toString()}`, 'list checkpoints');
+}
+
+/**
+ * Restores whatever a PC filesystem checkpoint captured - the file's/
+ * folder's exact prior content, or removes what a create introduced.
+ * No redo. See /pc-fs/checkpoints/rewind in server/pcFiles.js.
+ * @param {string} checkpointId
+ */
+export async function rewindPcCheckpoint(checkpointId) {
+  return postPcFilesJson('/pc-fs/checkpoints/rewind', { checkpointId }, 'rewind the checkpoint');
+}
+
+/**
+ * Shared GET helper for the /pc-fs/* read-side routes (grep, glob,
+ * checkpoints list) - same connection resolution, auth, timeout, and
+ * error-shaping as postPcFilesJson() below, just for GET+querystring
+ * instead of POST+body.
+ */
+async function getPcFilesJson(routePathWithQuery, actionDescription) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}${routePathWithQuery}`, { headers: authHeaders(token) }),
+      TERMINAL_TIMEOUT_MS,
+      `PC ${actionDescription} timed out`
+    );
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { success: false, data: null, error: { message: json?.error?.message || `PC returned ${response.status}.` } };
+    }
+    return { success: true, data: json, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the PC backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
+    };
+  }
+}
+
+/**
+ * Shared POST helper for the /pc-fs/* write-side routes above - same
+ * connection resolution, auth, timeout, and error-shaping as
+ * listPcDirectory()/readPcFile(), just factored out since there are now
+ * four of these instead of one.
+ */
+async function postPcFilesJson(routePath, body, actionDescription) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}${routePath}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify(body),
+      }),
+      TERMINAL_TIMEOUT_MS,
+      `PC file ${actionDescription} timed out`
+    );
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { success: false, data: null, error: { message: json?.error?.message || `PC returned ${response.status}.` } };
+    }
+    return { success: true, data: json, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the PC backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PC git (server/pcGit.js) - execFile-based, no shell quoting involved.
+// `path` in every function below is a project folder relative to
+// PC_BRIDGE_ROOT, same convention as every other pc-* function above.
+// ---------------------------------------------------------------------------
+
+export async function gitInitPc(path) {
+  return postPcFilesJson('/pc-git/init', { path }, 'initialize the git repo');
+}
+export async function gitStatusPc(path) {
+  return getPcFilesJson(`/pc-git/status?path=${encodeURIComponent(path)}`, 'get git status');
+}
+export async function gitAddPc(path, options = {}) {
+  return postPcFilesJson('/pc-git/add', { path, files: options.files, all: options.all }, 'stage files');
+}
+export async function gitCommitPc(path, message, options = {}) {
+  return postPcFilesJson('/pc-git/commit', { path, message, authorName: options.authorName, authorEmail: options.authorEmail }, 'commit');
+}
+export async function gitPushPc(path, options = {}) {
+  return postPcFilesJson('/pc-git/push', { path, remote: options.remote, branch: options.branch, setUpstream: !!options.setUpstream, force: !!options.force }, 'push');
+}
+export async function gitPullPc(path, options = {}) {
+  return postPcFilesJson('/pc-git/pull', { path, remote: options.remote, branch: options.branch }, 'pull');
+}
+export async function gitCheckoutPc(path, branch, options = {}) {
+  return postPcFilesJson('/pc-git/checkout', { path, branch, create: !!options.create }, 'checkout the branch');
+}
+export async function gitRemoteAddPc(path, name, url) {
+  return postPcFilesJson('/pc-git/remote-add', { path, name, url }, 'add the remote');
+}
+export async function gitLogPc(path, options = {}) {
+  const params = new URLSearchParams({ path, limit: String(options.limit || 20) });
+  return getPcFilesJson(`/pc-git/log?${params.toString()}`, 'get git log');
+}
+export async function gitDiffPc(path, options = {}) {
+  const params = new URLSearchParams({ path, staged: options.staged ? 'true' : 'false' });
+  return getPcFilesJson(`/pc-git/diff?${params.toString()}`, 'get git diff');
+}
+
+// ---------------------------------------------------------------------------
+// PC zip/extract (server/pcZip.js)
+// ---------------------------------------------------------------------------
+
+export async function zipPcFolder(folderPath, zipPath) {
+  return postPcFilesJson('/pc-fs/zip', { folderPath, zipPath }, 'zip the folder');
+}
+export async function extractPcZip(zipPath, destinationFolderPath) {
+  return postPcFilesJson('/pc-fs/extract-zip', { zipPath, destinationFolderPath }, 'extract the zip');
+}
+
+
+/**
  * Runs a live web search via the backend's /web/search route (DuckDuckGo
  * HTML results, no API key - see server/webSearch.js). This is what backs
  * both the "Web search" toggle in AttachmentSheet.js and the local coder
@@ -517,6 +1129,174 @@ export async function runWebSearch(query, maxResults = 5) {
         message: isNetworkError ? `Could not reach the ${mode === 'remote' ? 'Remote' : 'LAN'} backend for search.` : (err?.message || 'Web search failed.'),
       },
     };
+  }
+}
+
+/**
+ * Fetches a specific URL via the backend's /web/fetch route and returns
+ * its readable text content (see server/webFetch.js) - the companion to
+ * runWebSearch above: search finds candidate pages, this reads one of
+ * them (or any URL the person already has) in full.
+ * @param {string} url
+ * @returns {Promise<{success, data: {url, finalUrl, title, text, truncated}|null, error}>}
+ */
+export async function runWebFetch(url) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return {
+      success: false,
+      data: null,
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` },
+    };
+  }
+
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/web/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ url }),
+      }),
+      WEB_FETCH_TIMEOUT_MS,
+      'Web fetch timed out waiting for a response.'
+    );
+
+    if (response.status === 401) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token.' } };
+    }
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok || !result.success) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: result?.error?.message || `Fetch request failed (${response.status}).` } };
+    }
+
+    return { success: true, data: { url: result.url, finalUrl: result.finalUrl, title: result.title, text: result.text, truncated: result.truncated }, error: null };
+  } catch (err) {
+    console.error('[BackendClient] runWebFetch failed:', err);
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+        message: isNetworkError ? `Could not reach the ${mode === 'remote' ? 'Remote' : 'LAN'} backend for fetch.` : (err?.message || 'Web fetch failed.'),
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Background sessions (server/backgroundSessions.js) - start a long task on
+// the PC and let it keep running there after the phone app closes; come
+// back later and check on it. See src/services/session/backgroundSessionTool.js
+// for the tool-facing wrapper the local coder model actually calls.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} prompt
+ * @returns {Promise<{success, data: {id, prompt, status, createdAt, updatedAt, stepCount, lastStep}|null, error}>}
+ */
+export async function startBackgroundSession(prompt) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set. Add it in Settings > Backend Connection.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/sessions/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+        body: JSON.stringify({ prompt }),
+      }),
+      SESSION_TIMEOUT_MS,
+      'Starting the background session timed out.'
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: result?.error?.message || `Could not start session (${response.status}).` } };
+    }
+    return { success: true, data: result.session, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return { success: false, data: null, error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: err?.message || 'Could not start session.' } };
+  }
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<{success, data: object|null, error}>} data is the full session record (status, log, answer, error) when found
+ */
+export async function getBackgroundSession(id) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/sessions/${encodeURIComponent(id)}`, { headers: { ...authHeaders(token) } }),
+      SESSION_TIMEOUT_MS,
+      'Checking the background session timed out.'
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: result?.error?.message || `Session not found (${response.status}).` } };
+    }
+    return { success: true, data: result.session, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return { success: false, data: null, error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: err?.message || 'Could not check session.' } };
+  }
+}
+
+/**
+ * @returns {Promise<{success, data: Array<object>|null, error}>} data is a list of session summaries, newest first
+ */
+export async function listBackgroundSessions() {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/sessions`, { headers: { ...authHeaders(token) } }),
+      SESSION_TIMEOUT_MS,
+      'Listing background sessions timed out.'
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: result?.error?.message || `Could not list sessions (${response.status}).` } };
+    }
+    return { success: true, data: result.sessions || [], error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return { success: false, data: null, error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: err?.message || 'Could not list sessions.' } };
+  }
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<{success, data: object|null, error}>}
+ */
+export async function stopBackgroundSession(id) {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No ${mode === 'remote' ? 'Remote' : 'LAN'} backend URL is set.` } };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/sessions/${encodeURIComponent(id)}/stop`, { method: 'POST', headers: { ...authHeaders(token) } }),
+      SESSION_TIMEOUT_MS,
+      'Stopping the background session timed out.'
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.success) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: result?.error?.message || `Could not stop session (${response.status}).` } };
+    }
+    return { success: true, data: result.session, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return { success: false, data: null, error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: err?.message || 'Could not stop session.' } };
   }
 }
 

@@ -10,6 +10,23 @@
  * connection this displays, and server/browserAgent.js for the PC-side
  * Playwright session driving it.
  *
+ * SIZE: a compact 3:4 window, not a near-full-width preview of the whole
+ * streamed page - this sits over the chat interface, so it's meant to be
+ * a small peek at what the agent's doing, not a second screen competing
+ * with the conversation.
+ *
+ * ZOOM: both this PiP and full-screen mode start at 50% (zoomed out) on
+ * launch - see BrowserStreamView.js's `zoom` prop for what that actually
+ * does (a display-side scale of the streamed frame, not a real page
+ * zoom). Full-screen zoom is owned by the common parent (App.js, as
+ * `browserFullScreenZoom`/`setBrowserFullScreenZoom`) rather than here,
+ * since BrowserAgentScreen (a sibling, chrome-only component) renders
+ * the actual +/- controls for it but doesn't render the stream itself -
+ * both need to agree on the same value. The compact PiP view below stays
+ * fixed at DEFAULT_ZOOM with no controls of its own - it's too small a
+ * window for zoom controls to be worth the clutter, and tapping it
+ * expands to full screen where adjusting zoom actually makes sense.
+ *
  * No step-snapshot capture here anymore (the old version used
  * react-native-view-shot to screenshot its own WebView after each step) -
  * the PC already sends real screenshots directly over the stream, so
@@ -21,9 +38,10 @@ import { View, StyleSheet, PanResponder, Animated, Dimensions, TouchableOpacity,
 import BrowserStreamView from './BrowserStreamView';
 
 const SCREEN = Dimensions.get('window');
-const PIP_WIDTH = Math.round(SCREEN.width * 0.62);
-const PIP_HEIGHT = Math.round(PIP_WIDTH * (915 / 412)); // matches the streamed viewport's aspect ratio
+const PIP_WIDTH = Math.round(SCREEN.width * 0.4);
+const PIP_HEIGHT = Math.round(PIP_WIDTH * (4 / 3)); // 3:4 - compact, not the full streamed-page shape
 const EDGE_MARGIN = 12;
+const DEFAULT_ZOOM = 0.5; // both PiP and full-screen start zoomed out to 50% on launch
 
 const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
   const {
@@ -33,6 +51,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
     awaitingHuman = false,
     humanReason = null,
     fullScreen = false,
+    fullScreenZoom = DEFAULT_ZOOM,
     frameBase64 = null,
     connected = false,
     connectionError = null,
@@ -72,11 +91,13 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
   if (!visible) return null;
 
   // Full-screen mode: no PiP chrome - BrowserAgentScreen supplies its own
-  // header/controls around this same stream view.
+  // header/controls around this same stream view. zoom/onZoomChange are
+  // handed to BrowserAgentScreen via props so its top-frame zoom buttons
+  // can adjust the same state that's actually driving the image below.
   if (fullScreen) {
     return (
       <View style={StyleSheet.absoluteFill}>
-        <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={awaitingHuman} connected={connected} connectionError={connectionError} isRunning={isRunning} />
+        <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={awaitingHuman} connected={connected} connectionError={connectionError} isRunning={isRunning} zoom={fullScreenZoom} />
         {awaitingHuman && (
           <ManualControlBar
             reason={humanReason}
@@ -100,7 +121,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
         <TouchableOpacity style={styles.statusRow} onPress={onExpand} activeOpacity={0.7}>
           {isRunning ? <ActivityIndicator size="small" color="#fff" /> : null}
           <Text style={styles.headerText} numberOfLines={1}>
-            {awaitingHuman ? 'Needs your input - tap to open' : isRunning ? 'Agent working…' : 'Browser agent'}
+            {awaitingHuman ? 'Needs input' : isRunning ? 'Working…' : 'Browser'}
           </Text>
         </TouchableOpacity>
         <TouchableOpacity onPress={() => setMinimized((m) => !m)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -110,7 +131,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
 
       {!minimized && (
         <View style={styles.viewportWrap}>
-          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} connected={connected} connectionError={connectionError} isRunning={isRunning} />
+          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} connected={connected} connectionError={connectionError} isRunning={isRunning} zoom={DEFAULT_ZOOM} />
         </View>
       )}
     </Animated.View>

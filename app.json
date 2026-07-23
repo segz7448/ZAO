@@ -33,6 +33,7 @@
     "plugins": [
       "expo-sqlite",
       "expo-secure-store",
+      "expo-background-task",
       [
         "expo-notifications",
         {
@@ -55,7 +56,6 @@
           "isAccessMediaLocationEnabled": false
         }
       ],
-      "./plugins/withTermuxRunCommand",
       "./plugins/withCleartextTraffic"
     ]
   }

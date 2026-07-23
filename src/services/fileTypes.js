@@ -11,6 +11,7 @@ export const FILE_CATEGORY = {
   IMAGE: 'image',           // sent directly to vision-capable models
   PDF: 'pdf',               // extracted server-side via edge function
   DOCX: 'docx',             // extracted server-side via edge function
+  PPTX: 'pptx',             // extracted on-device via jszip + XML text stripping (officeExtractors.js)
   ZIP: 'zip',               // unzipped on-device, each entry processed recursively
   CSV: 'csv',               // parsed on-device with papaparse, converted to readable text
   CODE_OR_TEXT: 'text',     // read directly as UTF-8 text on-device
@@ -42,6 +43,9 @@ export function categorizeFile(fileName, mimeType = '') {
   if (ext === 'docx' || mimeType.includes('wordprocessingml')) {
     return FILE_CATEGORY.DOCX;
   }
+  if (ext === 'pptx' || mimeType.includes('presentationml')) {
+    return FILE_CATEGORY.PPTX;
+  }
   if (ext === 'zip' || mimeType === 'application/zip') {
     return FILE_CATEGORY.ZIP;
   }
@@ -63,21 +67,11 @@ export function getCategoryLabel(category) {
     [FILE_CATEGORY.IMAGE]: 'Image',
     [FILE_CATEGORY.PDF]: 'PDF',
     [FILE_CATEGORY.DOCX]: 'Word document',
+    [FILE_CATEGORY.PPTX]: 'PowerPoint presentation',
     [FILE_CATEGORY.ZIP]: 'ZIP archive',
     [FILE_CATEGORY.CSV]: 'Spreadsheet',
     [FILE_CATEGORY.CODE_OR_TEXT]: 'Text file',
     [FILE_CATEGORY.UNKNOWN]: 'File',
   };
   return labels[category] || 'File';
-}
-
-/**
- * pptx is intentionally NOT categorized as extractable yet - see README TODO.
- * It falls through to UNKNOWN rather than silently mis-processing as a ZIP
- * (a .pptx IS technically a zip container, but presenting its raw XML parts
- * to a model isn't useful without real slide-content parsing).
- */
-export function isPptx(fileName, mimeType = '') {
-  const ext = getFileExtension(fileName);
-  return ext === 'pptx' || mimeType.includes('presentationml');
 }

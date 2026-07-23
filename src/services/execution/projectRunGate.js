@@ -19,19 +19,17 @@
  * and the model gets back exactly which file/line is broken instead of
  * the project launching broken, or not launching with an opaque crash.
  *
- * WIRED IN: both terminal tools' runCommand() (pcTerminalTool.js,
- * termuxTerminalTool.js), right after checkCommandSafety - so this
- * applies no matter which of the two entry points a call comes through
- * (the normal flat tool loop, or approveAndRunPendingTool's confirmed
- * re-run in toolOrchestrator.js).
+ * WIRED IN: pcTerminalTool.js's runCommand(), right after
+ * checkCommandSafety - so this applies no matter which entry point a
+ * call comes through (the normal flat tool loop, or
+ * approveAndRunPendingTool's confirmed re-run in toolOrchestrator.js).
  *
  * CAVEAT, stated plainly (same honesty standard as EXECUTION_SAFETY.md):
  * this checks the SAF-granted folder ZAO's own filesystem tools read/
  * write (src/services/filesystem/filesystemTool.js) - the project ZAO
- * has actually been editing. terminal_termux_run_command runs directly
- * on the same device, so that's very likely the exact project being
- * started. terminal_pc_run_command runs on a *different machine* (the
- * person's PC backend), which may or may not be pointed at that same
+ * has actually been editing. terminal_pc_run_command runs on a
+ * *different machine* (the person's PC backend), which may or may not
+ * be pointed at that same
  * folder - when it isn't, this gate is still checking real code for real
  * errors, just not a guarantee the PC's copy matches byte-for-byte.
  */

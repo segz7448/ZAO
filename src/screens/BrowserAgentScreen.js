@@ -15,15 +15,30 @@
  * sibling rendered once in App.js, so collapsing back to the small PiP
  * and expanding to this full screen never loses the PC-side session's
  * state.
+ *
+ * TOP FRAME: deliberately its own safe-area-padded, elevated card
+ * (rounded bottom corners, shadow, a solid surface) rather than a thin
+ * strip flush against the status bar/notch - the close button in
+ * particular needed real breathing room above and around it rather than
+ * sitting right at the very top edge. Only this chrome is safe-area
+ * padded; the live view underneath (BrowserAgentPiP in fullScreen mode)
+ * still extends full-bleed under the notch, same as before - this is a
+ * card floating on top of it, not a container clipping it.
  */
 
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../theme/useTheme';
 
-export default function BrowserAgentScreen({ stream, isAgentRunning = false, awaitingHuman = false, onClose }) {
+const ZOOM_STEP = 0.25;
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 1;
+
+export default function BrowserAgentScreen({ stream, isAgentRunning = false, awaitingHuman = false, zoom = 0.5, onZoomChange, onClose }) {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const [taskText, setTaskText] = useState('');
 
   const handleSendTask = () => {
@@ -36,25 +51,59 @@ export default function BrowserAgentScreen({ stream, isAgentRunning = false, awa
     stream?.cancel();
   };
 
+  const handleZoomOut = () => onZoomChange?.(Math.max(ZOOM_MIN, Math.round((zoom - ZOOM_STEP) * 100) / 100));
+  const handleZoomIn = () => onZoomChange?.(Math.min(ZOOM_MAX, Math.round((zoom + ZOOM_STEP) * 100) / 100));
+
   return (
     <View style={styles.chromeStack} pointerEvents="box-none">
-      <View style={[styles.statusStrip, { backgroundColor: theme.surfaceAlt, borderBottomColor: theme.border }]}>
-        <View style={[styles.statusDot, isAgentRunning && styles.statusDotActive, awaitingHuman && styles.statusDotWaiting]} />
-        <Text style={[styles.statusText, { color: theme.textSecondary }]} numberOfLines={1}>
-          {awaitingHuman
-            ? 'Needs your input - see below'
-            : isAgentRunning
-            ? 'ZAO is browsing on your PC…'
-            : 'PC browser agent - idle'}
-        </Text>
-        {isAgentRunning && (
-          <TouchableOpacity onPress={handleCancel} hitSlop={8} style={styles.cancelBtn}>
-            <Text style={[styles.cancelBtnText, { color: theme.textSecondary }]}>Stop</Text>
+      <View
+        style={[
+          styles.topFrame,
+          { backgroundColor: theme.surfaceAlt, borderBottomColor: theme.border, paddingTop: insets.top + 14 },
+        ]}
+      >
+        <View style={styles.topFrameRow}>
+          <View style={styles.titleGroup}>
+            <View style={[styles.statusDot, isAgentRunning && styles.statusDotActive, awaitingHuman && styles.statusDotWaiting]} />
+            <View style={styles.titleTextGroup}>
+              <Text style={[styles.titleText, { color: theme.textPrimary }]} numberOfLines={1}>
+                Browser Agent
+              </Text>
+              <Text style={[styles.statusText, { color: theme.textSecondary }]} numberOfLines={1}>
+                {awaitingHuman ? 'Needs your input - see below' : isAgentRunning ? 'Browsing on your PC…' : 'Idle - ready for a task'}
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            onPress={onClose}
+            hitSlop={10}
+            style={[styles.closeBtn, { backgroundColor: theme.background }]}
+            accessibilityRole="button"
+            accessibilityLabel="Close browser agent"
+          >
+            <Ionicons name="close" size={20} color={theme.textPrimary} />
           </TouchableOpacity>
-        )}
-        <TouchableOpacity onPress={onClose} hitSlop={8}>
-          <Ionicons name="close" size={22} color={theme.textSecondary} />
-        </TouchableOpacity>
+        </View>
+
+        <View style={styles.topFrameControlsRow}>
+          <View style={[styles.zoomControl, { backgroundColor: theme.background }]}>
+            <TouchableOpacity onPress={handleZoomOut} hitSlop={8} disabled={zoom <= ZOOM_MIN} style={styles.zoomBtn}>
+              <Ionicons name="remove" size={16} color={zoom <= ZOOM_MIN ? theme.textTertiary : theme.textPrimary} />
+            </TouchableOpacity>
+            <Text style={[styles.zoomLabel, { color: theme.textSecondary }]}>{Math.round(zoom * 100)}%</Text>
+            <TouchableOpacity onPress={handleZoomIn} hitSlop={8} disabled={zoom >= ZOOM_MAX} style={styles.zoomBtn}>
+              <Ionicons name="add" size={16} color={zoom >= ZOOM_MAX ? theme.textTertiary : theme.textPrimary} />
+            </TouchableOpacity>
+          </View>
+
+          {isAgentRunning && (
+            <TouchableOpacity onPress={handleCancel} hitSlop={8} style={[styles.stopBtn, { backgroundColor: theme.background }]}>
+              <Ionicons name="stop-circle-outline" size={15} color="#DC2626" />
+              <Text style={styles.stopBtnText}>Stop</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {/* No live view rendered here - the persistent BrowserAgentPiP
@@ -68,7 +117,7 @@ export default function BrowserAgentScreen({ stream, isAgentRunning = false, awa
         style={styles.taskBarWrap}
         pointerEvents="box-none"
       >
-        <View style={[styles.taskBar, { backgroundColor: theme.surface, borderTopColor: theme.border }]}>
+        <View style={[styles.taskBar, { backgroundColor: theme.surface, borderTopColor: theme.border, paddingBottom: Math.max(10, insets.bottom) }]}>
           {isAgentRunning ? (
             <View style={styles.runningRow}>
               <ActivityIndicator size="small" color={theme.textSecondary} />
@@ -101,18 +150,43 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'space-between',
   },
-  statusStrip: {
+  topFrame: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    gap: 10,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+  },
+  topFrameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 8,
+    justifyContent: 'space-between',
+  },
+  titleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    marginRight: 12,
+  },
+  titleTextGroup: {
+    flex: 1,
+  },
+  titleText: {
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
   statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#9CA3AF',
   },
   statusDotActive: {
@@ -122,17 +196,54 @@ const styles = StyleSheet.create({
     backgroundColor: '#EF4444',
   },
   statusText: {
-    flex: 1,
     fontSize: 12,
     fontWeight: '500',
+    marginTop: 1,
   },
-  cancelBtn: {
-    paddingHorizontal: 8,
+  closeBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  topFrameControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  zoomControl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 8,
+    paddingHorizontal: 4,
     paddingVertical: 4,
+    gap: 2,
   },
-  cancelBtnText: {
+  zoomBtn: {
+    width: 26,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomLabel: {
     fontSize: 12,
     fontWeight: '600',
+    minWidth: 38,
+    textAlign: 'center',
+  },
+  stopBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  stopBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#DC2626',
   },
   taskBarWrap: {
     justifyContent: 'flex-end',
@@ -141,7 +252,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     gap: 8,
   },

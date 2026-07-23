@@ -129,18 +129,46 @@ function buildAssistantMessageFromResult(result, conversationId) {
     // ChatScreen.js render a reasoning chip on the bubble.
     reasoning_type: result.data.reasoningType || null,
     reasoning_trace: result.data.reasoningTrace || null,
-    // Set only when this reply came from a time_get_current tool call
-    // (src/services/toolOrchestrator.js) - lets ChatScreen.js render a
-    // live ClockWidget on this specific bubble. NULL for every ordinary
-    // reply. See src/db/database.js's messages migration comment for
-    // clock_data.
+    // Set only when this reply came from a time_get_current tool call -
+    // lets ChatScreen.js render a live ClockWidget on this specific
+    // bubble. NULL for every ordinary reply. See src/db/database.js's
+    // messages migration comment for clock_data.
+    //
+    // NOTE: orchestrator.js's three route handlers (runChat/runBrowsing/
+    // runHierarchicalPlan) never set result.data.clockData themselves,
+    // so this is always null on the chat-message path today - a
+    // hierarchical-plan REPLY here is always just the plan proposal
+    // (backendBrain.js's runHierarchicalPlan doesn't run any steps, so
+    // there's nothing to read a clock from yet). If a plan is later
+    // actually run (PlanScreen.js's "Start plan" -> planStore.js's
+    // startPlan() -> backendBrain.js's runApprovedPlan(), a completely
+    // separate call path from this file), that result DOES carry
+    // clockData (see runApprovedPlan's own comment) but today nothing
+    // feeds it back into a chat message - it's only readable via
+    // startPlan()'s own return value, which App.js currently discards.
     clock_data: result.data.clockData ? JSON.stringify(result.data.clockData) : null,
-    // Set only when a terminal command this turn was refused because it
-    // needs human confirmation (toolOrchestrator.js's pendingConfirmation,
-    // see orchestrator.js's runToolTaskHandler) - lets ChatScreen.js render
-    // an "Approve this command?" card on this specific bubble. NULL for
+    // Set only when a terminal command/tool call this turn was refused
+    // because it needs human confirmation - lets ChatScreen.js render an
+    // "Approve this command?" card on this specific bubble. NULL for
     // every ordinary reply. See src/db/database.js's messages migration
     // comment for pending_confirmation.
+    //
+    // NOTE: this is toolOrchestrator.js's own pendingConfirmation/
+    // approveAndRunPendingTool mechanism (used by runToolTask(), see its
+    // own header comment), which - like clockData above - has no
+    // producer on the chat-message path today; toolOrchestrator.js's
+    // flat loop only runs as a subagent (subagentManager.js), never as
+    // a top-level chat route. A risky/write call reached through
+    // ordinary chat instead goes through the hierarchical-plan pipeline,
+    // which has its OWN independent risk gate - a step marked is_risky
+    // pauses the plan at status 'awaiting_approval' (planExecutor.js)
+    // rather than producing a pending_confirmation here, and is approved
+    // via PlanScreen.js/planStore.js's approveStep(), not
+    // approvePendingToolCall() below. This field/action pair is real,
+    // tested, and correctly wired end-to-end (see
+    // approvePendingToolCall() below) - it's just currently only
+    // reachable for a subagent's own confirmable call, not for an
+    // ordinary top-level message.
     pending_confirmation: result.data.pendingConfirmation ? JSON.stringify(result.data.pendingConfirmation) : null,
   };
 }
@@ -179,6 +207,7 @@ export const useChatStore = create((set, get) => ({
   // Reset to null at the start of every send and cleared again once the
   // final assistant message is appended, same lifecycle as browsingSteps.
   streamingText: null,
+  streamingThinking: null,
   // The connected BrowserAgentStream instance
   // (src/services/browserAgent/browserAgentStream.js) - talks to the
   // Playwright agent running on the person's PC. Set once via
@@ -269,7 +298,7 @@ export const useChatStore = create((set, get) => ({
         ? { ...m, content: trimmed, edited_at: updateResult.data.edited_at }
         : m
     );
-    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null });
+    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null, streamingThinking: null });
 
     // 3. Re-run orchestration using history up to and including the edit.
     const prefs = usePreferencesStore.getState().preferences;
@@ -289,6 +318,7 @@ export const useChatStore = create((set, get) => ({
       onPlanProgress: (stage) => set({ planProgress: stage }),
       onPlanStep: (label) => set((state) => ({ planSteps: [...state.planSteps, label] })),
       onToken: (text) => set({ streamingText: text }),
+      onThinkingToken: (text) => set({ streamingThinking: text }),
     });
 
     if (result.success) {
@@ -304,6 +334,7 @@ export const useChatStore = create((set, get) => ({
         planProgress: null,
         planSteps: [],
         streamingText: null,
+        streamingThinking: null,
       }));
       await get().loadConversationList();
       if (prefs.memory_enabled !== false) {
@@ -326,6 +357,7 @@ export const useChatStore = create((set, get) => ({
         planProgress: null,
         planSteps: [],
         streamingText: null,
+        streamingThinking: null,
       }));
     }
 
@@ -355,7 +387,7 @@ export const useChatStore = create((set, get) => ({
 
     await deleteMessagesAfter(conversationId, anchorMessage.created_at);
     const truncatedMessages = messages.slice(0, userIndex + 1);
-    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null });
+    set({ messages: truncatedMessages, isSending: true, error: null, planProgress: null, planSteps: [], streamingText: null, streamingThinking: null });
 
     const prefs = usePreferencesStore.getState().preferences;
     const history = await assembleHistory(truncatedMessages, {
@@ -374,6 +406,7 @@ export const useChatStore = create((set, get) => ({
       onPlanProgress: (stage) => set({ planProgress: stage }),
       onPlanStep: (label) => set((state) => ({ planSteps: [...state.planSteps, label] })),
       onToken: (text) => set({ streamingText: text }),
+      onThinkingToken: (text) => set({ streamingThinking: text }),
     });
 
     if (result.success) {
@@ -389,6 +422,7 @@ export const useChatStore = create((set, get) => ({
         planProgress: null,
         planSteps: [],
         streamingText: null,
+        streamingThinking: null,
       }));
       await get().loadConversationList();
       return { success: true };
@@ -409,6 +443,7 @@ export const useChatStore = create((set, get) => ({
       planProgress: null,
       planSteps: [],
       streamingText: null,
+      streamingThinking: null,
     }));
     return { success: false, error: result.error };
   },
@@ -525,7 +560,7 @@ export const useChatStore = create((set, get) => ({
     }));
   },
 
-  async sendMessage(userText, attachment = null) {
+  async sendMessage(userText, attachment = null, { webSearchEnabled = false, browserAgentActive = false } = {}) {
     const trimmed = (userText || '').trim();
     if (!trimmed && !attachment) return;
 
@@ -654,6 +689,7 @@ export const useChatStore = create((set, get) => ({
       planProgress: null,
       planSteps: [],
       streamingText: null,
+      streamingThinking: null,
     }));
 
     // Auto-title the conversation from the first message, same pattern as
@@ -684,6 +720,8 @@ export const useChatStore = create((set, get) => ({
     const result = await sendMessageOrchestrated({
       history,
       browserAccessEnabled: !!prefs.browser_access_enabled,
+      browserAgentActive: !!browserAgentActive,
+      webSearchEnabled: !!webSearchEnabled,
       lastMessageText: messageContent,
       // The connected BrowserAgentStream to the PC's Playwright agent
       // (src/services/browserAgent/browserAgentStream.js), set via
@@ -710,6 +748,7 @@ export const useChatStore = create((set, get) => ({
       // reasoningEngine.js's runReasoningChat) - ChatScreen renders this in
       // place of the "Thinking…" indicator while it's populated.
       onToken: (text) => set({ streamingText: text }),
+      onThinkingToken: (text) => set({ streamingThinking: text }),
     });
 
     if (result.success) {
@@ -726,6 +765,7 @@ export const useChatStore = create((set, get) => ({
         planProgress: null,
         planSteps: [],
         streamingText: null,
+        streamingThinking: null,
       }));
 
       await get().loadConversationList();
@@ -757,6 +797,7 @@ export const useChatStore = create((set, get) => ({
         planProgress: null,
         planSteps: [],
         streamingText: null,
+        streamingThinking: null,
       }));
     }
   },

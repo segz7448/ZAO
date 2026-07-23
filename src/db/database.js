@@ -233,6 +233,30 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_reminders_status
         ON reminders (status, trigger_at);
 
+      -- Background PC processes (see server/processManager.js,
+      -- src/services/terminal/pcProcessTool.js) - a dev server or other
+      -- long-lived command started with pc_process_start. This table is
+      -- what lets processWatcherTask.js notice a tracked process crashed
+      -- or exited while the app was closed/backgrounded and fire exactly
+      -- one local notification for it (notified flips to 1 right after),
+      -- rather than re-notifying on every poll. id is the PC-side process
+      -- id returned by /process/start, not a ZAO-generated one.
+      CREATE TABLE IF NOT EXISTS background_processes (
+        id TEXT PRIMARY KEY NOT NULL,
+        label TEXT NOT NULL,
+        command TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'exited', 'killed', 'error')),
+        exit_code INTEGER,
+        notified INTEGER NOT NULL DEFAULT 0,
+        source_conversation_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (source_conversation_id) REFERENCES conversations (id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_background_processes_status
+        ON background_processes (status, notified);
+
       -- Feedback pattern bank (see src/services/memory/feedbackMemory.js) -
       -- closes the loop on the thumbs-down button: messages.feedback (see
       -- migration below) records a single like/dislike on one message, but
@@ -714,18 +738,22 @@ export async function initDatabase() {
 
       -- Hooks - lifecycle interception, matching Claude Code's
       -- PreToolUse/PostToolUse/SessionStart shape. 'command' is a real
-      -- shell command run through the terminal tools ZAO already has
-      -- (pcTerminalTool/termuxTerminalTool) - no new execution surface,
+      -- shell command run through the terminal tool ZAO already has
+      -- (pcTerminalTool.js) - no new execution surface,
       -- just a new trigger for the existing one. matcher is a tool-name
       -- pattern ('*' = every tool, 'fs_*' = every filesystem tool, or an
       -- exact name) that hooksEngine.js tests against the tool actually
-      -- being called.
+      -- being called. \`backend\` is kept (rather than dropped) because
+      -- SQLite can't drop a CHECK constraint via ALTER TABLE - existing
+      -- installs get their legacy 'termux' rows normalized to 'pc' by a
+      -- data migration below (see MIGRATIONS), and every new hook is
+      -- created with 'pc' from here on.
       CREATE TABLE IF NOT EXISTS hooks (
         id TEXT PRIMARY KEY NOT NULL,
         event TEXT NOT NULL CHECK (event IN ('SessionStart', 'PreToolUse', 'PostToolUse')),
         matcher TEXT NOT NULL DEFAULT '*',
         command TEXT NOT NULL,
-        backend TEXT NOT NULL DEFAULT 'termux' CHECK (backend IN ('termux', 'pc')),
+        backend TEXT NOT NULL DEFAULT 'pc' CHECK (backend IN ('termux', 'pc')),
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL
       );
@@ -788,6 +816,21 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_worktree_sessions_status
         ON worktree_sessions (status, created_at DESC);
     `);
+
+    // Migration: ZAO's on-device Termux terminal was removed entirely -
+    // pcTerminalTool.js (routed through the person's PC backend) is now
+    // the only terminal ZAO has. hooks.backend can't have 'termux'
+    // dropped from its CHECK constraint (SQLite has no ALTER TABLE ...
+    // DROP CONSTRAINT), so instead this just normalizes any hook rows an
+    // existing install already created with backend='termux' over to
+    // 'pc' - hooksEngine.js only knows how to run hooks through
+    // pcTerminalTool.js now, so a stale 'termux' row would otherwise
+    // silently never run.
+    try {
+      await db.execAsync(`UPDATE hooks SET backend = 'pc' WHERE backend = 'termux';`);
+    } catch (migrationErr) {
+      // Expected on a fresh install with no hooks table rows yet - not an error.
+    }
 
     // Migration: github_username added for the GitHub tool (the local
     // coder model's repo/commit/push/PR/release plugin - see
@@ -1622,7 +1665,7 @@ export async function updatePreferences(patch) {
 }
 
 // ---------- API Keys (user-provided) ----------
-// Chat/coding/reasoning run through the single Termux-hosted backend (see
+// Chat/coding/reasoning run through the single PC-hosted backend (see
 // src/services/backend/backendClient.js) - no API key at all. This table
 // is now only used for the one remaining credential: the GitHub Personal
 // Access Token (provider: 'github', see src/services/github/githubTool.js).
@@ -2062,7 +2105,7 @@ export async function updatePlanStatus(id, status, { completedAt } = {}) {
  * auto-incremented in SQL) so recoveryPlanner.js stays the single place
  * that decides "this counts as another attempt."
  */
-export async function updatePlanStep(stepId, planId, { status, result, errorMessage, startedAt, completedAt, retryCount }) {
+export async function updatePlanStep(stepId, planId, { status, result, errorMessage, startedAt, completedAt, retryCount, description }) {
   try {
     const db = await getDb();
     if (!db) return { success: false, error: 'DB_OPEN_FAILED' };
@@ -2075,6 +2118,12 @@ export async function updatePlanStep(stepId, planId, { status, result, errorMess
     if (startedAt !== undefined) { fields.push('started_at = ?'); values.push(startedAt); }
     if (completedAt !== undefined) { fields.push('completed_at = ?'); values.push(completedAt); }
     if (retryCount !== undefined) { fields.push('retry_count = ?'); values.push(retryCount); }
+    // description - only set by recoveryPlanner.js's ALTERNATE_APPROACH
+    // strategy (see planExecutor.js's handleStepFailure), to actually
+    // change what gets retried rather than silently re-running the exact
+    // same failing instruction. Every other caller updates status/result/
+    // errorMessage only and leaves this undefined.
+    if (description !== undefined) { fields.push('description = ?'); values.push(description); }
     values.push(stepId);
 
     if (fields.length > 0) {
@@ -2708,6 +2757,90 @@ export async function deleteReminder(id) {
 }
 
 // ============================================================
+// Background PC processes - see server/processManager.js (PC-side
+// process itself) and src/services/terminal/pcProcessTool.js /
+// src/services/background/processWatcherTask.js (this is the
+// ZAO-owned record of which PC process ids are worth watching for a
+// "finished" notification, independent of the PC's own in-memory
+// state, which is lost on a backend restart).
+// ============================================================
+
+/** Records a new tracked background process right after pc_process_start successfully launches it on the PC. */
+export async function addBackgroundProcess({ id, label, command, sourceConversationId = null }) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: null };
+    const now = Date.now();
+    await db.runAsync(
+      `INSERT INTO background_processes (id, label, command, status, notified, source_conversation_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'running', 0, ?, ?, ?)`,
+      [id, label, command, sourceConversationId, now, now]
+    );
+    return { success: true, data: { id }, error: null };
+  } catch (err) {
+    console.error('[DB] addBackgroundProcess failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: null };
+  }
+}
+
+/** Every process still 'running' per ZAO's own record, or finished but not yet notified about - what processWatcherTask.js polls on each wakeup. */
+export async function getTrackedBackgroundProcesses() {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: [] };
+    const rows = await db.getAllAsync(
+      `SELECT * FROM background_processes WHERE status = 'running' OR notified = 0 ORDER BY created_at ASC`
+    );
+    return { success: true, data: rows || [], error: null };
+  } catch (err) {
+    console.error('[DB] getTrackedBackgroundProcesses failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: [] };
+  }
+}
+
+/** Every tracked process regardless of status, most recent first - backs a future Settings/status list the way getAllReminders does for reminders. */
+export async function getAllBackgroundProcesses(limit = 200) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: [] };
+    const rows = await db.getAllAsync(`SELECT * FROM background_processes ORDER BY created_at DESC LIMIT ?`, [limit]);
+    return { success: true, data: rows || [], error: null };
+  } catch (err) {
+    console.error('[DB] getAllBackgroundProcesses failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: [] };
+  }
+}
+
+/** Updates ZAO's own record of a process's status (running/exited/killed/error) + exit code - called by pc_process_stop right after a manual stop, and by processWatcherTask.js when it notices a status change on the PC. */
+export async function updateBackgroundProcessStatus(id, status, exitCode = null) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED' };
+    await db.runAsync(
+      `UPDATE background_processes SET status = ?, exit_code = ?, updated_at = ? WHERE id = ?`,
+      [status, exitCode, Date.now(), id]
+    );
+    return { success: true, error: null };
+  } catch (err) {
+    console.error('[DB] updateBackgroundProcessStatus failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR' };
+  }
+}
+
+/** Marks a finished process as already notified about, so processWatcherTask.js's next poll doesn't fire a second local notification for the same completion. */
+export async function markBackgroundProcessNotified(id) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED' };
+    await db.runAsync(`UPDATE background_processes SET notified = 1, updated_at = ? WHERE id = ?`, [Date.now(), id]);
+    return { success: true, error: null };
+  } catch (err) {
+    console.error('[DB] markBackgroundProcessNotified failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR' };
+  }
+}
+
+// ============================================================
 // Execution / Safety - see src/services/execution/ for the modules
 // that call these.
 // ============================================================
@@ -2861,7 +2994,7 @@ export async function getHooks(event = null) {
   }
 }
 
-export async function createHook({ id, event, matcher = '*', command, backend = 'termux' }) {
+export async function createHook({ id, event, matcher = '*', command, backend = 'pc' }) {
   try {
     const db = await getDb();
     if (!db) return { success: false, error: 'DB_OPEN_FAILED' };

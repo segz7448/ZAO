@@ -3,7 +3,7 @@
  *
  * The single entry point the UI calls to "send a message and get a
  * response." Everything text-based goes to the one Qwen2.5-Coder-3B model
- * served by the Termux backend (src/services/backend/backendClient.js) -
+ * served by the PC backend (src/services/backend/backendClient.js) -
  * no manual mode, no fallback chain, no per-task model switching.
  *
  * There is no image generation, image editing, or vision/OCR anymore
@@ -25,11 +25,26 @@
  * browsing or another tool step within the SAME turn - rather than
  * committing to one route up front and stopping there regardless of
  * whether it actually satisfied the request. This file's job is now
- * just to build the four route handlers agentLoop.js calls
- * (runChat/runToolTask/runBrowsing/runHierarchicalPlan) and adapt their
- * results back to the { success, data, error } shape the UI expects -
- * the external contract below is unchanged from before agentLoop.js
- * existed.
+ * just to build the THREE route handlers agentLoop.js calls
+ * (runChat/runBrowsing/runHierarchicalPlan, matching frontendBrain.js's
+ * BRAIN_ROUTES exactly) and adapt their results back to the { success,
+ * data, error } shape the UI expects - the external contract below is
+ * unchanged from before agentLoop.js existed.
+ *
+ * NOTE ON toolOrchestrator.js's runToolTask(): there is deliberately no
+ * fourth "runToolTask" handler here. frontendBrain.js routes every
+ * tool-flavored ('github' intent) message to HIERARCHICAL_PLAN
+ * unconditionally now, even a one-step request (see its own comment on
+ * why - the propose-and-approve gate applies equally regardless of plan
+ * size), so runToolTask()'s flat ReAct loop is no longer reachable as a
+ * TOP-LEVEL chat route at all. It's still very much alive as a
+ * primitive: subagentManager.js's spawnSubagents() calls it directly to
+ * run each isolated subagent, which is itself only ever invoked FROM
+ * inside a hierarchical plan step (the agent_spawn_subagents tool,
+ * gated the same way any other plan step is). If a direct,
+ * un-gated single-shot tool route is ever wanted back as a real chat
+ * route, it needs its own BRAIN_ROUTES entry in frontendBrain.js and a
+ * handler here - it was never actually wired that way in this app.
  */
 
 import { logUsageEvent } from '../db/database';
@@ -37,7 +52,6 @@ import {
   getModelKeyForTask,
   ACTIVE_MODEL,
 } from '../config/localModels';
-import { runGithubTask } from '../services/toolOrchestrator';
 import { usePreferencesStore } from '../store/preferencesStore';
 import { runAgentLoop } from '../services/brain/agentLoop';
 import { runHierarchicalPlan } from '../services/brain/backendBrain';
@@ -69,6 +83,16 @@ function withStandingContextPreface(message, standingContext) {
  *   uses it regardless of this flag, and the flag gets synced to true afterward. This
  *   param mainly exists so the toggle's displayed state can be kept in sync with reality;
  *   the real gate is whether agentSession exists (see the PC BROWSER AGENT section below).
+ * @param {boolean} [params.webSearchEnabled] - the composer bar's web-search toggle's
+ *   current state for this message (see ChatScreen.js). web_search is always available to
+ *   the model as a tool regardless of this flag - this only adds a standing-context hint
+ *   (agentLoop.js) nudging the model to actually use it this turn rather than answer from
+ *   what it already knows.
+ * @param {boolean} [params.browserAgentActive] - true when the person currently has a live
+ *   browser agent session open (the full-screen view, a running task, or one awaiting human
+ *   input - see App.js). Passed through to frontendBrain.js's decideRoute() as extra
+ *   classifier context, so a genuinely ambiguous message tips toward the fast BROWSING route
+ *   instead of getting escalated into the much slower HIERARCHICAL_PLAN pipeline on a guess.
  * @param {object} [params.agentSession] - the connected BrowserAgentStream instance
  *   (src/services/browserAgent/browserAgentStream.js), created once at the App level and
  *   held for the lifetime of the browser-agent PiP so a session's browser state/history
@@ -95,6 +119,9 @@ function withStandingContextPreface(message, standingContext) {
  *   (onGithubStep/onBrowserStep/onPlanStep/onPlanProgress) instead, since a tool task,
  *   browsing session, or hierarchical plan doesn't have a single streaming completion to
  *   expose in the first place.
+ * @param {function} [params.onThinkingToken] - fired with the model's in-progress
+ *   reasoning text while it's still inside <thinking>, before onToken starts firing for
+ *   the actual answer. Same CHAT-route-only caveat as onToken above.
  *
  * @returns {Promise<{
  *   success: boolean,
@@ -106,6 +133,8 @@ export async function sendMessageOrchestrated({
   history,
   lastMessageText = '',
   browserAccessEnabled = false,
+  browserAgentActive = false,
+  webSearchEnabled = false,
   agentSession = null,
   onBrowserStep = null,
   githubUsername = null,
@@ -116,6 +145,7 @@ export async function sendMessageOrchestrated({
   isCancelled = () => false,
   onLoopStep = null,
   onToken = null,
+  onThinkingToken = null,
 }) {
   try {
     if (!Array.isArray(history) || history.length === 0) {
@@ -130,6 +160,8 @@ export async function sendMessageOrchestrated({
       history,
       lastMessageText,
       browserAccessEnabled,
+      browserAgentActive,
+      webSearchEnabled,
       agentSession,
       onBrowserStep,
       githubUsername,
@@ -138,11 +170,11 @@ export async function sendMessageOrchestrated({
       onPlanProgress,
       onPlanStep,
       onToken,
+      onThinkingToken,
     };
 
     const handlers = {
       runHierarchicalPlan: runHierarchicalPlanHandler,
-      runToolTask: runToolTaskHandler,
       runBrowsing: runBrowsingHandler,
       runChat: runChatHandler,
     };
@@ -162,11 +194,11 @@ export async function sendMessageOrchestrated({
 
 // ========================================================================
 // HIERARCHICAL PLAN (backendBrain.js's HYBRID_SYMBOLIC_NEURAL path) -
-// for a "github"-flavored request big enough that shouldDecompose()
-// flagged it (multi-part builds, "rebuild my app's backend", etc.), or
-// that a flat TOOL_TASK attempt earlier in this same turn already tried
-// and agentLoop.js's verify step found insufficient (see
-// frontendBrain.js's priorAttempts escalation). Builds a real
+// handles every "github"-flavored request now, big or small (see
+// frontendBrain.js's decideRoute) - a 'small'-scope goal collapses to a
+// single flat execution plan (planCoordinator.js's "COLLAPSING FOR
+// SIMPLE REQUESTS"), so this is the one path for GitHub/Filesystem/
+// Terminal/PDF/Office work regardless of size. Builds a real
 // Strategic -> Project -> Task -> Execution plan tree
 // (src/services/planning/planCoordinator.js) and runs it
 // (planExecutor.js) - the exact same functions planStore.js already
@@ -208,50 +240,6 @@ async function runHierarchicalPlanHandler(effectiveMessage, params) {
     success: false,
     data: null,
     error: planResult.error || { type: 'UNKNOWN', message: 'Could not build a plan for this.' },
-  };
-}
-
-// ========================================================================
-// TOOL ORCHESTRATOR (GitHub + Filesystem + Terminal + PDF + Office) -
-// handles "github"-flavored requests small enough not to need the full
-// hierarchical plan above.
-// ========================================================================
-async function runToolTaskHandler(effectiveMessage, params) {
-  const { githubUsername, onGithubStep, standingContext } = params;
-  const githubResult = await runGithubTask(withStandingContextPreface(effectiveMessage, standingContext), githubUsername, onGithubStep);
-
-  if (githubResult.success) {
-    return {
-      success: true,
-      data: {
-        content: githubResult.answer,
-        family: ACTIVE_MODEL.key,
-        provider: 'local-backend',
-        modelId: ACTIVE_MODEL.label,
-        toolStepsCompleted: githubResult.stepsCompleted,
-        reasoningType: STRATEGY_FOR_ROUTE.TOOL_TASK,
-        // Set only when a time_get_current tool call succeeded this turn
-        // (see toolOrchestrator.js's runToolTask) - lets ChatScreen.js
-        // render a live ClockWidget on this specific bubble, same
-        // pattern as planId -> "View Plan" chip.
-        clockData: githubResult.clockData || null,
-        // Set only when a terminal command this turn was refused
-        // specifically because it needs human confirmation
-        // (toolOrchestrator.js's Gate 1 / commandSafety.js's RISKY tier) -
-        // lets chatStore.js persist it as messages.pending_confirmation so
-        // ChatScreen.js can render a real "Approve this command?" card
-        // instead of the command just failing closed with no way to ever
-        // run it. See HARDENING_NOTES.md.
-        pendingConfirmation: githubResult.pendingConfirmation || null,
-      },
-      error: null,
-    };
-  }
-
-  return {
-    success: false,
-    data: null,
-    error: githubResult.error || { type: 'UNKNOWN', message: 'Tool task failed.' },
   };
 }
 
@@ -340,7 +328,7 @@ async function runBrowsingHandler(effectiveMessage, params) {
 
 // ========================================================================
 // NORMAL CHAT COMPLETION - the one Qwen2.5-Coder-3B model, served by the
-// Termux backend, put to work through the REASONING ENGINE
+// PC backend, put to work through the REASONING ENGINE
 // (src/services/reasoning/reasoningEngine.js) - a chosen reasoning
 // strategy (chain-of-thought by default; tree-of-thought/deductive/
 // inductive/abductive/analogical when reasoningRouter.js's classifier
@@ -354,7 +342,7 @@ async function runBrowsingHandler(effectiveMessage, params) {
 // was already done - not only ever the first and only step.
 // ========================================================================
 async function runChatHandler(effectiveMessage, params) {
-  const { history, lastMessageText, standingContext, onToken } = params;
+  const { history, lastMessageText, standingContext, onToken, onThinkingToken } = params;
   const modelKey = getModelKeyForTask();
 
   // Real system-role blocks, prepended once - CHAT is the one route that
@@ -365,7 +353,7 @@ async function runChatHandler(effectiveMessage, params) {
     ? [...standingContext, ...history]
     : history;
 
-  const result = await runReasoningChat(historyWithContext, effectiveMessage || lastMessageText, onToken);
+  const result = await runReasoningChat(historyWithContext, effectiveMessage || lastMessageText, onToken, onThinkingToken);
 
   if (result.success) {
     return {

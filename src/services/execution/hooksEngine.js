@@ -3,10 +3,11 @@
  *
  * Lifecycle interception, matching Claude Code's PreToolUse / PostToolUse
  * / SessionStart hooks. A hook is a real shell command (Settings >
- * Automation lets a person register one), run through the SAME terminal
- * tools the model itself uses (pcTerminalTool.js / termuxTerminalTool.js -
- * see hooks table's `backend` column) - no new execution surface, just a
- * new trigger into the existing one.
+ * Automation lets a person register one), run through the SAME PC
+ * terminal tool the model itself uses (pcTerminalTool.js - see hooks
+ * table's `backend` column, which is always 'pc' now that ZAO has only
+ * one terminal) - no new execution surface, just a new trigger into the
+ * existing one.
  *
  * Contract, matching Claude Code's own hook exit-code convention:
  *   - PreToolUse hooks run BEFORE the tool call. If any matching hook's
@@ -26,15 +27,13 @@
  * The `context` object passed to a hook is serialized to JSON and made
  * available to the shell command via a ZAO_HOOK_CONTEXT environment-style
  * prefix (`ZAO_HOOK_CONTEXT='...' <command>`) rather than piped over
- * stdin, since both pcTerminalTool.js and termuxTerminalTool.js already
- * run commands through a shell that supports inline env assignment on
- * every platform ZAO targets (bash on Termux, Git Bash/cmd/PowerShell on
- * the PC backend - see terminalRouter.js for why both exist).
+ * stdin, since pcTerminalTool.js already runs commands through a shell
+ * that supports inline env assignment (Git Bash/cmd/PowerShell on the PC
+ * backend).
  */
 
 import { getHooks } from '../../db/database';
 import * as pcTerminalTool from '../terminal/pcTerminalTool';
-import * as termuxTerminalTool from '../terminal/termuxTerminalTool';
 
 function matches(matcher, toolName) {
   if (!matcher || matcher === '*') return true;
@@ -48,9 +47,8 @@ function buildCommand(command, context) {
 }
 
 async function runOne(hook, context) {
-  const runner = hook.backend === 'pc' ? pcTerminalTool : termuxTerminalTool;
   try {
-    const result = await runner.runCommand(buildCommand(hook.command, context));
+    const result = await pcTerminalTool.runCommand(buildCommand(hook.command, context));
     const output = `${result?.data?.stdout || ''}\n${result?.data?.stderr || ''}`;
     return { hookId: hook.id, ok: !!result?.success, blocked: output.includes('ZAO_HOOK_BLOCK'), output };
   } catch (err) {

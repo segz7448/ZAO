@@ -80,6 +80,10 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'bypa
 const WRITE_TOOLS = new Set([
   'fs_create_file', 'fs_create_folder', 'fs_edit_file', 'fs_rename', 'fs_move',
   'fs_zip', 'fs_extract_zip', 'pc_pull_file',
+  'pc_fs_create_folder', 'pc_fs_create_file', 'pc_fs_scaffold_project', 'pc_fs_edit_file',
+  'pc_fs_rename', 'pc_fs_move', 'pc_fs_write_binary', 'pc_fs_rewind_checkpoint',
+  'pc_fs_zip', 'pc_fs_extract_zip',
+  'pc_git_init', 'pc_git_add', 'pc_git_commit', 'pc_git_push', 'pc_git_pull', 'pc_git_checkout', 'pc_git_remote_add',
   'github_create_repo', 'github_commit_files', 'github_create_branch',
   'github_create_pull_request', 'github_create_release',
   'pdf_create', 'pdf_merge', 'pdf_split', 'docx_create', 'xlsx_create', 'csv_create', 'pptx_create',
@@ -89,9 +93,9 @@ const WRITE_TOOLS = new Set([
 // checkpoints (deleting something ZAO never snapshotted a "before" for in
 // the same way an edit gets one) - stays gated in 'acceptEdits' even
 // though ordinary edits don't.
-const DESTRUCTIVE_TOOLS = new Set(['fs_delete', 'fs_rewind_folder_checkpoint']);
+const DESTRUCTIVE_TOOLS = new Set(['fs_delete', 'fs_rewind_folder_checkpoint', 'pc_fs_delete', 'pc_process_stop']);
 
-const TERMINAL_TOOLS = new Set(['terminal_pc_run_command', 'terminal_termux_run_command']);
+const TERMINAL_TOOLS = new Set(['terminal_pc_run_command', 'pc_process_start']);
 
 /**
  * @param {string} toolName - the function name from TOOL_REGISTRY (toolOrchestrator.js)

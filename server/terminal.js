@@ -1,28 +1,36 @@
 /**
  * ZAO Backend - Terminal route (PC edition)
  *
- * Replaces the old phone-side Termux RUN_COMMAND Intent approach for
- * heavy work. The app POSTs the command it wants run to this server, and
+ * The app POSTs the command it wants run to this server, and
  * this file picks a shell for it and spawns it on the PC itself.
  *
- * PC is the full terminal: cmd.exe, PowerShell, Git Bash, and Python are
- * all real options here, not just cmd. chooseShell() below auto-detects
- * which one a command actually needs (PowerShell cmdlet syntax, unix/bash
- * syntax, or a raw Python snippet vs. a plain `python file.py` PATH
- * call) so the model doesn't have to think about shells at all - it just
- * sends the command it wants run, the way it would to a person's real PC.
- * An explicit `shell` field in the request body always overrides the
- * guess, for the rare case the model (or you) wants to pin one.
+ * PC is the full terminal, and the ONLY terminal ZAO has: cmd.exe,
+ * PowerShell, Git Bash, and Python are all real options here, not just
+ * cmd. chooseShell() below auto-detects which one a command actually
+ * needs (PowerShell cmdlet syntax, unix/bash syntax, or a raw Python
+ * snippet vs. a plain `python file.py` PATH call) so the model doesn't
+ * have to think about shells at all - it just sends the command it wants
+ * run, the way it would to a person's real PC. An explicit `shell` field
+ * in the request body always overrides the guess, for the rare case the
+ * model (or you) wants to pin one.
  *
- * Termux (see src/services/terminal/termuxTerminalTool.js) is the
- * fallback - only used when this PC backend is unreachable, or reachable
- * but the PC itself has no internet for an internet-dependent command
- * (see terminalRouter.js). It is not a second "lightweight tasks" tier
- * anymore; when the PC is up and online, everything runs here.
+ * SANDBOXING: gitbash/python commands run inside a real, isolated Docker
+ * container (see sandbox.js) whenever Docker is available and the
+ * request hasn't set hostAccess: true - actual kernel-level filesystem/
+ * network isolation, not just commandSafety.js's regex pattern-matching.
+ * cmd/powershell commands, and anything with hostAccess: true, still run
+ * directly on the host (see sandbox.js's header for exactly why). Every
+ * response reports `sandboxed: true/false` so the model/UI never claims
+ * isolation that didn't actually happen.
+ *
+ * There is no on-device fallback terminal - if this PC backend is
+ * unreachable, terminal commands simply cannot run right now (see
+ * terminalRouter.js's checkTerminalStatus on the app side).
  */
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const sandbox = require('./sandbox');
 
 // ---------------------------------------------------------------------------
 // Shell auto-detection
@@ -84,10 +92,10 @@ function buildSpawnArgs(shell, command, config) {
 
 /**
  * POST /terminal/run
- * body: { command: string, cwd?: string, timeoutMs?: number, shell?: 'cmd'|'powershell'|'gitbash'|'python' }
+ * body: { command: string, cwd?: string, timeoutMs?: number, shell?: 'cmd'|'powershell'|'gitbash'|'python', hostAccess?: boolean, allowNetwork?: boolean }
  */
 function registerTerminalRoute(app, config, log) {
-  app.post('/terminal/run', (req, res) => {
+  app.post('/terminal/run', async (req, res) => {
     const command = req.body?.command;
     if (!command || typeof command !== 'string' || !command.trim()) {
       return res.status(400).json({ error: { message: 'Missing "command" string in request body.' } });
@@ -95,20 +103,49 @@ function registerTerminalRoute(app, config, log) {
 
     const cwd = req.body?.cwd || config.TERMINAL_CWD;
     const timeoutMs = Number(req.body?.timeoutMs) || config.TERMINAL_TIMEOUT_MS;
+    const hostAccess = req.body?.hostAccess === true;
 
     const shell = chooseShell(command, req.body?.shell, config);
-    const { bin, args } = buildSpawnArgs(shell, command, config);
 
-    if (shell === 'gitbash' && !fs.existsSync(bin)) {
-      return res.status(500).json({
-        error: { message: `Git Bash not found at "${bin}". Set ZAO_GIT_BASH_PATH to your actual bash.exe location, or pass "shell": "cmd" to bypass auto-detection for this command.` },
-      });
+    // ---- Try the sandbox first (gitbash/python only - see sandbox.js's
+    // header for why cmd/powershell can't go through Docker) ----
+    let sandboxed = false;
+    let bin;
+    let args;
+
+    const sandboxEligible = !hostAccess && config.SANDBOX_ENABLED && (shell === 'gitbash' || shell === 'python');
+    if (sandboxEligible && await sandbox.isDockerAvailable()) {
+      const imageReady = await sandbox.ensureSandboxImage(log);
+      if (imageReady) {
+        const allowNetwork = req.body?.allowNetwork === true || sandbox.commandLikelyNeedsNetwork(command);
+        const built = sandbox.buildSandboxedSpawnArgs(shell, command, {
+          cwd,
+          allowNetwork,
+          memoryLimit: config.SANDBOX_MEMORY_LIMIT,
+          cpuLimit: config.SANDBOX_CPU_LIMIT,
+          pidsLimit: config.SANDBOX_PIDS_LIMIT,
+        });
+        bin = built.bin;
+        args = built.args;
+        sandboxed = true;
+      }
     }
 
-    log(`Terminal request [${shell}]: ${command} (cwd=${cwd})`);
+    if (!sandboxed) {
+      if (shell === 'gitbash' && !fs.existsSync(config.GIT_BASH_PATH)) {
+        return res.status(500).json({
+          error: { message: `Git Bash not found at "${config.GIT_BASH_PATH}". Set ZAO_GIT_BASH_PATH to your actual bash.exe location, or pass "shell": "cmd" to bypass auto-detection for this command.` },
+        });
+      }
+      const built = buildSpawnArgs(shell, command, config);
+      bin = built.bin;
+      args = built.args;
+    }
+
+    log(`Terminal request [${shell}${sandboxed ? ', sandboxed' : hostAccess ? ', hostAccess' : ', unsandboxed'}]: ${command} (cwd=${cwd})`);
 
     const child = spawn(bin, args, {
-      cwd,
+      cwd: sandboxed ? undefined : cwd, // the sandbox's cwd is set via docker's own -w flag instead
       windowsHide: true,
       timeout: timeoutMs,
     });
@@ -129,7 +166,7 @@ function registerTerminalRoute(app, config, log) {
 
     child.on('close', (code, signal) => {
       if (signal === 'SIGTERM') timedOut = true;
-      log(`Terminal command exited (shell=${shell}, code=${code}, signal=${signal || 'none'})`);
+      log(`Terminal command exited (shell=${shell}, sandboxed=${sandboxed}, code=${code}, signal=${signal || 'none'})`);
       if (res.headersSent) return;
       res.json({
         exitCode: code,
@@ -137,6 +174,7 @@ function registerTerminalRoute(app, config, log) {
         stdout,
         stderr,
         shellUsed: shell,
+        sandboxed,
       });
     });
   });

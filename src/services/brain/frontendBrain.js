@@ -22,7 +22,6 @@ import { shouldDecompose } from '../planning/planTypes';
 /** Every route frontendBrain.decideRoute() can hand back to orchestrator.js. */
 export const BRAIN_ROUTES = Object.freeze({
   HIERARCHICAL_PLAN: 'hierarchical_plan', // -> backendBrain.runHierarchicalPlan (HYBRID_SYMBOLIC_NEURAL)
-  TOOL_TASK: 'tool_task',                 // -> toolOrchestrator.runToolTask (flat MULTI_BRAIN_ENSEMBLE loop)
   BROWSING: 'browsing',                   // -> the live PC browser agent
   CHAT: 'chat',                           // -> plain CONVERSATIONALIST completion
 });
@@ -56,10 +55,17 @@ export const BRAIN_ROUTES = Object.freeze({
  *   things, since a route that already ran and got flagged
  *   insufficient by agentLoop.js's verify step needs to be answered
  *   with something DIFFERENT, not the same action again.
+ * @param {object} [options]
+ * @param {boolean} [options.browserAgentActive] - passed straight
+ *   through to classifyIntent() as extra context (see that function's
+ *   own JSDoc) - true when the person currently has a live browser
+ *   agent session open, so a genuinely ambiguous message tips toward
+ *   "browsing" instead of escalating into the much slower
+ *   HIERARCHICAL_PLAN pipeline on a guess.
  * @returns {Promise<{ route: string, intent: 'github'|'browsing'|'general', decompose: boolean, reason: string }>}
  */
-export async function decideRoute(messageText, priorAttempts = []) {
-  const intent = await classifyIntent(messageText);
+export async function decideRoute(messageText, priorAttempts = [], options = {}) {
+  const intent = await classifyIntent(messageText, { browserAgentActive: options.browserAgentActive });
 
   if (intent === 'browsing') {
     if (priorAttempts.includes(BRAIN_ROUTES.BROWSING)) {
@@ -80,12 +86,7 @@ export async function decideRoute(messageText, priorAttempts = []) {
     // function's own comment above and planCoordinator.js's
     // "COLLAPSING FOR SIMPLE REQUESTS" section for why a small request
     // isn't any more expensive to plan than before, it just now also
-    // gets a propose-and-approve gate before anything runs. TOOL_TASK
-    // (the old flat, ungated ReAct loop in toolOrchestrator.js) is kept
-    // as a route this function no longer picks, only so
-    // toolOrchestrator.runToolTask stays reachable for anything that
-    // deliberately calls it directly rather than as a routing dead-code
-    // removal in the same pass.
+    // gets a propose-and-approve gate before anything runs.
     if (priorAttempts.includes(BRAIN_ROUTES.HIERARCHICAL_PLAN)) {
       // Already tried and agentLoop.js's verify step still found
       // something unresolved - re-planning the identical request won't

@@ -26,7 +26,7 @@ import {
 } from '../planning/planCoordinator';
 import { runExecutionPlan } from '../planning/planExecutor';
 import { getPlan, updatePlanStatus } from '../../db/database';
-import { PLAN_STATUS } from '../planning/planTypes';
+import { PLAN_STATUS, STEP_STATUS } from '../planning/planTypes';
 import { withProceduralHint } from '../memory/proceduralMemory';
 
 /**
@@ -47,7 +47,7 @@ export const BRAIN_ROLES = Object.freeze({
   ROUTER: {
     key: 'router',
     label: 'Router',
-    job: 'Decides which execution mode a message needs (chat / tool task / live browsing) by actually reading the request, not keyword-matching it.',
+    job: 'Decides which execution mode a message needs (chat / hierarchical plan / live browsing) by actually reading the request, not keyword-matching it.',
     implementedIn: 'src/services/intentClassifier.js (classifyIntent)',
   },
   STRATEGIC_PLANNER: {
@@ -83,7 +83,7 @@ export const BRAIN_ROLES = Object.freeze({
   TOOL_EXECUTOR: {
     key: 'tool_executor',
     label: 'Tool executor',
-    job: 'Flat ReAct-style loop: decides which registered tool functions to call, in what order, for requests that do not need the full hierarchical plan.',
+    job: 'Flat ReAct-style loop: decides which registered tool functions to call, in what order. Not reachable as a top-level chat route anymore (frontendBrain.js sends every tool-flavored request through HIERARCHICAL_PLAN below instead, size notwithstanding) - today this only runs as the isolated worker each subagent uses (src/services/execution/subagentManager.js), spawned from inside a hierarchical plan step via agent_spawn_subagents, never directly from a chat message.',
     implementedIn: 'src/services/toolOrchestrator.js (runToolTask)',
   },
   REASONER: {
@@ -260,7 +260,7 @@ async function describePlanForApproval(goal, executionPlanIds) {
  * @param {string} rootPlanId
  * @param {string[]} executionPlanIds - ordered
  * @param {object} context - { githubToken, onStep(label), onAwaitingApproval(step) }
- * @returns {Promise<{ success: boolean, content: string, status: string|null, error: object|null }>}
+ * @returns {Promise<{ success: boolean, content: string, status: string|null, error: object|null, clockData: {timezone: string|null, label: string}|null }>}
  */
 export async function runApprovedPlan(rootPlanId, executionPlanIds, context = {}) {
   const { githubToken = null, onStep = null, onAwaitingApproval = null, shouldContinue = () => true } = context;
@@ -277,12 +277,70 @@ export async function runApprovedPlan(rootPlanId, executionPlanIds, context = {}
   const goal = rootPlan.success && rootPlan.data ? rootPlan.data.goal : '';
   const content = summarizePlanOutcome(goal, lastResult, executionPlanIds.length);
 
+  // CLOCK WIDGET: toolOrchestrator.js's flat runToolTask() loop captures
+  // clockData the moment a time_get_current call succeeds, so chatStore.js
+  // can render a live ClockWidget on the reply bubble (see its own
+  // buildAssistantMessageFromResult). Every tool-flavored request now
+  // goes through THIS plan pipeline instead (frontendBrain.js routes
+  // 'github' intent to HIERARCHICAL_PLAN unconditionally - see its own
+  // comment), which has no in-loop equivalent: runStepTool() calls
+  // TOOL_REGISTRY directly, one step at a time, with no shared loop
+  // state to stash a "last clock reading" in. Recovering it here instead
+  // by re-reading the finished plan's own steps (already persisted to
+  // plan_steps.result_json by updatePlanStep) is the least invasive
+  // fix - it doesn't touch the executor's per-step loop at all, just
+  // looks at what it already wrote down. Only meaningful on a genuinely
+  // completed run; an in-progress/awaiting-approval/failed plan hasn't
+  // necessarily reached its time_get_current step yet, so don't guess.
+  const clockData = lastResult?.status === PLAN_STATUS.COMPLETED
+    ? await findLastClockReading(executionPlanIds)
+    : null;
+
   return {
     success: !!lastResult?.success,
     content,
     status: lastResult?.status || null,
     error: lastResult?.success ? null : (lastResult?.error || { message: 'The plan could not finish.' }),
+    clockData,
   };
+}
+
+/**
+ * Scans a just-completed run's execution-leaf plans for the LAST
+ * successful time_get_current step (later step_order wins, matching
+ * runToolTask()'s own "only the first refusal is captured but a later
+ * successful call overwrites clockData" behavior - see its comment) and
+ * returns the same {timezone, label} shape ChatScreen.js's ClockWidget
+ * expects. Returns null if the run never called it - the normal case,
+ * and not an error.
+ */
+async function findLastClockReading(executionPlanIds) {
+  try {
+    const plans = await Promise.all(executionPlanIds.map((id) => getPlan(id)));
+    let reading = null;
+    for (const p of plans) {
+      if (!p.success || !p.data) continue;
+      const steps = (p.data.steps || [])
+        .filter((s) => s.action === 'time_get_current' && s.status === STEP_STATUS.DONE && s.result_json)
+        .sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+      for (const step of steps) {
+        try {
+          const parsed = JSON.parse(step.result_json);
+          if (parsed?.success && parsed.data) {
+            reading = { timezone: parsed.data.timezone ?? null, label: parsed.data.resolvedLabel ?? null };
+          }
+        } catch (err) {
+          // Malformed result_json for this one step - skip it, keep
+          // whatever reading (if any) was already found.
+        }
+      }
+    }
+    return reading;
+  } catch (err) {
+    // Best-effort only - a failure here should never break the plan's
+    // own success/content result, just mean no clock widget this time.
+    return null;
+  }
 }
 
 /** Builds the chat-visible summary line for a hierarchical-plan run's outcome, keyed off the last execution plan's terminal/paused status. */

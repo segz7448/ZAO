@@ -10,6 +10,8 @@ import BrowserAgentPiP from './src/services/browserAgent/BrowserAgentPiP';
 import { BrowserAgentStream } from './src/services/browserAgent/browserAgentStream';
 import SidebarDrawer from './src/components/SidebarDrawer';
 import { initDatabase } from './src/db/database';
+import { registerBackgroundPlanTask } from './src/services/background/backgroundPlanTask';
+import { registerProcessWatcherTask, startForegroundProcessWatch } from './src/services/background/processWatcherTask';
 import { initReminderListeners, reconcileReminders } from './src/services/reminders/reminderService';
 import { runSessionStartHooks } from './src/services/execution/hooksEngine';
 import { useChatStore } from './src/store/chatStore';
@@ -42,7 +44,7 @@ function AppShell() {
     approveStep: approvePlanStep, rejectStep: rejectPlanStep,
     acceptCheckpoint: acceptPlanCheckpoint, dismissCheckpoint: dismissPlanCheckpoint,
     startPlan: startPlanAction,
-    resumablePlans, loadActivePlansOnLaunch, dismissResumablePlan,
+    resumablePlans, autoResumingPlanIds, loadActivePlansOnLaunch, dismissResumablePlan,
   } = usePlanStore();
 
   // One BrowserAgentStream connection for the whole app lifetime - talks
@@ -62,6 +64,12 @@ function AppShell() {
   const [frameBase64, setFrameBase64] = useState(null);
   const [awaitingHuman, setAwaitingHuman] = useState(false);
   const [humanReason, setHumanReason] = useState(null);
+  // Full-screen browser zoom, owned here since it's shared between
+  // BrowserAgentPiP (renders the actually-zoomed stream) and
+  // BrowserAgentScreen (renders the +/- controls that change it) - two
+  // sibling components, neither a parent of the other. Starts at 50% on
+  // every launch, not wherever a previous session left it.
+  const [browserFullScreenZoom, setBrowserFullScreenZoom] = useState(0.5);
   const [streamConnected, setStreamConnected] = useState(false);
   const [streamConnectionError, setStreamConnectionError] = useState(null);
 
@@ -86,6 +94,19 @@ function AppShell() {
       // but never checked, so an interrupted plan just silently vanished
       // from view. Renders as the resume banner below, above ChatScreen.
       await loadActivePlansOnLaunch();
+      // Real background continuation for a plan that was still 'running'
+      // when the app last closed (see backgroundPlanTask.js's header for
+      // exactly what this can and can't guarantee) - registration is
+      // idempotent and safe to call on every launch.
+      registerBackgroundPlanTask();
+      // "Task finished" notifications for pc_process_start-launched
+      // background processes (dev servers, long builds) - see
+      // processWatcherTask.js's header for exactly what the OS-level
+      // background task can and can't guarantee; startForegroundProcessWatch
+      // covers the same ground with a near-instant poll while the app is
+      // actually open.
+      registerProcessWatcherTask();
+      startForegroundProcessWatch();
       // Prospective memory (src/services/reminders/reminderService.js) -
       // wire the notification handler/listeners up first, then sweep any
       // reminder that was due while the app was closed (or whose OS-level
@@ -101,21 +122,28 @@ function AppShell() {
     })();
   }, []);
 
-  // Connects the BrowserAgentStream once browser access is enabled, and
-  // registers it into chatStore so sendMessage/editMessage/regenerateMessage
-  // can all pass the same connection into the orchestrator (see
-  // chatStore.js's setAgentSession). Live frame/status events update local
-  // state here so BrowserAgentPiP/BrowserAgentScreen re-render with the
-  // latest stream. Disconnects on unmount or if browser access is turned
-  // back off, and reconnects automatically if the person turns it on again
-  // or the PC backend restarts (see browserAgentStream.js's own
-  // reconnect-on-close handling for network blips).
+  // Connects the BrowserAgentStream once, at launch, and keeps it
+  // connected for the whole app lifetime - registers it into chatStore
+  // so sendMessage/editMessage/regenerateMessage can all pass the same
+  // connection into the orchestrator (see chatStore.js's
+  // setAgentSession). Live frame/status events update local state here
+  // so BrowserAgentPiP/BrowserAgentScreen re-render with the latest
+  // stream. browserAgentStream.js's own reconnect-on-close handling
+  // covers network blips and PC backend restarts.
+  //
+  // DELIBERATELY NOT gated behind preferences.browser_access_enabled:
+  // that preference defaults to false for every install, and
+  // orchestrator.js's runBrowsingHandler only flips it to true the
+  // first time a browsing-classified message actually finds a live
+  // agentSession to use - which never happens if connecting the session
+  // in the first place is ALSO waiting on that same preference already
+  // being true. That was a real chicken-and-egg deadlock: nothing could
+  // ever set the flag, because nothing would connect until the flag was
+  // already set. Connecting unconditionally here is what actually makes
+  // orchestrator.js's "the request itself is the consent" design work -
+  // the preference is purely a synced-after-the-fact display value now,
+  // never a precondition for the connection existing.
   useEffect(() => {
-    if (!preferences?.browser_access_enabled) {
-      setStreamConnected(false);
-      setFrameBase64(null);
-      return;
-    }
     const stream = streamRef.current;
     setAgentSession(stream);
     stream.connect();
@@ -137,7 +165,23 @@ function AppShell() {
       offFrame();
       offConnection();
     };
-  }, [preferences?.browser_access_enabled]);
+  }, []);
+
+  // Re-attempts the connection whenever the backend connection settings
+  // themselves change - the common first-run case is: launch the app
+  // (no LAN/Remote URL set yet, so the effect above's connect() attempt
+  // fails immediately with "no backend URL configured" and gives up),
+  // THEN go to Settings > Backend Connection and actually type one in.
+  // Without this, nothing would ever retry until the next full app
+  // restart even though the person just fixed the exact thing that was
+  // missing. connect() itself already no-ops safely if a connection is
+  // already open/connecting, so this is safe to fire on every
+  // preferences change, not just the first one.
+  useEffect(() => {
+    if (preferences?.backend_lan_url || preferences?.backend_remote_url) {
+      streamRef.current.connect();
+    }
+  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token]);
 
   const handleNewChat = async () => {
     setSidebarVisible(false);
@@ -233,6 +277,25 @@ function AppShell() {
             the rest of the session (see planStore.js's
             dismissResumablePlan - doesn't touch the plan's own status,
             so it's still reachable later from Plan History). */}
+        {/* Plans genuinely awaiting a human decision (awaiting_approval /
+            paused) still show the tap-to-open banner above. Plans merely
+            'running' when the app closed don't need a decision, so
+            loadActivePlansOnLaunch() (planStore.js) resumes them
+            automatically instead - this is just a visible "here's what's
+            happening" indicator for that, not a control. */}
+        {screen === 'chat' && autoResumingPlanIds.length > 0 && (
+          <View style={[styles.resumeBanner, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
+            <View style={styles.resumeBannerContent}>
+              <Text style={[styles.resumeBannerTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                Resuming {autoResumingPlanIds.length > 1 ? `${autoResumingPlanIds.length} plans` : 'a plan'} from before the app closed…
+              </Text>
+              <Text style={[styles.resumeBannerSubtitle, { color: theme.textTertiary }]}>
+                It'll pause automatically if it hits anything needing your approval.
+              </Text>
+            </View>
+          </View>
+        )}
+
         {screen === 'chat' && resumablePlans.length > 0 && (
           <View style={[styles.resumeBanner, { backgroundColor: theme.surfaceAlt, borderColor: theme.border }]}>
             <TouchableOpacity
@@ -264,6 +327,7 @@ function AppShell() {
               onOpenSidebar={() => setSidebarVisible(true)}
               onOpenBrowserAgent={handleOpenBrowserAgent}
               onOpenPlan={handleOpenPlan}
+              browserAgentActive={screen === 'browserAgent' || isAgentRunning || awaitingHuman}
             />
           )}
           {screen === 'settings' && (
@@ -285,55 +349,70 @@ function AppShell() {
       </SafeAreaView>
 
       {/* The single persistent BrowserAgentPiP instance - rendered exactly
-          once, at this stable position in the tree, for the entire app
-          lifetime once browser access is turned on. Only its `fullScreen`
-          prop changes (resizing/repositioning the same live stream
-          display), never conditionally mounted/unmounted based on
-          `screen`. This is what keeps a single WebSocket connection (and
-          the PC-side Playwright session/history it's attached to) alive
-          across expanding to full screen and back, and across separate
-          browsing tasks given later in the same conversation. Rendered
-          here (outside SafeAreaView, above the chrome overlay below in
-          JSX order) so full-screen mode isn't clipped by safe-area edges
-          and paints underneath the chrome. */}
-      {!!preferences?.browser_access_enabled && (
-        <BrowserAgentPiP
-          visible
-          stream={streamRef.current}
-          fullScreen={screen === 'browserAgent'}
-          isRunning={isAgentRunning}
-          awaitingHuman={awaitingHuman}
-          humanReason={humanReason}
-          frameBase64={frameBase64}
-          connected={streamConnected}
-          connectionError={streamConnectionError}
-          onExpand={() => setScreen('browserAgent')}
-          onResumeAfterHuman={() => streamRef.current.resumeAfterHuman()}
-        />
-      )}
+          once, at this stable position in the tree, mounted for the
+          entire app lifetime (NOT conditional on
+          preferences.browser_access_enabled - see the connection effect
+          above for why that preference can no longer gate anything: it
+          only ever becomes true AFTER a browsing task has already run
+          once, so gating rendering on it meant a person's very first
+          browsing task ran completely invisibly - no live view, and
+          critically no way to see or respond to a needsHuman/CAPTCHA
+          prompt. `visible` below controls whether it's actually shown,
+          separately from whether it's mounted, so there's still no
+          floating clutter for someone who's never touched browsing:
+          it appears once there's something to see (a task running or
+          awaiting input), once the person's explicitly opened the full
+          screen, or once browsing has been used before). Only its
+          `fullScreen` prop changes after that (resizing/repositioning
+          the same live stream display), never conditionally mounted/
+          unmounted based on `screen`. This is what keeps a single
+          WebSocket connection (and the PC-side Playwright session/
+          history it's attached to) alive across expanding to full
+          screen and back, and across separate browsing tasks given
+          later in the same conversation. Rendered here (outside
+          SafeAreaView, above the chrome overlay below in JSX order) so
+          full-screen mode isn't clipped by safe-area edges and paints
+          underneath the chrome. */}
+      <BrowserAgentPiP
+        visible={isAgentRunning || awaitingHuman || screen === 'browserAgent' || !!preferences?.browser_access_enabled}
+        stream={streamRef.current}
+        fullScreen={screen === 'browserAgent'}
+        fullScreenZoom={browserFullScreenZoom}
+        isRunning={isAgentRunning}
+        awaitingHuman={awaitingHuman}
+        humanReason={humanReason}
+        frameBase64={frameBase64}
+        connected={streamConnected}
+        connectionError={streamConnectionError}
+        onExpand={() => setScreen('browserAgent')}
+        onResumeAfterHuman={() => streamRef.current.resumeAfterHuman()}
+      />
 
       {/* Full-screen browser chrome (status strip, task input) - drawn as
           chrome ONLY, layered on top of the BrowserAgentPiP above (later
           in JSX order = painted on top) since it does not render its own
           copy of the live view - it shares the same stream connection the
           PiP already owns. Rendered once and kept mounted for the app's
-          lifetime (same pattern as BrowserAgentPiP above), only hidden via
-          pointerEvents + a conditional wrapper style rather than being
-          unmounted when `screen` leaves 'browserAgent', so any in-progress
-          typed task text isn't lost on a quick back-and-forth. */}
-      {!!preferences?.browser_access_enabled && (
-        <View
-          style={screen === 'browserAgent' ? StyleSheet.absoluteFill : styles.offscreen}
-          pointerEvents={screen === 'browserAgent' ? 'box-none' : 'none'}
-        >
-          <BrowserAgentScreen
-            stream={streamRef.current}
-            isAgentRunning={isAgentRunning}
-            awaitingHuman={awaitingHuman}
-            onClose={handleCloseBrowserAgent}
-          />
-        </View>
-      )}
+          lifetime unconditionally (same reasoning as BrowserAgentPiP
+          above - gating this on browser_access_enabled meant tapping
+          through to the full-screen view before that flag was ever set
+          rendered nothing at all), only hidden via pointerEvents + a
+          conditional wrapper style rather than being unmounted when
+          `screen` leaves 'browserAgent', so any in-progress typed task
+          text isn't lost on a quick back-and-forth. */}
+      <View
+        style={screen === 'browserAgent' ? StyleSheet.absoluteFill : styles.offscreen}
+        pointerEvents={screen === 'browserAgent' ? 'box-none' : 'none'}
+      >
+        <BrowserAgentScreen
+          stream={streamRef.current}
+          isAgentRunning={isAgentRunning}
+          awaitingHuman={awaitingHuman}
+          zoom={browserFullScreenZoom}
+          onZoomChange={setBrowserFullScreenZoom}
+          onClose={handleCloseBrowserAgent}
+        />
+      </View>
 
       <SidebarDrawer
         visible={sidebarVisible}

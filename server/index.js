@@ -10,10 +10,16 @@
  *   - Exposes /health so the app can check the backend is up, both over
  *     LAN and through the Cloudflare tunnel - also reports whether THIS PC
  *     currently has internet access (internetAvailable), so the app can
- *     fall back to the phone's Termux terminal for internet-dependent
- *     tasks even when the PC backend itself is perfectly reachable
+ *     tell the person plainly when an internet-dependent terminal command
+ *     (npm/pip install, git pull/clone/push, curl, downloads) will fail,
+ *     even though the PC backend itself is perfectly reachable
  *   - Exposes /terminal/run so the app's Terminal tool can run cmd
  *     commands on this PC (see terminal.js)
+ *   - Exposes /process/start, /process/:id/status, /process/:id/logs,
+ *     and /process/:id/stop so the app can run long-lived commands (dev
+ *     servers, watchers) in the background instead of blocking a single
+ *     HTTP request on a process that's never meant to exit (see
+ *     processManager.js)
  *   - Exposes /ocr/extract for scanned/image-based PDFs and plain images -
  *     runs free, open-source OCR (Tesseract via pytesseract + PyMuPDF) in
  *     a Python subprocess on this PC (see ocr.js)
@@ -21,6 +27,13 @@
  *     Playwright browser agent (see browserAgent.js, browserStream.js) -
  *     live screenshot streaming to the phone plus two-way manual control
  *     (tap/type) for CAPTCHAs and similar human-intervention cases
+ *   - Exposes /preview/start, /preview/screenshot, /preview/stop, and
+ *     /preview/list (see devPreview.js) so a dev server (npm start, vite,
+ *     etc.) can be started as a tracked background process, its local
+ *     URL detected automatically, and the rendered page screenshotted via
+ *     the same shared Playwright Chromium instance browserAgent.js uses -
+ *     closes the loop on "does this HTML/CSS actually render right"
+ *     without the person checking manually
  *   - Requires an Authorization: Bearer <token> header on every request
  *     except /health, since this is now reachable over LAN and the public
  *     internet (via Cloudflare Quick Tunnel), not just 127.0.0.1
@@ -39,12 +52,18 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { registerTerminalRoute } = require('./terminal');
+const { registerProcessRoutes } = require('./processManager');
 const { registerOcrRoute } = require('./ocr');
 const { registerWebSearchRoute } = require('./webSearch');
+const { registerWebFetchRoute } = require('./webFetch');
+const { registerSessionRoutes } = require('./backgroundSessions');
 const { registerDataRoute } = require('./data');
 const { registerPcFilesRoute } = require('./pcFiles');
+const { registerPcZipRoute } = require('./pcZip');
+const { registerPcGitRoute } = require('./pcGit');
 const { registerBrowserAgentStream } = require('./browserStream');
 const { shutdownBrowser } = require('./browserAgent');
+const { registerDevPreviewRoute, shutdownAllPreviewServers } = require('./devPreview');
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -127,11 +146,13 @@ function log(...args) {
 // caller already knows just by getting a response at all), but it has no
 // way to know whether THIS PC's own internet connection is up - e.g. the
 // PC is on, ZAO backend is running, phone can reach it fine over LAN, but
-// the PC's WiFi/ISP is down. That distinction matters for the app's
-// Termux-fallback logic (see terminal_pc / terminal_termux tools) - tasks
+// the PC's WiFi/ISP is down. That distinction matters because tasks
 // needing internet (npm install, pip install, git pull, downloads) will
 // fail on this PC even though the PC backend itself is perfectly
-// reachable, so the app needs to know to route those to Termux instead.
+// reachable - the app surfaces this as a clear "no internet on the PC"
+// message rather than a confusing command failure (see
+// terminalRouter.js's checkTerminalStatus - there's no fallback terminal
+// to route to instead, so this is purely informational for the model).
 //
 // Checked periodically in the background (not on every single /health
 // poll - that would mean an outbound request every time the app checks
@@ -345,6 +366,55 @@ function sendToModel(history) {
   });
 }
 
+/**
+ * Same idea as sendToModel() above, but supports passing `tools` (OpenAI
+ * function-calling schemas) and returns the assistant message's
+ * tool_calls alongside its content, instead of assuming a plain text
+ * reply. sendToModel() is left as-is (browserAgent.js's plain-text ReAct
+ * loop has no tool-calling needs); this is what backgroundSessions.js's
+ * server-side agent loop drives - the toolOrchestrator.js pattern already
+ * used for the phone's in-app tool loop, just with the model call and the
+ * tool loop both running here on the PC instead of split across a phone
+ * app + this backend.
+ * @returns {Promise<{success: boolean, content: string|null, toolCalls: Array|null, error: object|null}>}
+ */
+function sendToolCall(history, tools) {
+  return new Promise((resolve) => {
+    if (!llamaReady) {
+      resolve({ success: false, content: null, toolCalls: null, error: { message: 'Model is still loading.' } });
+      return;
+    }
+    const body = JSON.stringify({ messages: history, tools, max_tokens: 2048, temperature: 0.3 });
+    const options = {
+      hostname: '127.0.0.1',
+      port: config.LLAMA_PORT,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    };
+    const req = http.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const message = parsed?.choices?.[0]?.message;
+          if (!message) {
+            resolve({ success: false, content: null, toolCalls: null, error: { message: 'No message from model.' } });
+            return;
+          }
+          resolve({ success: true, content: message.content || null, toolCalls: message.tool_calls || null, error: null });
+        } catch (err) {
+          resolve({ success: false, content: null, toolCalls: null, error: { message: `Failed to parse model response: ${err.message}` } });
+        }
+      });
+    });
+    req.on('error', (err) => resolve({ success: false, content: null, toolCalls: null, error: { message: err.message } }));
+    req.write(body);
+    req.end();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -370,10 +440,16 @@ app.post('/v1/chat/completions', (req, res) => {
 });
 
 registerTerminalRoute(app, config, log);
+registerProcessRoutes(app, config, log);
 registerOcrRoute(app, config, log);
 registerWebSearchRoute(app, config, log);
+registerWebFetchRoute(app, config, log);
 registerDataRoute(app, config, log);
 registerPcFilesRoute(app, config, log);
+registerPcZipRoute(app, config, log);
+registerPcGitRoute(app, config, log);
+registerDevPreviewRoute(app, config, log);
+registerSessionRoutes(app, config, log, sendToolCall);
 
 if (config.AUTH_TOKEN === config.DEFAULT_AUTH_TOKEN) {
   log('='.repeat(70));
@@ -402,6 +478,7 @@ process.on('SIGINT', async () => {
   log('Shutting down...');
   if (healthPollTimer) clearInterval(healthPollTimer);
   if (llamaProcess) llamaProcess.kill();
+  shutdownAllPreviewServers();
   await shutdownBrowser();
   process.exit(0);
 });

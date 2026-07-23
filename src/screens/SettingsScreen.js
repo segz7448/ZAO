@@ -13,7 +13,6 @@ import {
   Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
 import { usePreferencesStore } from '../store/preferencesStore';
 import { useThemeStore } from '../store/themeStore';
 import { useTheme } from '../theme/useTheme';
@@ -214,106 +213,6 @@ function FilesystemAccessSection({ preferences, theme }) {
 }
 
 /**
- * Termux terminal setup section - the lightweight/fallback terminal that
- * runs directly on the phone (see termuxTerminalTool.js), used
- * automatically when the PC backend is unreachable or offline, and for
- * small fast tasks even when the PC is available (see terminalRouter.js
- * and toolOrchestrator.js for how the model chooses between this and the
- * PC terminal). This is separate from the PC backend connection above -
- * both can be set up independently, and only this one needs anything
- * done on the phone itself.
- */
-function TerminalSetupSection({ theme }) {
-  const [termuxInstalled, setTermuxInstalled] = useState(null); // null = unknown, true/false once checked
-  const [checking, setChecking] = useState(false);
-
-  const checkStatus = async () => {
-    setChecking(true);
-    try {
-      const { isTermuxInstalled } = await import('../services/terminal/termuxTerminalTool');
-      const result = await isTermuxInstalled();
-      setTermuxInstalled(result);
-    } catch (err) {
-      setTermuxInstalled(null);
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  useEffect(() => {
-    checkStatus();
-  }, []);
-
-  const handleOpenTermux = async () => {
-    try {
-      const { openTermuxForSetup } = await import('../services/terminal/termuxTerminalTool');
-      const result = await openTermuxForSetup();
-      if (!result.success) {
-        Alert.alert('Could not open Termux', result.error?.message || 'Termux may not be installed.');
-      }
-    } catch (err) {
-      Alert.alert('Error', 'Something went wrong opening Termux.');
-    }
-  };
-
-  const handleCopySetupCommand = async () => {
-    try {
-      const { getSetupCommand } = await import('../services/terminal/termuxTerminalTool');
-      const command = getSetupCommand();
-      await Clipboard.setStringAsync(command);
-      Alert.alert(
-        'Copied',
-        'Paste this into Termux and hit enter, once. After that, ZAO can dispatch commands to Termux (Android will still show a one-time permission prompt the first time).'
-      );
-    } catch (err) {
-      Alert.alert('Error', 'Could not copy the setup command.');
-    }
-  };
-
-  const statusPillStyle =
-    termuxInstalled === true
-      ? { backgroundColor: '#D1FAE5', textColor: '#065F46', label: 'Termux found - run setup command below' }
-      : termuxInstalled === false
-      ? { backgroundColor: '#FEE2E2', textColor: '#991B1B', label: 'Termux not installed' }
-      : { backgroundColor: '#FEF3C7', textColor: '#92400E', label: 'Checking...' };
-
-  return (
-    <View style={styles.keyRow}>
-      <View style={styles.keyRowHeader}>
-        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Termux (lightweight / fallback)</Text>
-        <View style={[styles.statusPill, { backgroundColor: statusPillStyle.backgroundColor }]}>
-          <Text style={[styles.statusPillText, { color: statusPillStyle.textColor }]}>{statusPillStyle.label}</Text>
-        </View>
-      </View>
-      <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 4 }]}>
-        ZAO's second terminal, running directly on this phone. Used automatically when the PC backend above is unreachable or offline, and for small fast tasks (git pull, quick npm install, simple scripts) even when the PC is available. One-time setup, per device: paste one command into Termux, accept one Android permission prompt, and ZAO's agent can use it freely after that.
-      </Text>
-
-      {termuxInstalled === false ? (
-        <TouchableOpacity style={[styles.keyEditBtn, { marginTop: 12 }]} onPress={handleOpenTermux}>
-          <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Install Termux (opens F-Droid/GitHub link)</Text>
-        </TouchableOpacity>
-      ) : (
-        <>
-          <TouchableOpacity style={[styles.keyEditBtn, { marginTop: 12 }]} onPress={handleCopySetupCommand}>
-            <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Copy one-time setup command</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.keyEditBtn, { marginTop: 8 }]} onPress={handleOpenTermux}>
-            <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Open Termux</Text>
-          </TouchableOpacity>
-        </>
-      )}
-
-      {checking ? null : (
-        <TouchableOpacity onPress={checkStatus} style={{ marginTop: 8 }}>
-          <Text style={[styles.helperText, { color: theme.textSecondary, textDecorationLine: 'underline' }]}>Re-check status</Text>
-        </TouchableOpacity>
-      )}
-    </View>
-  );
-}
-
-/**
  * Backend connection section - the backend now runs on the person's PC
  * (see /server in the repo root, started via start.bat) instead of
  * on-device in Termux. This section covers everything needed to reach it:
@@ -327,9 +226,9 @@ function TerminalSetupSection({ theme }) {
  *     mode will work again.
  *   - Auth token: must match AUTH_TOKEN in the PC's server/config.js.
  * Also covers the PC terminal tool, which runs through this same
- * connection (cmd.exe on the PC via /terminal/run). The phone's Termux
- * terminal is a separate fallback/lightweight tool - see
- * TerminalSetupSection above for its own one-time setup.
+ * connection (cmd.exe/PowerShell/Git Bash/Python on the PC via
+ * /terminal/run) - the only terminal ZAO has. There is no on-device
+ * fallback terminal.
  */
 function BackendConnectionSection({ preferences, theme }) {
   const setBackendMode = usePreferencesStore((s) => s.setBackendMode);
@@ -948,7 +847,6 @@ function HooksSection({ theme }) {
   const [newEvent, setNewEvent] = useState('PreToolUse');
   const [newMatcher, setNewMatcher] = useState('*');
   const [newCommand, setNewCommand] = useState('');
-  const [newBackend, setNewBackend] = useState('termux');
 
   const load = async () => {
     setLoading(true);
@@ -969,7 +867,7 @@ function HooksSection({ theme }) {
       event: newEvent,
       matcher: newMatcher.trim() || '*',
       command: newCommand.trim(),
-      backend: newBackend,
+      backend: 'pc',
     });
     setNewCommand('');
     setShowAddForm(false);
@@ -1037,13 +935,6 @@ function HooksSection({ theme }) {
                 {['PreToolUse', 'PostToolUse', 'SessionStart'].map((ev) => (
                   <TouchableOpacity key={ev} onPress={() => setNewEvent(ev)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: newEvent === ev ? theme.accent : theme.border }}>
                     <Text style={{ color: newEvent === ev ? theme.accent : theme.textSecondary, fontSize: 12 }}>{ev}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-                {['termux', 'pc'].map((b) => (
-                  <TouchableOpacity key={b} onPress={() => setNewBackend(b)} style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: newBackend === b ? theme.accent : theme.border }}>
-                    <Text style={{ color: newBackend === b ? theme.accent : theme.textSecondary, fontSize: 12 }}>{b}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -1543,11 +1434,6 @@ export default function SettingsScreen({ onOpenSidebar }) {
       <SectionHeader title="Backend Connection" theme={theme} />
       <View style={[styles.card, { backgroundColor: theme.surface }]}>
         <BackendConnectionSection preferences={preferences} theme={theme} />
-      </View>
-
-      <SectionHeader title="Termux Terminal" theme={theme} />
-      <View style={[styles.card, { backgroundColor: theme.surface }]}>
-        <TerminalSetupSection theme={theme} />
       </View>
 
       <SectionHeader title="GitHub" theme={theme} />

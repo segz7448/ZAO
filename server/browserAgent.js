@@ -546,4 +546,4 @@ async function shutdownBrowser() {
   }
 }
 
-module.exports = { AgentSession, shutdownBrowser };
+module.exports = { AgentSession, shutdownBrowser, getBrowser };

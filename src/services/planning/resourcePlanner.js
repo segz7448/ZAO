@@ -5,7 +5,7 @@
  * runs a single tool call, this module looks at the domains a plan's
  * steps touch and checks whether the preconditions those domains need
  * are actually in place: is the PC backend reachable, is a GitHub token
- * on file and valid, does the person have a Termux/PC path available at
+ * on file and valid, does the person have a PC backend path available at
  * all. This mirrors how Claude, given a task that needs a tool or
  * credential, checks availability up front rather than discovering the
  * gap three tool calls into execution and having to backtrack.

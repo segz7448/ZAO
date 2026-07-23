@@ -26,7 +26,7 @@ export const MEMORY_TYPES = Object.freeze({
     label: 'Parametric memory',
     definition: 'Knowledge baked into the model\'s weights during training - not retrieved, not written to, just... known, the same way a person "just knows" their native language\'s grammar without consulting a rulebook.',
     persistence: 'Forever (until the model is retrained/fine-tuned) - nothing at runtime changes it.',
-    zaoImplementation: 'The Qwen model\'s own training - runs on whichever backend is configured (PC llama-server, or Termux llama-server on-device; see server/ and src/services/backend/backendClient.js). Nothing in this app writes to it; every other memory type below exists BECAUSE this one is fixed and can\'t learn anything new about the person at runtime.',
+    zaoImplementation: 'The Qwen model\'s own training - runs on the PC-hosted llama-server (see server/ and src/services/backend/backendClient.js). Nothing in this app writes to it; every other memory type below exists BECAUSE this one is fixed and can\'t learn anything new about the person at runtime.',
     location: 'backend (the model weights themselves, wherever llama-server loads them from)',
   },
 

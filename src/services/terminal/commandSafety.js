@@ -1,8 +1,23 @@
 /**
  * ZAO - Terminal Command Safety
  *
- * Both terminal tools (pcTerminalTool.js, termuxTerminalTool.js) execute
- * whatever command string they're given, by design - that's the whole
+ * REGEX PATTERN-MATCHING AGAINST THE RAW COMMAND STRING - stated plainly
+ * because that's a real, honest limit: a cleverly obfuscated or encoded
+ * command (base64 + decode-and-eval, string concatenation, calling
+ * through an interpreter, an alias) can slip past a pattern in a way it
+ * categorically cannot slip past real kernel-level isolation. This
+ * module is now the SECOND layer, defense-in-depth on top of
+ * server/sandbox.js's actual Docker-based filesystem/network isolation
+ * (see that file's header for exactly what it does and doesn't cover) -
+ * not the only thing standing between a bad command and the PC anymore.
+ * It's still worth having on its own: it's instant (no container to
+ * spin up), it covers cmd.exe/PowerShell commands the sandbox
+ * architecturally can't reach (see sandbox.js), and it catches the
+ * common, non-obfuscated case cheaply before a container is even
+ * considered.
+ *
+ * The terminal tool (pcTerminalTool.js) executes
+ * whatever command string it's given, by design - that's the whole
  * point of a real shell tool. Before this module, that meant a model
  * mistake, a bad plan, or a prompt-injected instruction (e.g. text
  * pulled from a webpage during a browsing task) could run something

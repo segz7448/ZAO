@@ -86,6 +86,92 @@ function parseResults(html, maxResults) {
   return results;
 }
 
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+// lite.duckduckgo.com's markup is a plain <table> of results rather than
+// html.duckduckgo.com's <div class="result">-based layout - a genuinely
+// different parser, not the same regex reused. This is the FALLBACK path
+// (see runSearch below): html.duckduckgo.com occasionally serves an
+// interstitial/anomaly page instead of real results (rate-limiting,
+// bot-detection) that RESULT_BLOCK_RE simply finds zero matches in -
+// rather than surfacing that as "no results" to the model, retry once
+// against lite's simpler markup before giving up.
+const LITE_RESULT_LINK_RE = /<a[^>]*rel="nofollow"[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+const LITE_SNIPPET_RE = /<td class="result-snippet">([\s\S]*?)<\/td>/g;
+
+function parseLiteResults(html, maxResults) {
+  const links = [];
+  let m;
+  LITE_RESULT_LINK_RE.lastIndex = 0;
+  while ((m = LITE_RESULT_LINK_RE.exec(html)) && links.length < maxResults) {
+    const title = stripTags(m[2]);
+    const url = unwrapDdgRedirect(m[1]);
+    if (title && url) links.push({ title, url, snippet: '' });
+  }
+
+  const snippets = [];
+  let s;
+  LITE_SNIPPET_RE.lastIndex = 0;
+  while ((s = LITE_SNIPPET_RE.exec(html))) snippets.push(stripTags(s[1]));
+
+  return links.map((r, i) => ({ ...r, snippet: snippets[i] || '' }));
+}
+
+async function fetchText(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    return response;
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+}
+
+/**
+ * Runs the actual search, trying html.duckduckgo.com first and falling
+ * back to lite.duckduckgo.com if the primary endpoint comes back with
+ * zero parsed results (rather than surfacing a transient bot-detection
+ * page as "there are no results for that"). Shared by the HTTP route
+ * below and by backgroundSessions.js, which calls this directly rather
+ * than looping back through its own HTTP server.
+ * @returns {Promise<{results: Array<{title,url,snippet}>, provider: string}>}
+ */
+async function runSearch(query, maxResults) {
+  const primary = await fetchText(
+    'https://html.duckduckgo.com/html/',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA },
+      body: new URLSearchParams({ q: query }).toString(),
+    },
+    SEARCH_TIMEOUT_MS
+  );
+
+  if (primary.ok) {
+    const html = await primary.text();
+    const results = parseResults(html, maxResults);
+    if (results.length > 0) return { results, provider: 'duckduckgo-html' };
+  }
+
+  // Fallback: lite endpoint, simpler markup, less likely to trip
+  // whatever the primary endpoint's anomaly detection is reacting to.
+  const fallback = await fetchText(
+    `https://lite.duckduckgo.com/lite/?${new URLSearchParams({ q: query }).toString()}`,
+    { method: 'GET', headers: { 'User-Agent': UA } },
+    SEARCH_TIMEOUT_MS
+  );
+
+  if (!fallback.ok) {
+    throw new Error(`Search provider returned ${fallback.status}.`);
+  }
+
+  const html = await fallback.text();
+  return { results: parseLiteResults(html, maxResults), provider: 'duckduckgo-lite' };
+}
+
 /**
  * POST /web/search
  * body: { query: string, maxResults?: number }
@@ -102,35 +188,11 @@ function registerWebSearchRoute(app, config, log) {
 
     log(`Web search: "${query}" (max ${maxResults})`);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-
     try {
-      const response = await fetch('https://html.duckduckgo.com/html/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          // A plain browser-like UA - DuckDuckGo's HTML endpoint serves a
-          // no-JS results page regardless, this just avoids a lazy
-          // "unsupported client" block on obviously non-browser UAs.
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        },
-        body: new URLSearchParams({ q: query }).toString(),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        return res.status(502).json({ error: { message: `Search provider returned ${response.status}.` } });
-      }
-
-      const html = await response.text();
-      const results = parseResults(html, maxResults);
-
+      const { results, provider } = await runSearch(query.trim(), maxResults);
+      if (provider === 'duckduckgo-lite') log(`Web search: primary endpoint returned nothing, used lite fallback for "${query}"`);
       return res.json({ success: true, query, results });
     } catch (err) {
-      clearTimeout(timer);
       const message = err.name === 'AbortError' ? 'Search timed out.' : (err.message || 'Search failed.');
       log(`Web search error: ${message}`);
       return res.status(502).json({ error: { message } });
@@ -138,4 +200,4 @@ function registerWebSearchRoute(app, config, log) {
   });
 }
 
-module.exports = { registerWebSearchRoute };
+module.exports = { registerWebSearchRoute, runSearch };

@@ -310,6 +310,110 @@ export async function createRelease(owner, repo, { tagName, name, body = '', ass
 }
 
 /**
+ * Lists recent workflow runs for a repo (optionally filtered to one
+ * workflow file, e.g. "ci.yml", or one branch) - the "did my push
+ * trigger CI, and did it pass" check. Returns the newest runs first,
+ * each with its status/conclusion, so the model can tell at a glance
+ * whether the most recent run for a branch succeeded, failed, or is
+ * still in progress before reporting a task as done.
+ */
+export async function listWorkflowRuns(owner, repo, { workflowFile = undefined, branch = undefined, perPage = 10 } = {}) {
+  const token = await getToken();
+  if (!token) return { success: false, data: null, error: { message: 'No GitHub token configured.' } };
+
+  const path = workflowFile
+    ? `/repos/${owner}/${repo}/actions/workflows/${encodeURIComponent(workflowFile)}/runs`
+    : `/repos/${owner}/${repo}/actions/runs`;
+  const params = new URLSearchParams({ per_page: String(perPage) });
+  if (branch) params.set('branch', branch);
+
+  const result = await githubFetch(`${path}?${params.toString()}`, token);
+  if (!result.success) return result;
+
+  return {
+    success: true,
+    data: {
+      totalCount: result.data.total_count,
+      runs: (result.data.workflow_runs || []).map((run) => ({
+        id: run.id,
+        name: run.name,
+        branch: run.head_branch,
+        event: run.event,
+        status: run.status, // queued | in_progress | completed
+        conclusion: run.conclusion, // success | failure | cancelled | null (while not completed)
+        htmlUrl: run.html_url,
+        createdAt: run.created_at,
+        updatedAt: run.updated_at,
+      })),
+    },
+    error: null,
+  };
+}
+
+/**
+ * Gets one workflow run's status/conclusion plus a per-job breakdown -
+ * the "why did CI fail" step after listWorkflowRuns() flags a failure.
+ * Each job includes its own conclusion and, for any step within it that
+ * didn't succeed, the step name/number so the model can point at
+ * exactly what broke without downloading and parsing full raw logs.
+ */
+export async function getWorkflowRun(owner, repo, runId) {
+  const token = await getToken();
+  if (!token) return { success: false, data: null, error: { message: 'No GitHub token configured.' } };
+
+  const runResult = await githubFetch(`/repos/${owner}/${repo}/actions/runs/${runId}`, token);
+  if (!runResult.success) return runResult;
+
+  const jobsResult = await githubFetch(`/repos/${owner}/${repo}/actions/runs/${runId}/jobs`, token);
+  if (!jobsResult.success) return jobsResult;
+
+  return {
+    success: true,
+    data: {
+      id: runResult.data.id,
+      status: runResult.data.status,
+      conclusion: runResult.data.conclusion,
+      htmlUrl: runResult.data.html_url,
+      jobs: (jobsResult.data.jobs || []).map((job) => ({
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
+        failedSteps: (job.steps || [])
+          .filter((step) => step.conclusion && step.conclusion !== 'success' && step.conclusion !== 'skipped')
+          .map((step) => ({ name: step.name, number: step.number, conclusion: step.conclusion })),
+      })),
+    },
+    error: null,
+  };
+}
+
+/**
+ * Manually triggers a workflow that's configured with an
+ * `on: workflow_dispatch` trigger - e.g. kicking off a deploy or a build
+ * without needing a new push/PR to fire it. GitHub requires the target
+ * workflow file to actually declare workflow_dispatch in its `on:`
+ * block; a workflow that only listens for push/pull_request will
+ * return a 422 here, which comes back as a normal error rather than a
+ * silent no-op.
+ */
+export async function triggerWorkflowDispatch(owner, repo, workflowFile, { ref = 'main', inputs = {} } = {}) {
+  const token = await getToken();
+  if (!token) return { success: false, data: null, error: { message: 'No GitHub token configured.' } };
+
+  const result = await githubFetch(`/repos/${owner}/${repo}/actions/workflows/${encodeURIComponent(workflowFile)}/dispatches`, token, {
+    method: 'POST',
+    body: JSON.stringify({ ref, inputs }),
+  });
+  if (!result.success) return result;
+
+  // The dispatch endpoint returns 204 No Content on success with no run
+  // id in the response - GitHub doesn't hand one back synchronously, so
+  // the caller should follow up with listWorkflowRuns() a moment later
+  // to find the run this dispatch actually started.
+  return { success: true, data: { dispatched: true, workflowFile, ref }, error: null };
+}
+
+/**
  * Quick validity check for a token - used by Settings when the person
  * first pastes their username/token in, so they get immediate feedback
  * rather than finding out on the first real tool call.

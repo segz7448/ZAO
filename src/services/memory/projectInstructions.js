@@ -22,9 +22,9 @@
  *
  * WHY A DB COLUMN, NOT A REAL FILE: Claude Code reads CLAUDE.md off
  * disk because it operates inside a real project directory. ZAO runs
- * as a phone app talking to a Termux/PC backend - there's no single
+ * as a phone app talking to a PC backend - there's no single
  * canonical "project root" on the phone to put a file in, and the
- * Termux backend is a model server, not a place ZAO's frontend reads
+ * PC backend is a model server, not a place ZAO's frontend reads
  * config from. A single SQLite row is the on-device equivalent: one
  * durable, person-owned document, editable from Settings, with no
  * filesystem permissions dance.

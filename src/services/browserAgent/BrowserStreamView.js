@@ -12,6 +12,18 @@
  * react-native-webview) - there is no WebView here at all, just an
  * <Image> re-rendered on every incoming frame plus a transparent
  * touch-capture layer on top of it.
+ *
+ * ZOOM: `zoom` scales the displayed frame down within its container
+ * (1 = fills the container edge-to-edge via "contain" fit; 0.5 = shown
+ * at half that size, centered, with visible margin around it) - purely
+ * a DISPLAY transform, not an actual page zoom on the PC's Playwright
+ * viewport, so the real page content/layout is unaffected. Tap
+ * coordinates are computed directly from the same fit+zoom math used to
+ * size the image (computeFitBox below) rather than a CSS transform, so
+ * a tap is either correctly rescaled into the PC's fixed viewport
+ * coordinates or - if it lands in the now-visible margin outside the
+ * zoomed-out frame - simply ignored instead of landing on the wrong
+ * element.
  */
 
 import React, { useRef, useState, useCallback } from 'react';
@@ -23,6 +35,31 @@ import { View, Image, Text, StyleSheet, PanResponder } from 'react-native';
 // phone.
 const STREAM_VIEWPORT = { width: 412, height: 915 };
 
+/** "contain" fit of STREAM_VIEWPORT within {width, height}, then scaled by zoom - the exact box the <Image> is rendered at and taps are measured against. */
+function computeFitBox(containerWidth, containerHeight, zoom) {
+  const containerAspect = containerWidth / containerHeight;
+  const viewportAspect = STREAM_VIEWPORT.width / STREAM_VIEWPORT.height;
+
+  let fitWidth;
+  let fitHeight;
+  if (containerAspect > viewportAspect) {
+    fitHeight = containerHeight;
+    fitWidth = fitHeight * viewportAspect;
+  } else {
+    fitWidth = containerWidth;
+    fitHeight = fitWidth / viewportAspect;
+  }
+
+  const width = fitWidth * zoom;
+  const height = fitHeight * zoom;
+  return {
+    width,
+    height,
+    offsetX: (containerWidth - width) / 2,
+    offsetY: (containerHeight - height) / 2,
+  };
+}
+
 /**
  * @param {object} props
  * @param {string|null} props.frameBase64 - latest JPEG frame, base64-encoded (no data: prefix)
@@ -31,8 +68,9 @@ const STREAM_VIEWPORT = { width: 412, height: 915 };
  * @param {boolean} [props.connected] - whether the WebSocket to the PC is currently open
  * @param {string|null} [props.connectionError] - human-readable reason the connection isn't open, if known
  * @param {boolean} [props.isRunning] - whether a task is actively running on the PC session right now
+ * @param {number} [props.zoom] - 0-1 display scale, see header. Defaults to 1 (fill the container) for any caller that doesn't pass one, so existing usage is unaffected.
  */
-export default function BrowserStreamView({ frameBase64, stream, interactive = false, connected = false, connectionError = null, isRunning = false }) {
+export default function BrowserStreamView({ frameBase64, stream, interactive = false, connected = false, connectionError = null, isRunning = false, zoom = 1 }) {
   const [layoutSize, setLayoutSize] = useState({ width: STREAM_VIEWPORT.width, height: STREAM_VIEWPORT.height });
 
   const onLayout = useCallback((e) => {
@@ -40,18 +78,25 @@ export default function BrowserStreamView({ frameBase64, stream, interactive = f
     if (width > 0 && height > 0) setLayoutSize({ width, height });
   }, []);
 
+  const fitBox = computeFitBox(layoutSize.width, layoutSize.height, zoom);
+
   const handleTap = useCallback(
     (locationX, locationY) => {
       if (!interactive || !stream) return;
-      // Scale from however big this component is actually rendered on
-      // screen back to the PC's fixed streamed viewport, so a tap in the
-      // corner of a large full-screen view still lands on the right
-      // element in Playwright's much smaller virtual viewport.
-      const scaleX = STREAM_VIEWPORT.width / layoutSize.width;
-      const scaleY = STREAM_VIEWPORT.height / layoutSize.height;
-      stream.manualClick(Math.round(locationX * scaleX), Math.round(locationY * scaleY));
+      const box = computeFitBox(layoutSize.width, layoutSize.height, zoom);
+      const imgX = locationX - box.offsetX;
+      const imgY = locationY - box.offsetY;
+      // Outside the visible (possibly zoomed-out) frame entirely - e.g. a
+      // tap in the letterboxed margin at 50% zoom - there's nothing there
+      // to click, so don't send a coordinate that would land on whatever
+      // happens to be at that scaled-up position instead.
+      if (imgX < 0 || imgY < 0 || imgX > box.width || imgY > box.height) return;
+
+      const scaleX = STREAM_VIEWPORT.width / box.width;
+      const scaleY = STREAM_VIEWPORT.height / box.height;
+      stream.manualClick(Math.round(imgX * scaleX), Math.round(imgY * scaleY));
     },
-    [interactive, stream, layoutSize]
+    [interactive, stream, layoutSize, zoom]
   );
 
   const panResponder = useRef(
@@ -67,11 +112,21 @@ export default function BrowserStreamView({ frameBase64, stream, interactive = f
   return (
     <View style={styles.container} onLayout={onLayout}>
       {frameBase64 ? (
-        <Image
-          source={{ uri: `data:image/jpeg;base64,${frameBase64}` }}
-          style={StyleSheet.absoluteFill}
-          resizeMode="contain"
-        />
+        <View
+          style={{
+            position: 'absolute',
+            left: fitBox.offsetX,
+            top: fitBox.offsetY,
+            width: fitBox.width,
+            height: fitBox.height,
+          }}
+        >
+          <Image
+            source={{ uri: `data:image/jpeg;base64,${frameBase64}` }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="contain"
+          />
+        </View>
       ) : (
         <View style={[StyleSheet.absoluteFill, styles.placeholder]}>
           <Text style={styles.placeholderText}>

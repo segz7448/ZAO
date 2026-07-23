@@ -2,7 +2,7 @@
  * ZAO - Preferences Store (Zustand)
  *
  * Voice mode, TTS, Gemini, and Hugging Face are gone - chat/coding/
- * reasoning all run through the single Termux-hosted backend (see
+ * reasoning all run through the single PC-hosted backend (see
  * src/services/backend/backendClient.js), so there's nothing to configure
  * per-provider anymore beyond GitHub (still needs the person's own token).
  */

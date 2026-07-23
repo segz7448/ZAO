@@ -58,7 +58,7 @@ import { runSelfReflection } from './selfReflection';
 // stream to expose - streaming their first draft call would show
 // intermediate reasoning, not the reply.
 const STRATEGY_RUNNERS = {
-  [REASONING_STRATEGIES.CHAIN_OF_THOUGHT]: (history, messageText, onToken) => runChainOfThought(history, onToken),
+  [REASONING_STRATEGIES.CHAIN_OF_THOUGHT]: (history, messageText, onToken, onThinkingToken) => runChainOfThought(history, onToken, onThinkingToken),
   [REASONING_STRATEGIES.TREE_OF_THOUGHT]: (history, messageText) => runTreeOfThought(history, messageText),
   [REASONING_STRATEGIES.DEDUCTIVE]: (history) => runDeductive(history),
   [REASONING_STRATEGIES.INDUCTIVE]: (history) => runInductive(history),
@@ -77,7 +77,6 @@ const STRATEGY_RUNNERS = {
  * ones that came from runReasoningChat() below.
  */
 export const STRATEGY_FOR_ROUTE = Object.freeze({
-  TOOL_TASK: REASONING_STRATEGIES.REACT,
   BROWSING: REASONING_STRATEGIES.REACT,
   HIERARCHICAL_PLAN: REASONING_STRATEGIES.HYBRID_SYMBOLIC_PLAN,
 });
@@ -136,7 +135,7 @@ function shouldAutoReflect(strategy, messageText, draftContent) {
  *   error: object|null,
  * }>}
  */
-export async function runReasoningChat(history, messageText, onToken) {
+export async function runReasoningChat(history, messageText, onToken, onThinkingToken) {
   let strategy = REASONING_STRATEGIES.CHAIN_OF_THOUGHT;
   let routeReason = 'default';
 
@@ -152,7 +151,7 @@ export async function runReasoningChat(history, messageText, onToken) {
 
   let result;
   try {
-    result = await runner(history, messageText, onToken);
+    result = await runner(history, messageText, onToken, onThinkingToken);
   } catch (err) {
     result = { success: false, content: '', trace: null, error: { type: 'UNKNOWN', message: err?.message || 'Reasoning strategy failed.' } };
   }

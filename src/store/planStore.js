@@ -57,7 +57,18 @@ export const usePlanStore = create((set, get) => ({
   // Any plan left in a non-terminal state from a previous app session -
   // checked once on launch (see loadActivePlansOnLaunch) so the person can
   // be shown "you had a plan in progress" rather than it silently vanishing.
+  // Only ever holds plans genuinely awaiting a human decision
+  // (awaiting_approval, or paused) - a plan merely 'running' when the app
+  // closed doesn't need a decision, so it's auto-resumed instead of
+  // banner'd (see loadActivePlansOnLaunch / autoResumingPlanIds below).
   resumablePlans: [],
+  // Top-level plan ids currently being auto-resumed in the background
+  // right after launch (status was 'running', not awaiting a decision) -
+  // ChatScreen.js/App.js can show a lightweight "Resuming: ..." indicator
+  // for these without requiring a tap, since nothing here can silently do
+  // anything destructive: the same riskClassifier.js gates that pause a
+  // risky step for approval during normal execution still apply here.
+  autoResumingPlanIds: [],
   isLoading: false,
   error: null,
   // Non-terminal, cosmetic-only progress string surfaced while
@@ -344,15 +355,58 @@ export const usePlanStore = create((set, get) => ({
   /** Checked once at app launch (see App.js) - surfaces any plan that was left running/paused/awaiting approval when the app last closed. */
   async loadActivePlansOnLaunch() {
     const result = await getActivePlans();
-    if (result.success) {
-      // getActivePlans() returns every non-terminal row in the plans
-      // table, which includes every strategic/project/task/execution
-      // node in a hierarchical tree, not just the one the person would
-      // recognize as "a plan." Only top-level nodes (no parent_plan_id)
-      // are worth surfacing as a "resume?" banner - opening any of
-      // those still lets PlanScreen.js walk the full tree underneath.
-      const topLevel = (result.data || []).filter((p) => !p.parent_plan_id);
-      set({ resumablePlans: topLevel });
+    if (!result.success) return;
+
+    // getActivePlans() returns every non-terminal row in the plans
+    // table, which includes every strategic/project/task/execution
+    // node in a hierarchical tree, not just the one the person would
+    // recognize as "a plan." Only top-level nodes (no parent_plan_id)
+    // are worth surfacing at all - opening any of those still lets
+    // PlanScreen.js walk the full tree underneath.
+    const topLevel = (result.data || []).filter((p) => !p.parent_plan_id);
+
+    // Split by WHY the plan is non-terminal, not just THAT it is:
+    //   - awaiting_approval / paused: something genuinely needs a human
+    //     decision (a risky step, or the person deliberately paused it) -
+    //     these still show the banner and wait for a tap, same as before.
+    //   - running: the plan was actively executing and just got cut off
+    //     because the app closed - nothing here needs a decision, the
+    //     process just died. Auto-resume these directly instead of
+    //     making the person tap back in to continue something that was
+    //     already approved and in motion. Safety is unaffected: if
+    //     auto-resuming hits a risky step, runExecutionPlan pauses it for
+    //     approval exactly as it would have in the foreground - this
+    //     just means less gets left undone by the time that happens.
+    const needsHuman = topLevel.filter((p) => p.status === 'awaiting_approval' || p.status === 'paused');
+    const autoResumable = topLevel.filter((p) => p.status === 'running');
+
+    set({ resumablePlans: needsHuman });
+
+    if (autoResumable.length > 0) {
+      set({ autoResumingPlanIds: autoResumable.map((p) => p.id) });
+      // Fire-and-forget, one at a time, off the launch critical path -
+      // App.js doesn't await this, so the chat screen is usable
+      // immediately while these continue in the background. runPlan()
+      // (not startPlan()) is the right call here - startPlan is
+      // specifically for a plan that hasn't run a single step yet
+      // (PlanScreen.js's "Start plan" button); a 'running' plan has
+      // already been approved and was mid-execution, so this is a
+      // resume of work already in progress, one execution leaf at a
+      // time, same as runExecutionPlan() re-reading from SQLite on any
+      // other interruption (see that function's own header comment).
+      (async () => {
+        for (const plan of autoResumable) {
+          if (get().__cancelRequested) break;
+          // eslint-disable-next-line no-await-in-loop
+          const leafIds = await collectExecutionLeafIds(plan.id);
+          for (const leafId of leafIds) {
+            if (get().__cancelRequested) break;
+            // eslint-disable-next-line no-await-in-loop
+            await get().runPlan(leafId);
+          }
+          set((state) => ({ autoResumingPlanIds: state.autoResumingPlanIds.filter((id) => id !== plan.id) }));
+        }
+      })();
     }
   },
 

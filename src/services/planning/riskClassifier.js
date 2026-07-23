@@ -56,7 +56,7 @@
 //
 // SINGLE SOURCE OF TRUTH: this list now lives in
 // src/services/terminal/commandSafety.js and is re-exported here, since
-// pcTerminalTool.js/termuxTerminalTool.js also need it (to gate the raw
+// pcTerminalTool.js also needs it (to gate the raw
 // tool call itself, for the flat toolOrchestrator.js loop that never
 // goes through this planner-side classifier at all) and two copies of
 // "which commands are destructive" drifting apart is exactly the kind of

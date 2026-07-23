@@ -12,7 +12,7 @@
  *      (src/db/database.js) and formats them into a system message,
  *      injected at the front of `history` for every new conversation.
  *   2. extractMemoriesFromTurn() - after each assistant reply, fires a
- *      background call to the Termux backend that looks at the latest
+ *      background call to the PC backend that looks at the latest
  *      exchange and decides whether it contains a durable fact worth
  *      remembering. Runs fire-and-forget (never blocks the chat UI) and
  *      fails silently - memory extraction is a nice-to-have, never

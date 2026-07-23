@@ -8,11 +8,11 @@
  */
 
 import * as FileSystem from 'expo-file-system';
-import { categorizeFile, FILE_CATEGORY, getCategoryLabel, isPptx } from './fileTypes';
+import { categorizeFile, FILE_CATEGORY, getCategoryLabel } from './fileTypes';
 import { extractPlainText, extractCsv } from './textExtraction';
 import { extractZipContents } from './zipHandler';
 import { extractPdfText } from '../files/pdfExtractor';
-import { extractDocxText } from '../files/officeExtractors';
+import { extractDocxText, extractPptxText } from '../files/officeExtractors';
 import { runOcrExtraction } from './backend/backendClient';
 
 /**
@@ -56,18 +56,6 @@ export async function processAttachedFile(file, userMessageText = '') {
   const { uri, name, mimeType } = file;
 
   try {
-    if (isPptx(name, mimeType)) {
-      return {
-        success: false,
-        category: 'pptx',
-        categoryLabel: 'PowerPoint presentation',
-        isImage: false,
-        text: null,
-        truncated: false,
-        error: 'PowerPoint (.pptx) reading isn\'t supported yet in ZAO - it needs dedicated slide-parsing that hasn\'t been built. PDF, Word, ZIP, CSV, and text/code files all work.',
-      };
-    }
-
     const category = categorizeFile(name, mimeType);
     const categoryLabel = getCategoryLabel(category);
 
@@ -107,6 +95,17 @@ export async function processAttachedFile(file, userMessageText = '') {
 
       case FILE_CATEGORY.DOCX: {
         const result = await extractDocxText(uri);
+        return {
+          success: result.success,
+          category, categoryLabel, isImage: false,
+          text: result.success ? result.text : null,
+          truncated: false,
+          error: result.error,
+        };
+      }
+
+      case FILE_CATEGORY.PPTX: {
+        const result = await extractPptxText(uri);
         return {
           success: result.success,
           category, categoryLabel, isImage: false,

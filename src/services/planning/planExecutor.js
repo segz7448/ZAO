@@ -241,7 +241,7 @@ function normalizeActionGuess(step) {
   const domainDefaults = {
     files: 'fs_create_file',
     github: 'github_commit_files',
-    terminal: 'terminal_termux_run_command',
+    terminal: 'terminal_pc_run_command',
   };
   return domainDefaults[step.domain] || step.action;
 }
@@ -422,4 +422,86 @@ async function handleStepFailure(plan, step, result, { onStep }) {
 
   const previousAttempts = []; // recoveryPlanner reads retry_count directly off the step; a fuller implementation would also fetch getRecoveryAttempts(step.id) here for richer context
   const hasDependents = (plan.steps || []).some((s) => {
+    if (s.id === step.id) return false;
+    if (s.depends_on_step_id === step.id) return true;
+    if (s.depends_on_step_ids) {
+      return s.depends_on_step_ids.split(',').filter(Boolean).includes(step.id);
+    }
+    return false;
+  });
+
+  const decision = await planRecovery(
+    { ...step, error_message: result.error, hasDependents },
+    { previousAttempts, isRisky: !!step.is_risky }
+  );
+
+  const attemptNumber = (step.retry_count || 0) + 1;
+  const attemptRecord = buildRecoveryAttemptRecord(planId, step.id, attemptNumber, decision);
+  await insertRecoveryAttempt(attemptRecord);
+
+  switch (decision.strategy) {
+    case RECOVERY_STRATEGIES.RETRY: {
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, retryCount: attemptNumber, errorMessage: null });
+      await resolveRecoveryAttempt(attemptRecord.id, 'retried');
+      onStep?.(`Retrying: ${step.description}`);
+      return 'retried';
+    }
+
+    case RECOVERY_STRATEGIES.RETRY_WITH_BACKOFF: {
+      if (decision.waitMs) {
+        await new Promise((resolve) => setTimeout(resolve, decision.waitMs));
+      }
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, retryCount: attemptNumber, errorMessage: null });
+      await resolveRecoveryAttempt(attemptRecord.id, 'retried');
+      onStep?.(`Retrying after a short wait: ${step.description}`);
+      return 'retried';
+    }
+
+    case RECOVERY_STRATEGIES.ALTERNATE_APPROACH: {
+      // Actually change what gets retried, not just reset status and
+      // hope - append the model's suggested different approach onto the
+      // step's own description, so the next pass through runStepTool()
+      // (and, for a coding step, whatever reads the description as its
+      // instruction) sees the new guidance instead of silently repeating
+      // the exact same failing action.
+      const alternateDescription = decision.alternateAction?.description;
+      const nextDescription = alternateDescription
+        ? `${step.description}\n\n[Recovery attempt ${attemptNumber}: previous attempt failed (${result.error || 'unknown error'}). Try instead: ${alternateDescription}]`
+        : step.description;
+      await updatePlanStep(step.id, planId, {
+        status: STEP_STATUS.PENDING,
+        retryCount: attemptNumber,
+        errorMessage: null,
+        description: nextDescription,
+      });
+      await resolveRecoveryAttempt(attemptRecord.id, 'retried');
+      onStep?.(`Trying a different approach: ${step.description}`);
+      return 'retried';
+    }
+
+    case RECOVERY_STRATEGIES.SKIP_AND_CONTINUE: {
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED, errorMessage: result.error });
+      await resolveRecoveryAttempt(attemptRecord.id, 'skipped');
+      onStep?.(`Skipped (nothing else depends on it): ${step.description}`);
+      return 'skipped';
+    }
+
+    case RECOVERY_STRATEGIES.ABORT_PLAN: {
+      await resolveRecoveryAttempt(attemptRecord.id, 'aborted');
+      onStep?.(`Could not recover: ${step.description}`);
+      return 'abort';
+    }
+
+    case RECOVERY_STRATEGIES.ASK_PERSON:
+    default: {
+      await updatePlanStep(step.id, planId, {
+        status: STEP_STATUS.AWAITING_APPROVAL,
+        errorMessage: decision.reasoning || result.error,
+      });
+      await resolveRecoveryAttempt(attemptRecord.id, 'asked_person');
+      onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: result.error });
+      return 'ask_person';
+    }
+  }
+}
   

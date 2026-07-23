@@ -16,8 +16,8 @@ Status reflects what's fixed in this pass vs. still open.
   patterns (`rm -rf /`, `mkfs`, a fork bomb) are hard-blocked with no
   override; the broader destructive set (same list
   `riskClassifier.js` already used for planned steps) now requires
-  `confirmed: true` to run at all. Wired into both
-  `pcTerminalTool.js` and `termuxTerminalTool.js`. `riskClassifier.js`
+  `confirmed: true` to run at all. Wired into
+  `pcTerminalTool.js`. `riskClassifier.js`
   now imports the pattern list from here instead of keeping its own
   copy, so the two can't drift apart.
   - **Not fully closed**: nothing in the app sets `confirmed: true`
