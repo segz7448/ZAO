@@ -56,6 +56,7 @@ import { usePreferencesStore } from '../store/preferencesStore';
 import { runAgentLoop } from '../services/brain/agentLoop';
 import { runHierarchicalPlan } from '../services/brain/backendBrain';
 import { runReasoningChat, STRATEGY_FOR_ROUTE } from '../services/reasoning/reasoningEngine';
+import { getGroundingNote } from '../services/reasoning/chatGroundingBackstop';
 
 /**
  * Renders standingContext (system-role blocks from
@@ -349,9 +350,19 @@ async function runChatHandler(effectiveMessage, params) {
   // already works with a full {role,content} history array, so this gets
   // the cleaner treatment instead of the plain-text preface the other
   // three routes use (see withStandingContextPreface's own comment).
-  const historyWithContext = standingContext?.length
+  let historyWithContext = standingContext?.length
     ? [...standingContext, ...history]
     : history;
+
+  // Backstop for intentClassifier.js misrouting a current-info question
+  // ("what's today's date", "weather in X") into this tool-less route -
+  // see chatGroundingBackstop.js's own header for the full story. Cheap,
+  // fails open, and a no-op for the vast majority of CHAT messages that
+  // genuinely don't need it.
+  const { groundingNote } = await getGroundingNote(effectiveMessage || lastMessageText).catch(() => ({ groundingNote: null }));
+  if (groundingNote) {
+    historyWithContext = [...historyWithContext, { role: 'system', content: groundingNote }];
+  }
 
   const result = await runReasoningChat(historyWithContext, effectiveMessage || lastMessageText, onToken, onThinkingToken);
 
