@@ -684,6 +684,22 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
 
+    // Migration: preferred_timezone - the timezone the person has
+    // explicitly chosen for the model's own sense of "now", separate
+    // from ClockWidget's per-widget timezone picker. NULL (the default)
+    // means "use the device's own local timezone" - same convention
+    // timeTool.getCurrentTime(null) already uses, so no migration is
+    // needed for anyone who never sets this. Feeds agentLoop.js's
+    // always-on real-time standing-context block (see that file) -
+    // that's what makes "know what time it is in the timezone I chose"
+    // work without the person having to say the timezone in every
+    // message.
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN preferred_timezone TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
     // ---------- Execution / Safety tables ----------
     // See src/services/execution/ for the modules that read/write these -
     // persistence for: permission modes (column above, no table needed),
@@ -1618,6 +1634,7 @@ const DEFAULT_PREFS_ROW = {
   backend_auth_token: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
+  preferred_timezone: null,
 };
 
 export async function getPreferences() {
@@ -1656,7 +1673,7 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token', 'preferred_timezone']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
         const value = (key === 'browser_access_enabled' || key === 'memory_enabled') ? (patch[key] ? 1 : 0) : patch[key];

@@ -21,6 +21,7 @@ const DEFAULT_PREFS = {
   backend_auth_token: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
+  preferred_timezone: null,
 };
 
 export const usePreferencesStore = create((set, get) => ({

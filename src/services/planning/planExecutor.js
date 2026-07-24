@@ -60,6 +60,26 @@ import { PLAN_STATUS, STEP_STATUS, RECOVERY_STRATEGIES } from './planTypes';
 import { recordProcedure } from '../memory/proceduralMemory';
 
 /**
+ * Every tool result's .error can be either a plain string or an
+ * {message, ...} object depending on which tool produced it (see
+ * TOOL_REGISTRY entries across toolOrchestrator.js - not all of them
+ * agree on a shape). Every call site below that stores or interpolates
+ * an error into a text column/prompt needs a STRING, and passing the
+ * raw object straight into a template literal or a TEXT column silently
+ * stringifies it to the literal text "[object Object]" - exactly what
+ * showed up in Step Detail's recovery-attempt text and would otherwise
+ * get written into errorMessage/recoveryPlanner.js's own prompt too.
+ * This is the one place that extracts a real message, so every call
+ * site below stays consistent rather than repeating the same
+ * string-vs-object check five times.
+ */
+function errorText(err, fallback = 'unknown error') {
+  if (!err) return fallback;
+  if (typeof err === 'string') return err;
+  return err.message || fallback;
+}
+
+/**
  * Finds every step in `steps` that is currently eligible to run: status
  * 'pending', and every one of its dependencies (single + fan-in list)
  * already 'done'. Steps whose dependency failed/was skipped are flagged
@@ -390,7 +410,7 @@ export async function runExecutionPlan(planId, options = {}) {
       return { success: false, status: PLAN_STATUS.FAILED, error: { message: `Aborted: ${step.description} failed and could not be recovered.` } };
     }
     if (outcome === 'ask_person') {
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: result.error || 'This step failed and needs your input to continue.' });
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: errorText(result.error, 'This step failed and needs your input to continue.') });
       onAwaitingApproval?.(step);
       await updatePlanStatus(planId, PLAN_STATUS.AWAITING_APPROVAL);
       return { success: true, status: PLAN_STATUS.AWAITING_APPROVAL, error: null };
@@ -415,8 +435,8 @@ async function handleStepFailure(plan, step, result, { onStep }) {
   const planId = plan.id;
 
   if (result.noRetry) {
-    await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: result.error });
-    onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: result.error });
+    await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: errorText(result.error) });
+    onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: errorText(result.error) });
     return 'ask_person';
   }
 
@@ -466,7 +486,7 @@ async function handleStepFailure(plan, step, result, { onStep }) {
       // the exact same failing action.
       const alternateDescription = decision.alternateAction?.description;
       const nextDescription = alternateDescription
-        ? `${step.description}\n\n[Recovery attempt ${attemptNumber}: previous attempt failed (${result.error || 'unknown error'}). Try instead: ${alternateDescription}]`
+        ? `${step.description}\n\n[Recovery attempt ${attemptNumber}: previous attempt failed (${errorText(result.error)}). Try instead: ${alternateDescription}]`
         : step.description;
       await updatePlanStep(step.id, planId, {
         status: STEP_STATUS.PENDING,
@@ -480,7 +500,7 @@ async function handleStepFailure(plan, step, result, { onStep }) {
     }
 
     case RECOVERY_STRATEGIES.SKIP_AND_CONTINUE: {
-      await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED, errorMessage: result.error });
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED, errorMessage: errorText(result.error) });
       await resolveRecoveryAttempt(attemptRecord.id, 'skipped');
       onStep?.(`Skipped (nothing else depends on it): ${step.description}`);
       return 'skipped';

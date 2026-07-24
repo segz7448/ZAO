@@ -56,7 +56,8 @@ import { usePreferencesStore } from '../store/preferencesStore';
 import { runAgentLoop } from '../services/brain/agentLoop';
 import { runHierarchicalPlan } from '../services/brain/backendBrain';
 import { runReasoningChat, STRATEGY_FOR_ROUTE } from '../services/reasoning/reasoningEngine';
-import { getGroundingNote } from '../services/reasoning/chatGroundingBackstop';
+import { getGroundingNote, enforceRealTime } from '../services/reasoning/chatGroundingBackstop';
+import * as timeTool from '../services/time/timeTool';
 
 /**
  * Renders standingContext (system-role blocks from
@@ -367,10 +368,21 @@ async function runChatHandler(effectiveMessage, params) {
   const result = await runReasoningChat(historyWithContext, effectiveMessage || lastMessageText, onToken, onThinkingToken);
 
   if (result.success) {
+    // Output-side enforcement (see chatGroundingBackstop.js's
+    // enforceRealTime doc) - catches the model falling back to its
+    // training-era sense of "now" even after being given the real
+    // stamp in standingContext above. Runs regardless of route or
+    // whether a groundingNote fired this turn, since this is a plain
+    // instant local lookup (no network), not a conditional check.
+    const timeForEnforcement = timeTool.getCurrentTime(null);
+    const enforcedContent = timeForEnforcement.success
+      ? enforceRealTime(result.content, timeForEnforcement.data)
+      : result.content;
+
     return {
       success: true,
       data: {
-        content: result.content,
+        content: enforcedContent,
         family: modelKey,
         provider: 'local-backend',
         modelId: ACTIVE_MODEL.label,

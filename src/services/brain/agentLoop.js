@@ -54,8 +54,10 @@
 import { decideRoute, BRAIN_ROUTES } from './frontendBrain';
 import { getProjectInstructionsBlock } from '../memory/projectInstructions';
 import { getAutoMemoryBlock } from '../memory/autoMemoryNotes';
+import { getPreferences } from '../../db/database';
 import * as backendClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
+import * as timeTool from '../time/timeTool';
 
 const MAX_LOOP_ITERATIONS = 6;
 
@@ -96,19 +98,43 @@ Say done:false only if the ORIGINAL request clearly has a distinct part that thi
 export async function runAgentLoop(params, handlers, { isCancelled = () => false, onLoopStep = null } = {}) {
   const { lastMessageText, webSearchEnabled } = params;
 
-  const [projectBlock, autoMemoryBlock] = await Promise.all([
+  const [projectBlock, autoMemoryBlock, prefsResult] = await Promise.all([
     getProjectInstructionsBlock(),
     getAutoMemoryBlock(),
+    getPreferences().catch(() => null),
   ]);
-  // webSearchEnabled is the composer bar's web-search toggle (see
-  // ChatScreen.js) - the web_search tool is always available to the
-  // model regardless of this toggle, but when the person has explicitly
-  // switched it on for this message, that's a strong signal to actually
-  // use it rather than answer from what the model already knows.
+
+  // REAL-TIME STAMP: unconditional, every single message, every route -
+  // not gated behind classification, web-search toggle, or the model
+  // choosing to check anything. This is what actually makes "the model
+  // can't get the date/time wrong" true rather than aspirational: the
+  // fact is simply already IN the text it reads before it writes a
+  // single token, on every turn, with no code path that skips it. This
+  // is the enforcement half of the fix; chatGroundingBackstop.js /
+  // intentClassifier.js's sharpened prompt are the other half (catching
+  // cases where the model needs MORE than just today's date - a live
+  // search result, for instance).
+  //
+  // Deliberately phrased as a hard override rather than a normal system
+  // note: a small local model can still choose to ignore plain
+  // instructional text, so the wording itself doesn't "force" anything
+  // - what actually can't be worked around is that the true date/time is
+  // unconditionally present in every single context this model ever
+  // sees. There is no route, no classification outcome, no toggle
+  // state that skips this block.
+  const preferredTimezone = prefsResult?.success ? prefsResult.data?.preferred_timezone : null;
+  const timeResult = timeTool.getCurrentTime(preferredTimezone || null);
+  const realTimeBlock = timeResult.success
+    ? {
+        role: 'system',
+        content: `[SYSTEM - ALWAYS TRUE, OVERRIDES YOUR OWN TRAINING]: The real current date and time, just checked, is ${timeResult.data.formatted} (${timeResult.data.zoneName}). Your training data has a cutoff long before this and cannot know anything that happened after it. Whenever your answer touches the date, time, "current"/"latest"/"today", or anything that could have changed since training - trust ONLY this stamp and any tool results you're given, never your own training-data sense of what year or date it is. Do not say "as of my last update" or similar - that phrasing was written for a version of you without this information. If you're unsure whether something needs a live check (news, prices, current tools/versions, "is X still true"), use the web_search tool rather than guessing from training.`,
+      }
+    : null;
+
   const webSearchBlock = webSearchEnabled
     ? { role: 'system', content: 'The person has turned on web search for this message. Prioritize calling the web_search tool to ground your answer in current information rather than answering from memory alone, unless the question is about something timeless that a search genuinely wouldn\'t improve (e.g. pure math, a definition, general advice).' }
     : null;
-  const standingContext = [projectBlock, autoMemoryBlock, webSearchBlock].filter(Boolean);
+  const standingContext = [realTimeBlock, projectBlock, autoMemoryBlock, webSearchBlock].filter(Boolean);
 
   const attemptedRoutes = [];
   const priorResultsSummary = [];
@@ -202,6 +228,31 @@ function summarizeForNextIteration(route, stepResult) {
   return snippet ? `${label} (${snippet})` : label;
 }
 
+// Multi-part requests are the ONLY reason verifyResolved's extra model
+// call earns its keep - it exists to catch "check the repo's issues AND
+// look up how others fixed one of them" style messages where one action
+// satisfied only part of what was asked. A message with none of these
+// multi-part signals, and only one real sentence, was never going to
+// have unresolved parts after a successful action, so paying for the
+// classifier call there is pure overhead with no coverage benefit - same
+// "broad net, skip only the clearly-safe case" principle as
+// chatGroundingBackstop.js's own pre-filter. Deliberately over-inclusive:
+// any hint of "and then"/"also"/two-or-more sentences still pays for the
+// real check.
+const MULTI_PART_WORD_RE = /\b(and (?:also |then )?|also|then|after that|next,?|additionally|as well as|both|either|besides that)\b/i;
+
+// Counts real sentence-ending punctuation (. ! ?) followed by more
+// non-whitespace content - i.e. genuinely more than one sentence, not
+// just any period anywhere (a mid-string period like "Mr. Smith" or a
+// single trailing "please." would false-positive on a naive test, which
+// defeats the whole point of skipping the round-trip for single-part
+// messages).
+function looksMultiPart(text) {
+  if (MULTI_PART_WORD_RE.test(text)) return true;
+  const sentenceEnds = text.match(/[.!?]+(?=\s+\S)/g);
+  return !!sentenceEnds && sentenceEnds.length >= 1;
+}
+
 /**
  * One cheap classifier-style call, same pattern as intentClassifier.js -
  * asks whether the ORIGINAL request still has unresolved parts after
@@ -211,6 +262,15 @@ function summarizeForNextIteration(route, stepResult) {
  * pre-agentLoop.js behavior) rather than risking a runaway loop.
  */
 async function verifyResolved(originalMessage, route, stepResult) {
+  // Speed: a clearly single-part, single-sentence original message has
+  // nothing left that COULD be unresolved after a successful action -
+  // see looksMultiPart's comment for why skipping here doesn't cut
+  // coverage, just the round-trip for cases the check was never going
+  // to flag anyway.
+  if (!looksMultiPart((originalMessage || '').trim())) {
+    return { done: true, remaining: '' };
+  }
+
   try {
     const history = [
       { role: 'system', content: VERIFY_SYSTEM_PROMPT },

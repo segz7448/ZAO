@@ -435,7 +435,19 @@ app.post('/v1/chat/completions', (req, res) => {
   if (!llamaReady) {
     return res.status(503).json({ error: { message: 'Model is still loading. Try again in a moment.' } });
   }
-  log(`Chat request (${(req.body?.messages || []).length} messages, tools=${req.body?.tools ? 'yes' : 'no'})`);
+  // NOTE: "live tool-choice: no" here does NOT mean tools are broken or
+  // unavailable - most requests never need it. The hierarchical-plan
+  // pipeline (planExecutor.js) already knows which tool a step needs
+  // before this call happens (decided earlier by executionPlanner.js)
+  // and just calls it directly - no live function-calling round-trip,
+  // so no tools array is sent for those, by design. Only a handful of
+  // request types actually ask the model to choose a tool live (the
+  // flat ReAct loop subagents use, the intent/reasoning classifiers) -
+  // "yes" only ever shows up for those. If tool CALLS themselves are
+  // failing, check the person's actual error message/Settings > Agent
+  // activity log instead of this line.
+  const liveToolCount = req.body?.tools?.length || 0;
+  log(`Chat request (${(req.body?.messages || []).length} messages, live tool-choice: ${liveToolCount > 0 ? `yes, ${liveToolCount} tool(s) offered` : 'no (tool already decided upstream, if any)'})`);
   proxyToLlama(req, res, '/v1/chat/completions');
 });
 
