@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { usePreferencesStore } from '../store/preferencesStore';
+import { refreshDiscoveredBackendUrl } from '../services/backend/discoveryClient';
 import { useThemeStore } from '../store/themeStore';
 import { useTheme } from '../theme/useTheme';
 import { checkBackendHealth } from '../services/backend/backendClient';
@@ -235,6 +236,8 @@ function BackendConnectionSection({ preferences, theme }) {
   const setBackendLanUrl = usePreferencesStore((s) => s.setBackendLanUrl);
   const setBackendRemoteUrl = usePreferencesStore((s) => s.setBackendRemoteUrl);
   const setBackendAuthToken = usePreferencesStore((s) => s.setBackendAuthToken);
+  const setDiscoveryWorkerUrl = usePreferencesStore((s) => s.setDiscoveryWorkerUrl);
+  const setDiscoveryDeviceId = usePreferencesStore((s) => s.setDiscoveryDeviceId);
 
   const savedMode = preferences?.backend_mode || 'lan';
   // Local "draft" mode - lets the person pick LAN or Remote and fill in
@@ -244,6 +247,8 @@ function BackendConnectionSection({ preferences, theme }) {
   const [mode, setMode] = useState(savedMode);
   const [lanUrlValue, setLanUrlValue] = useState(preferences?.backend_lan_url || '');
   const [remoteUrlValue, setRemoteUrlValue] = useState(preferences?.backend_remote_url || '');
+  const [discoveryWorkerUrlValue, setDiscoveryWorkerUrlValue] = useState(preferences?.discovery_worker_url || '');
+  const [discoveryDeviceIdValue, setDiscoveryDeviceIdValue] = useState(preferences?.discovery_device_id || '');
   const [tokenValue, setTokenValue] = useState(preferences?.backend_auth_token || '');
   const [status, setStatus] = useState({ connected: false, ready: false, model: null });
   const [checking, setChecking] = useState(true);
@@ -253,9 +258,11 @@ function BackendConnectionSection({ preferences, theme }) {
     setMode(savedMode);
     setLanUrlValue(preferences?.backend_lan_url || '');
     setRemoteUrlValue(preferences?.backend_remote_url || '');
+    setDiscoveryWorkerUrlValue(preferences?.discovery_worker_url || '');
+    setDiscoveryDeviceIdValue(preferences?.discovery_device_id || '');
     setTokenValue(preferences?.backend_auth_token || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token]);
+  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token, preferences?.discovery_worker_url, preferences?.discovery_device_id]);
 
   const check = async () => {
     setChecking(true);
@@ -275,7 +282,9 @@ function BackendConnectionSection({ preferences, theme }) {
   const isDirty =
     mode !== savedMode ||
     (mode === 'lan' ? lanUrlValue.trim() !== (preferences?.backend_lan_url || '') : remoteUrlValue.trim() !== (preferences?.backend_remote_url || '')) ||
-    tokenValue.trim() !== (preferences?.backend_auth_token || '');
+    tokenValue.trim() !== (preferences?.backend_auth_token || '') ||
+    discoveryWorkerUrlValue.trim() !== (preferences?.discovery_worker_url || '') ||
+    discoveryDeviceIdValue.trim() !== (preferences?.discovery_device_id || '');
 
   const handleSave = async () => {
     setSaving(true);
@@ -291,6 +300,15 @@ function BackendConnectionSection({ preferences, theme }) {
       await setBackendRemoteUrl(remoteUrlValue.trim());
     }
     await setBackendAuthToken(tokenValue.trim());
+    await setDiscoveryWorkerUrl(discoveryWorkerUrlValue.trim() || null);
+    await setDiscoveryDeviceId(discoveryDeviceIdValue.trim() || null);
+    // If both discovery fields were just filled in, do an immediate
+    // lookup rather than waiting for the next launch or the 5-minute
+    // periodic check (see App.js) - saving these fields IS the moment
+    // the person expects the URL above to fill itself in.
+    if (discoveryWorkerUrlValue.trim() && discoveryDeviceIdValue.trim()) {
+      await refreshDiscoveredBackendUrl();
+    }
     setSaving(false);
     check();
   };
@@ -384,6 +402,30 @@ function BackendConnectionSection({ preferences, theme }) {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
+          />
+
+          <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 12 }]}>
+            Auto-discovery (optional) - set this ONCE and the URL above fills itself in automatically from then on, even if the PC's tunnel is recreated. Values come from running{' '}
+            <Text style={{ fontWeight: '700' }}>node scripts/setup-permanent-tunnel.js</Text> on your PC - see cloudflare-worker/README.md.
+          </Text>
+          <TextInput
+            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
+            placeholder="Discovery Worker URL (e.g. https://zao-discovery.you.workers.dev)"
+            placeholderTextColor={theme.textTertiary}
+            value={discoveryWorkerUrlValue}
+            onChangeText={setDiscoveryWorkerUrlValue}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
+          <TextInput
+            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
+            placeholder="Device ID"
+            placeholderTextColor={theme.textTertiary}
+            value={discoveryDeviceIdValue}
+            onChangeText={setDiscoveryDeviceIdValue}
+            autoCapitalize="none"
+            autoCorrect={false}
           />
         </>
       )}

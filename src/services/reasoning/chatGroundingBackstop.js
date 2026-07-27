@@ -67,15 +67,60 @@ export function enforceRealTime(replyText, realTime) {
 
   let corrected = replyText;
 
-  // Catch training-cutoff hedges like "as of my last update", "as of my
-  // knowledge cutoff", "as of 2023/2024" etc. - these phrases are ALWAYS
-  // wrong to say once a real-time stamp has been provided, regardless of
-  // what year follows them, so this doesn't try to detect which years are
-  // "stale" (that breaks the moment training data advances) - it removes
-  // the hedge itself, since the model has no excuse to use it anymore.
-  const hedgePattern = /\b(as of my (last update|knowledge cutoff|training data)|my (last update|training data) (was|is)|i don'?t have (real-?time|access to current) (information|data))\b[^.!?]*[.!?]/gi;
-  if (hedgePattern.test(corrected)) {
-    corrected = corrected.replace(hedgePattern, '').replace(/\s{2,}/g, ' ').trim();
+  // Catch training-cutoff hedges - "as of my last update", "I don't have
+  // real-time access", "I can't access real-time/live web search
+  // results", "I'm unable to perform live checks/browse the internet",
+  // etc. A 3B model's exact wording varies more than any fixed list can
+  // keep up with, so this matches on the recurring CORE claim ("I
+  // can't/don't have/am unable to" + "access/perform/browse/check" +
+  // something about real-time/live/current/internet) rather than trying
+  // to enumerate every phrasing.
+  //
+  // Deliberately whole-SENTENCE removal, not attempting to surgically
+  // cut just the hedge clause out of a longer sentence - trying to strip
+  // only the matched words while leaving the rest of that sentence's
+  // grammar intact is exactly what produced broken, dangling fragments
+  // in testing (e.g. "I apologize, but as an AI language model," left
+  // hanging, or a trailing clause after a comma getting eaten along with
+  // it). Splitting on sentence boundaries first and dropping only the
+  // sentences that actually contain the hedge keeps every OTHER sentence
+  // grammatically whole.
+  //
+  // Each match INCLUDES its own trailing whitespace (see sentenceRe
+  // below), and kept sentences are rejoined with '' (not ' ') - a
+  // previous version split without capturing trailing whitespace and
+  // rejoined with a single space, which silently mangled any decimal
+  // number or abbreviation containing a period ("3.14" -> "3. 14",
+  // "e.g." -> "e. g.") even when NOTHING was actually being removed,
+  // since the rejoin still ran on every reply. This version returns the
+  // ORIGINAL text completely untouched whenever no hedge sentence is
+  // found at all, and only reconstructs from kept-sentence fragments
+  // when something genuinely needs removing - both paths tested
+  // directly against real examples containing decimals/abbreviations
+  // before this was considered correct.
+  const hedgeCoreRe = /\b(as of my (?:last update|knowledge cutoff|training data)|my (?:last update|training data) (?:was|is)|(?:i (?:don'?t|do not|can'?t|cannot|am unable to|'?m unable to)) (?:have |get |access |perform |browse |check )*(?:access to |any )?(?:real-?time|live|current|up.?to.?date|the internet|the web)|(?:the )?web_?search (?:tool )?(?:is )?not available|no content from (?:the )?model)\b/i;
+
+  const sentenceRe = /[^.!?]+[.!?]+\s*|\S+\s*$/g;
+  const sentences = corrected.match(sentenceRe) || [corrected];
+  const keptSentences = sentences.filter((s) => !hedgeCoreRe.test(s));
+  if (keptSentences.length === sentences.length) {
+    // Nothing matched the hedge pattern at all - leave the text
+    // completely untouched rather than running it through a
+    // split/rejoin that could alter spacing for no reason.
+  } else if (keptSentences.length > 0) {
+    // Normal case: at least one non-hedge sentence survives (e.g. the
+    // hedge was a throat-clearing opener before the real answer) -
+    // drop only the hedge sentence(s); each kept fragment already
+    // carries its own trailing whitespace, so joining with '' preserves
+    // original spacing exactly rather than reconstructing it.
+    corrected = keptSentences.join('').trim();
+  } else {
+    // Every sentence WAS the hedge (a short reply that's entirely "I
+    // can't access real-time info" and nothing else) - there's no
+    // non-hedge sentence to fall back on, so replace it with a short,
+    // honest line rather than either an empty string or the
+    // now-contradicted hedge itself.
+    corrected = `I don't have that from training data alone, but here's what's actually current: ${realTime.formatted} (${realTime.zoneName}). Ask me again and I'll use a live check for anything beyond just the date/time.`;
   }
 
   // Catch an explicit stale year the model stated as "today"/"current"
@@ -180,10 +225,22 @@ function summarizeSearchResults(data) {
 }
 
 function safeParseJson(rawContent) {
+  const cleaned = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
   try {
-    const cleaned = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
     return JSON.parse(cleaned);
   } catch (err) {
-    return null;
+    // A 3B model reliably adds commentary around the JSON despite being
+    // told not to ("Sure, here's the answer: {...}" or trailing
+    // explanation after it) - rather than failing the whole check
+    // (which silently produces the exact "never grounds anything"
+    // regression this function exists to prevent), pull out the first
+    // {...} block found anywhere in the response and try that instead.
+    const match = cleaned.match(/\{[^{}]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch (innerErr) {
+      return null;
+    }
   }
 }

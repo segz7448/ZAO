@@ -72,28 +72,47 @@ export async function classifyIntent(messageText, options = {}) {
     { role: 'user', content: userContent },
   ];
 
-  try {
-    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
-      maxTokens: 20,
-      temperature: 0,
-    });
+  // Real classification, with retries - no keyword-matching fallback
+  // anymore (see classifyTaskByKeyword's own header for why: the person
+  // wants this to reason about a request the way a person - or Claude -
+  // would, never fall back to pattern-matching fixed phrases). A
+  // transient failure (backend hiccup, one bad JSON response) gets a
+  // couple of real retries of the SAME reasoning call, not a downgrade
+  // to keyword matching - retrying is "try understanding it again",
+  // which is the honest equivalent of what asking a person twtoo would
+  // look like, whereas falling back to keywords would be answering a
+  // completely different, cruder way the moment the first attempt
+  // stumbles.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+        maxTokens: 20,
+        temperature: 0,
+      });
 
-    if (result.success && result.data?.content) {
-      const parsed = safeParseIntentJson(result.data.content);
-      if (parsed && VALID_INTENTS.has(parsed.intent)) {
-        return parsed.intent;
+      if (result.success && result.data?.content) {
+        const parsed = safeParseIntentJson(result.data.content);
+        if (parsed && VALID_INTENTS.has(parsed.intent)) {
+          return parsed.intent;
+        }
       }
+    } catch (err) {
+      // Falls through to the next attempt, or the final degraded return
+      // below once attempts are exhausted.
     }
-  } catch (err) {
-    // Falls through to the keyword fallback below - a classification
-    // failure should never block the message from being handled somehow.
   }
 
-  // Fallback: the model call failed outright (backend unreachable,
-  // timed out) or returned something unparseable. Degraded, but keeps
-  // the app usable rather than defaulting to 'general' and silently
-  // skipping a github/browsing task the person actually wanted acted on.
-  return classifyTaskByKeyword(text);
+  // Every attempt failed (backend unreachable for the whole retry
+  // window, or the model never returned parseable JSON) - degrade to
+  // 'general' rather than guessing from keywords. A person's actual
+  // request not getting acted on because classification genuinely
+  // failed is a real, visible problem (the reply will look like plain
+  // chat instead of a completed action) that surfaces the underlying
+  // issue - the PC backend being unreachable - rather than a keyword
+  // fallback quietly papering over it and creating a DIFFERENT wrong
+  // answer instead.
+  return 'general';
 }
 
 function safeParseIntentJson(rawContent) {

@@ -226,8 +226,8 @@ export async function buildPlan(goalText, context = {}) {
           reasoning: step.reasoning,
           action: step.action,
           target: step.target,
-          details: (step.subtaskTitle || step.content)
-            ? { subtask: step.subtaskTitle || null, content: step.content || null }
+          details: (step.subtaskTitle || step.content || step.plannerFailed)
+            ? { subtask: step.subtaskTitle || null, content: step.content || null, plannerFailed: !!step.plannerFailed }
             : null,
           dependsOnStepId: step.dependsOnStepId,
           dependsOnStepIds: step.dependsOnStepIds,

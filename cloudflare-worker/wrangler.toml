@@ -1,0 +1,12 @@
+name = "zao-discovery"
+main = "discovery-worker.js"
+compatibility_date = "2025-01-01"
+
+# Created via: wrangler kv:namespace create ZAO_DISCOVERY
+# Then paste the id it prints below.
+kv_namespaces = [
+  { binding = "ZAO_DISCOVERY", id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }
+]
+
+# PUBLISH_TOKEN is set separately as a secret (not here, since this file
+# may be committed): wrangler secret put PUBLISH_TOKEN

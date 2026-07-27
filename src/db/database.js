@@ -700,6 +700,26 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
 
+    // Migration: discovery_worker_url + discovery_device_id - the
+    // opt-in auto-discovery pair (see
+    // src/services/backend/discoveryClient.js and
+    // cloudflare-worker/discovery-worker.js). Set together, ONCE, from
+    // Settings > Backend Connection > Auto-discovery, using the values
+    // server/scripts/setup-permanent-tunnel.js prints after publishing.
+    // Both null (the default) means discovery is off and
+    // backend_remote_url works exactly as it always has - purely
+    // additive, changes nothing about existing manual-URL installs.
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN discovery_worker_url TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN discovery_device_id TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
     // ---------- Execution / Safety tables ----------
     // See src/services/execution/ for the modules that read/write these -
     // persistence for: permission modes (column above, no table needed),
@@ -1628,6 +1648,8 @@ const DEFAULT_PREFS_ROW = {
   github_username: null,
   filesystem_saf_uri: null,
   memory_enabled: true,
+  project_instructions: null,
+  auto_memory_notes: null,
   backend_mode: 'lan',
   backend_lan_url: null,
   backend_remote_url: null,
@@ -1635,6 +1657,9 @@ const DEFAULT_PREFS_ROW = {
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
+  discovery_worker_url: null,
+  discovery_device_id: null,
+  browser_router_url: null, // dead column - migration exists (see that comment) but src/services/browserRouter/client.js was never actually built; harmless default, nothing reads or writes this today
 };
 
 export async function getPreferences() {
@@ -1673,7 +1698,7 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token', 'preferred_timezone']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token', 'preferred_timezone', 'discovery_worker_url', 'discovery_device_id', 'browser_router_url']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
         const value = (key === 'browser_access_enabled' || key === 'memory_enabled') ? (patch[key] ? 1 : 0) : patch[key];

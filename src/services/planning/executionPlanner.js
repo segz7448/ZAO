@@ -40,12 +40,20 @@ const EXECUTION_SYSTEM_PROMPT = `You are ZAO's execution planner. You're given o
 
 Each step must specify:
 - reasoning: ONE short sentence of WHY this step is needed right now - the internal rationale, not what a person would read as a status update (e.g. "Need the current file contents before editing them, or the replace will target stale text.")
-- domain: one of "coding", "terminal", "files", "browser", "github"
+- domain: one of "coding", "terminal", "files", "browser", "github", "time", "search", "test"
 - description: plain-language description of what this step does (shown to the person as the narration line - distinct from reasoning, which is shown separately as the step's collapsed "thought process")
-- action: the specific action/tool-call name this step maps to (e.g. "fs_create_file", "github_commit_files", "terminal_run_command") - your best guess at the real tool, the executor will resolve the exact function
-- target: the file path / repo / URL / command this step acts on
-- content: REQUIRED whenever action is "fs_create_file" - the FULL, complete, working text to write into that file (real code/config/text, not a placeholder or a description of what it should contain). Omit this field entirely for every other action.
+- action: the specific action/tool-call name this step maps to - your best guess at the real tool, the executor will resolve the exact function. Common ones: "fs_create_file", "github_commit_files", "terminal_pc_run_command", "pc_fs_create_folder", "time_get_current" (the real current date/time - see below), "web_search" (a live web query), "web_fetch" (retrieve one specific URL's content), "pc_run_tests" (runs the project's real test suite - see below)
+- target: the file path / repo / URL / command this step acts on. For "time_get_current", put a timezone name or city here if one was asked for (e.g. "Asia/Tokyo", "Lagos"), or omit for local/device time. For "web_search", put the search query here. For "pc_log_decision", put the one-line decision summary here (e.g. "Used SQLite instead of a flat JSON file for the cache layer").
+- content: REQUIRED whenever action is "fs_create_file" - the FULL, complete, working text to write into that file (real code/config/text, not a placeholder or a description of what it should contain). For "pc_log_decision", put the WHY - the actual reasoning behind the decision named in target - here instead (this step reuses fs_create_file's target=path/content=text shape as target=decision/content=reasoning, rather than needing its own separate fields). Omit this field entirely for every other action.
 - dependsOnStepIndex: 0-based index of another step in THIS list that must finish first, if any - omit if this step has no same-list prerequisite (it may still depend on something from an earlier task; that's handled separately)
+
+CRITICAL - never answer these from memory/guessing, always plan a real tool step instead: any question about the actual current date, current time (in any timezone), or "what day is it" -> a "time_get_current" step (domain "time"). Training data goes stale the moment it's trained, so a model has no way to actually know today's date without checking - guessing a plausible-looking date is exactly the failure this step exists to prevent. Any question needing current/live information the model's training can't have (weather, news, prices, current events, "is X still true") -> a "web_search" step (domain "search"). Reading one specific known URL's content -> "web_fetch".
+
+TESTING: whenever a task involves writing or changing real source code in a project that has (or should have) tests - not a one-off script, not a plain text/config file - plan a "pc_run_tests" step (domain "test") as the LAST step, after the file-writing steps, depending on them via dependsOnStepIndex. This turns "write code" into "write code, then verify it actually works" instead of stopping the moment files are written. Skip this for: a brand new project with no tests yet to run (there's nothing to check), a single config/content-only edit with no logic change, or a task that was never about code (a folder, a PDF, a spreadsheet).
+
+RECORDING WHY: if this task involves a real design/implementation choice (one library/approach over another, a non-obvious structure for a real reason), add a "pc_log_decision" step (domain "files", since it's a file write under the hood) after the relevant coding steps, so that reasoning survives in the project's own DECISIONS.md rather than being lost once this plan finishes. Skip it for routine, self-explanatory work.
+
+RISKY MULTI-FILE CHANGES: pc_fs_preview_changes takes a "changes" array as its argument, which this step schema has no field for (target/content are both single strings, not a list of {path, type, oldString, newString} objects) - so it can't be planned as a step here the way pc_run_tests or pc_log_decision can. It still exists and works correctly when called directly (see toolOrchestrator.js's own system prompt, which has full native support for array-shaped tool arguments) - if a task in THIS pipeline involves several files changing together for the same reason, the safer option available at this level is simply ordering the edit steps so a person can review each one's diff as it's produced (pc_fs_edit_file's response already includes a real diff - see that tool), rather than planning a preview step that can't actually be filled in correctly here.
 
 Keep each step small enough that if it fails on its own, the failure is easy to localize - don't bundle unrelated actions into one step. A step whose action is "fs_create_file" is USELESS without real content - never emit one without it.
 
@@ -104,6 +112,7 @@ async function expandTaskToRawSteps(task) {
         content: typeof s.content === 'string' ? s.content : null,
         subtaskTitle: unit.isSubtask ? unit.title : null,
         localDependsOnIndex: Number.isInteger(s.dependsOnStepIndex) ? offset + s.dependsOnStepIndex : null,
+        plannerFailed: !!s.plannerFailed,
       });
     });
   }
@@ -111,29 +120,92 @@ async function expandTaskToRawSteps(task) {
   return allSteps;
 }
 
-function normalizeDomain(domain) {
-  const valid = ['coding', 'terminal', 'files', 'browser', 'github'];
+export function normalizeDomain(domain) {
+  const valid = ['coding', 'terminal', 'files', 'browser', 'github', 'time', 'search', 'test'];
   return valid.includes(domain) ? domain : 'terminal';
 }
 
-function fallbackStepForUnit(unit, task) {
+/**
+ * Last-resort fallback for when the model call for this unit failed
+ * outright OR its response couldn't be parsed as JSON even after
+ * safeParseStepsJson's balanced-object extraction - genuinely rare now
+ * that extraction handles commentary-wrapped JSON, but still possible
+ * (backend unreachable, a truncated/cut-off response, malformed JSON
+ * that never balances).
+ *
+ * Deliberately an HONEST failing step, not a plausible-looking one - a
+ * PREVIOUS version of this returned {action: null, target: null}, which
+ * silently became a terminal_pc_run_command call with no actual command
+ * once normalizeActionGuess() filled the domain default in - it ran
+ * (or errored) with nothing real to do, while the model still generated
+ * a plausible "done" summary afterward with no indication anything had
+ * gone wrong. That's the exact "claims it's done but it isn't" /
+ * "explains how instead of doing it" failure this was traced back to.
+ * Setting noRetry+forceFailed here instead means planExecutor.js sees a
+ * REAL failure and either retries the whole unit through
+ * recoveryPlanner.js or surfaces it to the person - never silently
+ * proceeds as if something happened.
+ */
+export function fallbackStepForUnit(unit, task) {
   return {
     domain: 'terminal',
     description: unit.title || task.title,
     action: null,
     target: null,
     dependsOnStepIndex: null,
+    plannerFailed: true, // planExecutor.js checks this and fails the step honestly rather than attempting a hollow tool call
   };
 }
 
-function safeParseStepsJson(rawContent) {
+export function safeParseStepsJson(rawContent) {
+  const cleaned = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
   try {
-    const cleaned = rawContent.replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
     return parsed && typeof parsed === 'object' ? parsed : null;
   } catch (err) {
-    return null;
+    // A 3B model reliably wraps the JSON in commentary despite being
+    // told not to ("Here's the plan: {...}", or trailing explanation
+    // after it) - failing the whole parse here is exactly what produces
+    // fallbackStepForUnit()'s null-action, null-target placeholder step,
+    // which silently does nothing useful while the model still writes a
+    // plausible-sounding "done" summary afterward - the "claims it's
+    // done but it isn't" / "gives me instructions instead of doing it"
+    // failure this was traced back to. Extract the largest {...} block
+    // in the response and retry before giving up. Steps arrays can be
+    // long, so this needs to find a balanced-brace object, not just the
+    // first '{...}' (a naive single-level match truncates at the first
+    // nested step's closing brace).
+    const extracted = extractBalancedJsonObject(cleaned);
+    if (!extracted) return null;
+    try {
+      const parsed = JSON.parse(extracted);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (innerErr) {
+      return null;
+    }
   }
+}
+
+/**
+ * Finds the first balanced {...} block in a string - unlike a simple
+ * /\{[^{}]*\}/ regex (fine for a flat, single-level object like
+ * chatGroundingBackstop.js's classifier response), this needs to handle
+ * a NESTED object - {"steps": [{...}, {...}]} - where naive non-nesting
+ * regex would truncate at the first inner step's closing brace instead
+ * of capturing the whole thing.
+ */
+export function extractBalancedJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null; // never balanced - truncated/malformed response
 }
 
 /**

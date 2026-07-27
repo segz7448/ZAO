@@ -13,8 +13,13 @@ import { getPreferences, updatePreferences, storeApiKey, getApiKey, deleteApiKey
 import { PERMISSION_MODES } from '../services/execution/permissionModes';
 
 const DEFAULT_PREFS = {
+  theme_preference: 'auto',
   browser_access_enabled: false,
+  github_username: null,
+  filesystem_saf_uri: null,
   memory_enabled: true,
+  project_instructions: null,
+  auto_memory_notes: null,
   backend_mode: 'lan',
   backend_lan_url: null,
   backend_remote_url: null,
@@ -22,6 +27,9 @@ const DEFAULT_PREFS = {
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
+  discovery_worker_url: null,
+  discovery_device_id: null,
+  browser_router_url: null, // dead field - see database.js's DEFAULT_PREFS_ROW comment
 };
 
 export const usePreferencesStore = create((set, get) => ({
@@ -181,6 +189,33 @@ export const usePreferencesStore = create((set, get) => ({
     const prev = get().preferences;
     set({ preferences: { ...prev, otel_export_endpoint: url } }); // optimistic
     const result = await updatePreferences({ otel_export_endpoint: url });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+    return result;
+  },
+
+  /**
+   * Auto-discovery pair (see src/services/backend/discoveryClient.js) -
+   * set together, once, from the values
+   * server/scripts/setup-permanent-tunnel.js prints after publishing to
+   * a deployed discovery Worker. Both null means discovery is off and
+   * backend_remote_url works exactly as it always has.
+   */
+  async setDiscoveryWorkerUrl(url) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, discovery_worker_url: url } }); // optimistic
+    const result = await updatePreferences({ discovery_worker_url: url });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+    return result;
+  },
+
+  async setDiscoveryDeviceId(deviceId) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, discovery_device_id: deviceId } }); // optimistic
+    const result = await updatePreferences({ discovery_device_id: deviceId });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }

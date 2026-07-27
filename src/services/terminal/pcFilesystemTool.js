@@ -23,7 +23,7 @@
 import {
   writePcFile, mkdirPc, editPcFile, deletePcEntry, listPcDirectory, readPcFile,
   renamePcEntry, movePcEntry, writeBinaryPcFile, grepPc, globPc, listPcCheckpoints, rewindPcCheckpoint,
-  zipPcFolder, extractPcZip,
+  zipPcFolder, extractPcZip, previewPcChanges,
 } from '../backend/backendClient';
 import { base64ToUtf8 } from '../shared/base64Utils';
 
@@ -102,6 +102,22 @@ export async function scaffoldProject(folderPath, files) {
  */
 export async function editFile(path, oldString, newString, options = {}) {
   const result = await editPcFile(path, oldString, newString, options);
+  if (!result.success) return { success: false, data: null, error: result.error };
+  return { success: true, data: result.data, error: null };
+}
+
+/**
+ * Computes a real diff preview across several proposed changes -
+ * BEFORE anything is written - so a risky multi-file operation can be
+ * reviewed as one combined summary rather than discovered file-by-file
+ * after the fact. Each entry is validated against the file's actual
+ * current content on the PC (same rules a real edit/create/delete would
+ * enforce), so `ok: true` on every entry means the real changes will
+ * genuinely apply cleanly, not just that the request was well-formed.
+ * @param {Array<{path: string, type: 'edit'|'create'|'delete', oldString?: string, newString?: string}>} changes
+ */
+export async function previewChanges(changes) {
+  const result = await previewPcChanges(changes);
   if (!result.success) return { success: false, data: null, error: result.error };
   return { success: true, data: result.data, error: null };
 }

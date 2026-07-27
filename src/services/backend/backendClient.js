@@ -832,6 +832,19 @@ export async function editPcFile(relativePath, oldString, newString, options = {
 }
 
 /**
+ * Computes what a batch of proposed changes WOULD do across several
+ * files, without writing anything - the "diff preview before a risky
+ * multi-file edit" feature. Each entry is checked against the file's
+ * REAL current content on the PC, so a clean preview means the real
+ * changes will actually apply the same way.
+ * @param {Array<{path: string, type: 'edit'|'create'|'delete', oldString?: string, newString?: string}>} changes
+ * @returns {Promise<{success, data: {results, totalLinesAdded, totalLinesRemoved, fileCount, hasProblems}|null, error}>}
+ */
+export async function previewPcChanges(changes) {
+  return postPcFilesJson('/pc-fs/preview-changes', { changes }, 'preview the proposed changes');
+}
+
+/**
  * Deletes a file, or a folder and everything in it, on the PC via
  * /pc-fs/delete. No undo - same trust level as a terminal `rm`/`del`.
  * @param {string} relativePath - relative to PC_BRIDGE_ROOT

@@ -16,6 +16,7 @@ import { initReminderListeners, reconcileReminders } from './src/services/remind
 import { runSessionStartHooks } from './src/services/execution/hooksEngine';
 import { useChatStore } from './src/store/chatStore';
 import { usePreferencesStore } from './src/store/preferencesStore';
+import { refreshDiscoveredBackendUrl } from './src/services/backend/discoveryClient';
 import { usePlanStore } from './src/store/planStore';
 import { useThemeStore } from './src/store/themeStore';
 import { useTheme, useResolvedThemeMode } from './src/theme/useTheme';
@@ -64,7 +65,7 @@ function AppShell() {
   const [frameBase64, setFrameBase64] = useState(null);
   const [awaitingHuman, setAwaitingHuman] = useState(false);
   const [humanReason, setHumanReason] = useState(null);
-  const [browserTabs, setBrowserTabs] = useState([]); // [{tabId, url, title, active}] - for BrowserAgentScreen's address bar + tab strip
+  const [browserTabs, setBrowserTabs] = useState([]); // [{tabId, url, title, active}] - kept in sync from 'status' messages; feeds BrowserAgentScreen's address bar (shows the active tab's real URL)
   // Full-screen browser zoom, owned here since it's shared between
   // BrowserAgentPiP (renders the actually-zoomed stream) and
   // BrowserAgentScreen (renders the +/- controls that change it) - two
@@ -88,6 +89,12 @@ function AppShell() {
       }
       await loadThemePreference();
       await loadPreferences();
+      // Auto-discovery (see discoveryClient.js's own header) - a no-op
+      // unless discovery_worker_url + discovery_device_id are both set
+      // in Settings. Runs AFTER loadPreferences so it can read those
+      // two fields; silently keeps whatever backend_remote_url already
+      // had if the lookup fails, never blocks app startup on it.
+      refreshDiscoveredBackendUrl();
       await loadConversationList();
       // Surfaces any plan left running/paused/awaiting-approval when the
       // app was last closed (src/store/planStore.js's
@@ -169,6 +176,20 @@ function AppShell() {
     };
   }, []);
 
+  // Periodic re-check for auto-discovery (see discoveryClient.js) - the
+  // launch-time call above catches the common case (tunnel already
+  // changed before the app was opened), this catches the PC's tunnel
+  // being recreated WHILE the phone app is already open and sitting on
+  // an older hostname. A no-op every tick unless discovery is actually
+  // configured (see refreshDiscoveredBackendUrl's own early-return), so
+  // this costs nothing for anyone using a manually-entered URL.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      refreshDiscoveredBackendUrl();
+    }, 5 * 60 * 1000); // every 5 minutes - frequent enough to notice a tunnel change within one sitting, rare enough not to hammer the Worker
+    return () => clearInterval(interval);
+  }, []);
+
   // Re-attempts the connection whenever the backend connection settings
   // themselves change - the common first-run case is: launch the app
   // (no LAN/Remote URL set yet, so the effect above's connect() attempt
@@ -232,12 +253,14 @@ function AppShell() {
       setScreen('browserAgent');
       return;
     }
-    // No explicit url: this is the globe-icon tap from ChatScreen, which
-    // should TOGGLE between full-screen and PiP (tap again while already
-    // full-screen collapses back to chat + PiP), not always force
-    // full-screen. A url is only ever passed when something else (e.g. a
-    // chat action) explicitly wants full-screen opened, so that path still
-    // always goes full-screen.
+    // No explicit url: this is the globe icon's LONG-press from
+    // ChatScreen.js (a tap there now toggles browser_access_enabled
+    // instead - see that file's browserToggle TouchableOpacity), which
+    // should TOGGLE between full-screen and PiP (long-press again while
+    // already full-screen collapses back to chat + PiP), not always
+    // force full-screen. A url is only ever passed when something else
+    // (e.g. a chat action) explicitly wants full-screen opened, so that
+    // path still always goes full-screen.
     setScreen((prev) => (prev === 'browserAgent' ? 'chat' : 'browserAgent'));
   };
 
@@ -398,18 +421,24 @@ function AppShell() {
         onResumeAfterHuman={() => streamRef.current.resumeAfterHuman()}
       />
 
-      {/* Full-screen browser chrome (status strip, task input) - drawn as
-          chrome ONLY, layered on top of the BrowserAgentPiP above (later
-          in JSX order = painted on top) since it does not render its own
-          copy of the live view - it shares the same stream connection the
-          PiP already owns. Rendered once and kept mounted for the app's
-          lifetime unconditionally (same reasoning as BrowserAgentPiP
-          above - gating this on browser_access_enabled meant tapping
-          through to the full-screen view before that flag was ever set
-          rendered nothing at all), only hidden via pointerEvents + a
-          conditional wrapper style rather than being unmounted when
-          `screen` leaves 'browserAgent', so any in-progress typed task
-          text isn't lost on a quick back-and-forth. */}
+      {/* Full-screen browser chrome (just the task input bar now - see
+          BrowserAgentScreen.js's header for why the old status strip,
+          tab strip, address bar, zoom controls, and close button are
+          all gone) - drawn as chrome ONLY, layered on top of the
+          BrowserAgentPiP above (later in JSX order = painted on top)
+          since it does not render its own copy of the live view - it
+          shares the same stream connection the PiP already owns.
+          Rendered once and kept mounted for the app's lifetime
+          unconditionally (same reasoning as BrowserAgentPiP above -
+          gating this on browser_access_enabled meant tapping through to
+          the full-screen view before that flag was ever set rendered
+          nothing at all), only hidden via pointerEvents + a conditional
+          wrapper style rather than being unmounted when `screen` leaves
+          'browserAgent', so any in-progress typed task text isn't lost
+          on a quick back-and-forth. Leaving this screen is now the
+          Android hardware/gesture back button only (see
+          BrowserAgentScreen.js's own BackHandler effect) - onClose
+          below is what it calls. */}
       <View
         style={screen === 'browserAgent' ? StyleSheet.absoluteFill : styles.offscreen}
         pointerEvents={screen === 'browserAgent' ? 'box-none' : 'none'}
@@ -419,8 +448,6 @@ function AppShell() {
           isAgentRunning={isAgentRunning}
           awaitingHuman={awaitingHuman}
           tabs={browserTabs}
-          zoom={browserFullScreenZoom}
-          onZoomChange={setBrowserFullScreenZoom}
           onClose={handleCloseBrowserAgent}
         />
       </View>

@@ -23,6 +23,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { formatDiff } = require('./diffFormatter');
 
 // 5MB is generous for source files (html/css/js/json/etc.) - if a write
 // or edit needs more than that, something is probably wrong with the
@@ -420,11 +421,120 @@ function registerPcFilesRoute(app, config, log) {
       const priorState = { existed: true, contentB64: Buffer.from(current, 'utf8').toString('base64') };
       fs.writeFileSync(target, updated, 'utf8');
       const checkpointId = recordCheckpoint(root, { operation: 'edit', path: relPath, type: 'file', snapshot: priorState });
+      const diff = formatDiff(current, updated, relPath);
       log(`PC file bridge: edited ${target} (${occurrences} replacement${occurrences === 1 ? '' : 's'})`);
-      res.json({ path: relPath, replacements: replaceAll ? occurrences : 1, size: byteLength, checkpointId });
+      res.json({ path: relPath, replacements: replaceAll ? occurrences : 1, size: byteLength, checkpointId, diff: diff.unified, linesAdded: diff.linesAdded, linesRemoved: diff.linesRemoved });
     } catch (err) {
       res.status(500).json({ error: { message: err.message } });
     }
+  });
+
+  // POST /pc-fs/preview-changes  { changes: [{ path, oldString?, newString?, type: 'edit'|'create'|'delete' }] }
+  // READ-ONLY - computes what a batch of proposed changes WOULD do
+  // without writing anything, for the "diff preview before a risky
+  // multi-file edit" feature (see pcMultiFileDiffTool.js on the app
+  // side). Each entry is checked against the file's REAL current
+  // content (same oldString-must-match-exactly rule /pc-fs/edit
+  // enforces), so a preview that says "this will work" is trustworthy -
+  // it's running the exact same match logic the real edit would, just
+  // without the final fs.writeFileSync. A 'create' entry with a path
+  // that already exists, or an 'edit'/'delete' entry whose path doesn't
+  // exist, is reported as a problem in that entry rather than failing
+  // the whole preview - the point is to catch exactly these mistakes
+  // before anything real happens, not just before the easy cases.
+  app.post('/pc-fs/preview-changes', (req, res) => {
+    const changes = Array.isArray(req.body?.changes) ? req.body.changes : null;
+    if (!changes || !changes.length) {
+      return res.status(400).json({ error: { message: 'changes must be a non-empty array of {path, type, oldString?, newString?}.' } });
+    }
+
+    const results = [];
+    let totalLinesAdded = 0;
+    let totalLinesRemoved = 0;
+    let hasProblems = false;
+
+    for (const change of changes) {
+      const { path: relPath, type, oldString, newString } = change || {};
+      if (!relPath || !type) {
+        results.push({ path: relPath || '(missing path)', ok: false, problem: 'Each change needs a path and a type ("edit", "create", or "delete").' });
+        hasProblems = true;
+        continue;
+      }
+
+      const target = resolveInsideRoot(root, relPath);
+      if (!target) {
+        results.push({ path: relPath, ok: false, problem: 'Path is outside the allowed PC_BRIDGE_ROOT.' });
+        hasProblems = true;
+        continue;
+      }
+
+      const exists = fs.existsSync(target);
+
+      try {
+        if (type === 'create') {
+          if (exists) {
+            results.push({ path: relPath, ok: false, problem: 'This file already exists - use type "edit" instead, or this would overwrite it.' });
+            hasProblems = true;
+            continue;
+          }
+          const diff = formatDiff('', newString || '', relPath);
+          results.push({ path: relPath, ok: true, type: 'create', diff: diff.unified, linesAdded: diff.linesAdded, linesRemoved: 0 });
+          totalLinesAdded += diff.linesAdded;
+        } else if (type === 'delete') {
+          if (!exists) {
+            results.push({ path: relPath, ok: false, problem: 'This file does not exist - nothing to delete.' });
+            hasProblems = true;
+            continue;
+          }
+          const current = fs.statSync(target).isDirectory() ? '(a folder and everything inside it)' : fs.readFileSync(target, 'utf8');
+          const diff = formatDiff(current, '', relPath);
+          results.push({ path: relPath, ok: true, type: 'delete', diff: diff.unified, linesAdded: 0, linesRemoved: diff.linesRemoved });
+          totalLinesRemoved += diff.linesRemoved;
+        } else if (type === 'edit') {
+          if (!exists) {
+            results.push({ path: relPath, ok: false, problem: 'This file does not exist - use type "create" instead.' });
+            hasProblems = true;
+            continue;
+          }
+          if (fs.statSync(target).isDirectory()) {
+            results.push({ path: relPath, ok: false, problem: 'This is a folder, not a file - "edit" only applies to files.' });
+            hasProblems = true;
+            continue;
+          }
+          if (typeof oldString !== 'string' || !oldString.length) {
+            results.push({ path: relPath, ok: false, problem: 'oldString is required for an edit preview.' });
+            hasProblems = true;
+            continue;
+          }
+          const current = fs.readFileSync(target, 'utf8');
+          const occurrences = current.split(oldString).length - 1;
+          if (occurrences === 0) {
+            results.push({ path: relPath, ok: false, problem: 'oldString was not found in this file - the real edit would fail the same way.' });
+            hasProblems = true;
+            continue;
+          }
+          if (occurrences > 1) {
+            results.push({ path: relPath, ok: false, problem: `oldString appears ${occurrences} times in this file - not unique, the real edit would be rejected unless replaceAll is used.` });
+            hasProblems = true;
+            continue;
+          }
+          const updated = current.replace(oldString, newString || '');
+          const diff = formatDiff(current, updated, relPath);
+          results.push({ path: relPath, ok: true, type: 'edit', diff: diff.unified, linesAdded: diff.linesAdded, linesRemoved: diff.linesRemoved });
+          totalLinesAdded += diff.linesAdded;
+          totalLinesRemoved += diff.linesRemoved;
+        } else {
+          results.push({ path: relPath, ok: false, problem: `Unknown type "${type}" - must be "edit", "create", or "delete".` });
+          hasProblems = true;
+        }
+      } catch (err) {
+        results.push({ path: relPath, ok: false, problem: err.message });
+        hasProblems = true;
+      }
+    }
+
+    log(`PC file bridge: previewed ${changes.length} change(s) across ${new Set(changes.map((c) => c?.path)).size} file(s) - ${hasProblems ? 'with problems' : 'all clean'}`);
+    res.json({ results, totalLinesAdded, totalLinesRemoved, fileCount: changes.length, hasProblems });
   });
 
   // POST /pc-fs/delete  { path }

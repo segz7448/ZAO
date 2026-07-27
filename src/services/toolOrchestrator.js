@@ -47,6 +47,8 @@ import * as docxTool from './office/docxTool';
 import * as xlsxTool from './office/xlsxTool';
 import * as pptxTool from './office/pptxTool';
 import * as pcTerminalTool from './terminal/pcTerminalTool';
+import * as testRunnerTool from './terminal/testRunnerTool';
+import * as projectDecisionsTool from './terminal/projectDecisionsTool';
 import * as pcProcessTool from './terminal/pcProcessTool';
 import * as devPreviewTool from './terminal/devPreviewTool';
 import * as pcFilePullTool from './terminal/pcFilePullTool';
@@ -732,6 +734,50 @@ const TERMINAL_TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'pc_run_tests',
+      description: "Runs the project's real test suite on the PC and returns a STRUCTURED result (passed/failed/total counts, a list of which specific tests failed, allPassed) rather than raw text you'd have to parse yourself. Auto-detects the right command (npm test, pytest, go test, cargo test, phpunit) by checking the project's own files - package.json's test script, pytest.ini, go.mod, Cargo.toml, phpunit.xml - so you don't need to already know or guess which one applies. Pass an explicit `command` only to override detection (a specific test file, a non-standard script, a framework not auto-detected). ALWAYS run this after making a real code change to a project that has tests, before telling the person the change is done - a change that doesn't compile or breaks existing behavior should be caught here and fixed, not reported as finished. If it reports failures, read failureSummaries, fix the specific issue with pc_fs_edit_file, and run this again - don't just report the failures back to the person as if that were the end of the task.",
+      parameters: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: 'Folder to detect a test config in and run from. Omit to use the PC\'s configured project root.' },
+          command: { type: 'string', description: 'Optional - skip auto-detection and run this exact command instead.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_log_decision',
+      description: "Records WHY a real design/implementation choice was made into the project's own DECISIONS.md (created automatically if it doesn't exist yet, in the project's folder on the PC) - a per-project, append-only log of reasoning that would otherwise only exist in this one conversation and be lost the moment it ends. Call this whenever you make a choice a future session (or the person) would reasonably wonder about later: picking one library/approach over another, structuring code a non-obvious way for a real reason, a workaround for a real constraint. Don't log routine, obvious work (a straightforward CRUD file, a typo fix) - this is for decisions, not a changelog of every edit.",
+      parameters: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: "Project folder, relative to the PC's configured root. Omit for the root project." },
+          decision: { type: 'string', description: 'One line: what was decided/built, e.g. "Used SQLite instead of a flat JSON file for the cache layer".' },
+          reasoning: { type: 'string', description: 'WHY - the actual constraint or tradeoff that led to this choice.' },
+          alternativesConsidered: { type: 'string', description: 'Optional: what else was considered and why it was rejected.' },
+        },
+        required: ['decision', 'reasoning'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_read_decisions',
+      description: "Reads a project's DECISIONS.md - the log of why past choices were made (see pc_log_decision). Check this before making a change that might contradict or duplicate a past decision (\"did we already try this approach, and why did it not work?\") rather than re-deciding something from scratch that was already reasoned through.",
+      parameters: {
+        type: 'object',
+        properties: {
+          projectPath: { type: 'string', description: "Project folder, relative to the PC's configured root. Omit for the root project." },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'pc_list_directory',
       description: "Lists a folder on the PC (e.g. after running a build with terminal_pc_run_command) so you can see what it actually produced - node_modules, a built .apk, a bundle, etc. - before pulling a specific file down with pc_pull_file. Path is relative to the PC's configured project root; omit it to list that root. Files created by a PC command do NOT automatically appear on the phone - this is how you find them.",
       parameters: {
@@ -957,6 +1003,33 @@ const PC_FILESYSTEM_TOOL_SCHEMAS = [
           replaceAll: { type: 'boolean', description: 'Optional, defaults false. Set true if oldString intentionally appears more than once and every occurrence should change.' },
         },
         required: ['path', 'oldString', 'newString'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_preview_changes',
+      description: "Shows a real diff preview of what a BATCH of proposed edits/creates/deletes across several files would actually do, WITHOUT writing anything yet - each entry is checked against that file's real current content on the PC, the same way the real edit/create/delete would be, so a clean preview (every entry ok:true) means the real changes will genuinely apply, not just that the request looked reasonable. Use this before a risky multi-file change - renaming something used across many files, restructuring several modules together, anything where a mistake in one file is easy to miss among several at once - rather than making all the changes first and finding a problem afterward. After reviewing, make the real pc_fs_edit_file/pc_fs_create_file/pc_fs_delete calls to actually apply them - this tool never writes anything itself.",
+      parameters: {
+        type: 'object',
+        properties: {
+          changes: {
+            type: 'array',
+            description: 'The proposed changes to preview together.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+                type: { type: 'string', enum: ['edit', 'create', 'delete'] },
+                oldString: { type: 'string', description: 'Required when type is "edit" - must match the file\'s real current content exactly and uniquely.' },
+                newString: { type: 'string', description: 'The replacement text for "edit", or the full content for "create".' },
+              },
+              required: ['path', 'type'],
+            },
+          },
+        },
+        required: ['changes'],
       },
     },
   },
@@ -1819,6 +1892,23 @@ export const TOOL_REGISTRY = {
     run: (args) => pcTerminalTool.runCommand(args.command, { shell: args.shell || null, hostAccess: args.hostAccess === true, allowNetwork: args.allowNetwork === true }),
     label: (args) => `Ran on PC: ${args.command}`,
   },
+  pc_run_tests: {
+    run: (args) => testRunnerTool.runTests({ projectPath: args.projectPath || null, command: args.command || null }),
+    label: (args) => (args.command ? `Ran tests on PC: ${args.command}` : 'Ran the project\'s test suite on PC'),
+  },
+  pc_log_decision: {
+    run: (args) => projectDecisionsTool.recordDecision({
+      projectPath: args.projectPath || null,
+      decision: args.decision,
+      reasoning: args.reasoning,
+      alternativesConsidered: args.alternativesConsidered || null,
+    }),
+    label: (args) => `Logged decision: ${args.decision}`,
+  },
+  pc_read_decisions: {
+    run: (args) => projectDecisionsTool.readDecisions({ projectPath: args.projectPath || null }),
+    label: () => 'Read the project\'s decisions log',
+  },
   pc_process_start: {
     run: (args) => pcProcessTool.startProcess(args.command, { shell: args.shell || null, cwd: args.cwd || null, label: args.label || null }),
     label: (args) => `Started background process on PC: ${args.command}`,
@@ -1870,6 +1960,10 @@ export const TOOL_REGISTRY = {
   pc_fs_edit_file: {
     run: (args) => pcFilesystemTool.editFile(args.path, args.oldString, args.newString, { replaceAll: !!args.replaceAll }),
     label: (args) => `Edited ${args.path} on PC`,
+  },
+  pc_fs_preview_changes: {
+    run: (args) => pcFilesystemTool.previewChanges(args.changes || []),
+    label: (args) => `Previewed ${(args.changes || []).length} change(s) across ${new Set((args.changes || []).map((c) => c.path)).size} file(s)`,
   },
   pc_fs_delete: {
     run: (args) => pcFilesystemTool.deleteEntry(args.path),
@@ -2071,6 +2165,9 @@ function eventTypeForTool(functionName) {
     pptx_create: 'file_created',
     terminal_check_status: 'terminal_attempted',
     terminal_pc_run_command: 'terminal_attempted',
+    pc_run_tests: 'terminal_attempted',
+    pc_log_decision: 'file_modified',
+    pc_read_decisions: 'file_browsed',
     dev_server_start: 'terminal_attempted',
     dev_preview_screenshot: 'terminal_attempted',
     dev_server_stop: 'terminal_attempted',
@@ -2080,6 +2177,7 @@ function eventTypeForTool(functionName) {
     pc_fs_create_folder: 'file_created',
     pc_fs_create_file: 'file_created',
     pc_fs_edit_file: 'file_modified',
+    pc_fs_preview_changes: 'file_browsed',
     pc_fs_delete: 'file_deleted',
     pc_fs_read_file: 'file_browsed',
     pc_fs_rename: 'file_modified',
@@ -2091,8 +2189,6 @@ function eventTypeForTool(functionName) {
     pc_fs_glob: 'file_browsed',
     pc_fs_list_checkpoints: 'file_browsed',
     pc_fs_rewind_checkpoint: 'file_modified',
-    pc_fs_zip: 'file_created',
-    pc_fs_extract_zip: 'file_created',
     pc_git_init: 'file_modified',
     pc_git_status: 'file_browsed',
     pc_git_add: 'file_modified',
@@ -2214,6 +2310,12 @@ FILE AND FOLDER REQUESTS, INCLUDING NON-CODE ONES: default to the PC Filesystem 
 GETTING A FINISHED PC PROJECT/FILE ONTO THE PHONE (the person asks to "download it", "send me the file", "give me the output", "let me see/save it" - anything implying they want to actually receive what was built on the PC): this is always a two-step chain, never assume pc_fs_*/terminal_pc_run_command alone already put it somewhere the person can access - PC work stays on the PC's own disk until explicitly pulled. (1) If it's a whole project/folder, pc_fs_zip it into one file first; if it's already a single file (a build output, a generated document), skip straight to step 2. (2) pc_pull_file to copy those exact bytes from the PC into the phone's own SAF-granted folder (Settings > Filesystem) - that's what actually makes it a real file the person can open, download from, or share on their phone; it is NOT automatically there just because pc_fs_zip or a build command finished. Tell the person plainly if step 2 fails because no SAF folder is granted yet, rather than reporting the task as done.
 
 CODING REQUESTS (a website, an app, a script, anything with real source files - HTML/CSS/JS, components, modules): use the PC Filesystem tools (pc_fs_*), NOT fs_* - fs_* writes to the phone, a different machine Terminal can't see or build from. For a new project, call pc_fs_scaffold_project once with the folder name and every file's path+content together, so the folder and all its files land in one place before you ever need to npm install or run anything. Only fall back to pc_fs_create_folder + separate pc_fs_create_file calls if you don't have the full file list up front (e.g. the person wants to see one file before you write the rest). Once code exists, pc_fs_read_file then pc_fs_edit_file makes one precise, targeted change rather than rewriting a whole file - use pc_fs_grep to find where something is defined/used and pc_fs_glob to find files by name pattern first. pc_fs_write_binary is for anything that isn't UTF-8 text (a generated icon/favicon/image) - pc_fs_create_file would corrupt binary bytes. pc_fs_rename/pc_fs_move reorganize an existing project without a full delete+recreate. pc_fs_zip packages a finished project into a single .zip (e.g. before pc_pull_file brings it down to the phone, or just to hand the person something shareable); pc_fs_extract_zip unpacks a downloaded template or starter project - the PC has no zip/unzip of its own to shell out to via terminal_pc_run_command, so use these instead of a terminal command. Every mutating pc_fs_* call snapshots the file first, so if an edit or delete goes wrong, pc_fs_list_checkpoints then pc_fs_rewind_checkpoint puts it back - mention this to the person if something needs undoing rather than trying to reconstruct it from memory. fs_* stays for the phone side: files the person already has on-device, or something you're explicitly asked to save to their phone rather than build/run.
+
+VERIFYING CODE ACTUALLY WORKS: after writing or changing real source code in a project that has tests, call pc_run_tests before telling the person the work is done - it auto-detects the right test command and returns structured pass/fail results, not just raw text. If it reports failures, read failureSummaries, fix the specific issue with pc_fs_edit_file, and run it again - a change that breaks existing tests is not finished just because the files were written.
+
+RISKY MULTI-FILE CHANGES: before making the same kind of change across several files at once - renaming something used throughout a project, restructuring how multiple modules relate, any change where a mistake in one of several files is easy to miss among the rest - call pc_fs_preview_changes with all the proposed edits together first. It checks each one against the file's real current content and shows what would actually happen, all before anything is written, so a problem (an oldString that doesn't match, a file that doesn't exist) surfaces as a preview instead of a partially-applied change you have to untangle afterward. Once every entry previews clean, make the real pc_fs_edit_file/pc_fs_create_file/pc_fs_delete calls to apply them. Skip this for a single, isolated file change - the preview step earns its cost specifically when several files are changing together for one reason.
+
+RECORDING WHY, NOT JUST WHAT: when you make a real design/implementation choice during coding work - picking one library or approach over another, structuring something a non-obvious way for a real reason, working around a genuine constraint - call pc_log_decision so that reasoning survives past this one conversation, in the project's own DECISIONS.md on the PC. Don't log routine, self-explanatory work (a plain CRUD file, a typo fix) - this is for choices a future session or the person would otherwise have to reconstruct or ask about again. Call pc_read_decisions before a change that might revisit old ground, so you're not re-deciding something already reasoned through.
 
 VERSION CONTROL for a PC project: use pc_git_* (a real local repo via execFile, not a shell string), not GitHub's github_commit_files - that API tool never touches a local checkout, so it and a real git repo on the PC would silently drift apart if mixed for the same project. pc_git_init once at the start, pc_git_status before deciding what to stage, pc_git_add then pc_git_commit for each meaningful chunk of work (write real, specific commit messages, not "update"), and pc_git_push when the person wants it on GitHub (pc_git_remote_add first if origin isn't set yet - use github_create_repo to actually create the empty GitHub repo, then point pc_git_remote_add's url at it).
 

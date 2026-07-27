@@ -15,17 +15,20 @@
  * a small peek at what the agent's doing, not a second screen competing
  * with the conversation.
  *
- * ZOOM: both this PiP and full-screen mode start at 50% (zoomed out) on
- * launch - see BrowserStreamView.js's `zoom` prop for what that actually
- * does (a display-side scale of the streamed frame, not a real page
- * zoom). Full-screen zoom is owned by the common parent (App.js, as
- * `browserFullScreenZoom`/`setBrowserFullScreenZoom`) rather than here,
- * since BrowserAgentScreen (a sibling, chrome-only component) renders
- * the actual +/- controls for it but doesn't render the stream itself -
- * both need to agree on the same value. The compact PiP view below stays
- * fixed at DEFAULT_ZOOM with no controls of its own - it's too small a
- * window for zoom controls to be worth the clutter, and tapping it
- * expands to full screen where adjusting zoom actually makes sense.
+ * ZOOM: the PiP starts zoomed OUT (PIP_ZOOM, 50%) since it's a small
+ * floating window and fitting more of the page in frame matters more
+ * than detail; full-screen mode starts at 100% (owned by the common
+ * parent, App.js, as `browserFullScreenZoom`/`setBrowserFullScreenZoom`)
+ * since a full screen has the room for detail. See BrowserStreamView.js's
+ * `zoom` prop for what zoom actually does (a display-side scale of the
+ * streamed frame, not a real page zoom). Full-screen's zoom lives in
+ * App.js rather than here since BrowserAgentScreen (a sibling, chrome-only
+ * component) used to render +/- controls for it - both need to agree on
+ * the same value even now that those controls are gone from the chrome.
+ * The compact PiP view below stays fixed at PIP_ZOOM with no controls of
+ * its own - it's too small a window for zoom controls to be worth the
+ * clutter, and tapping/long-pressing it expands to full screen where
+ * adjusting zoom actually makes sense.
  *
  * No step-snapshot capture here anymore (the old version used
  * react-native-view-shot to screenshot its own WebView after each step) -
@@ -41,7 +44,8 @@ const SCREEN = Dimensions.get('window');
 const PIP_WIDTH = Math.round(SCREEN.width * 0.4);
 const PIP_HEIGHT = Math.round(PIP_WIDTH * (4 / 3)); // 3:4 - compact, not the full streamed-page shape
 const EDGE_MARGIN = 12;
-const DEFAULT_ZOOM = 1; // both PiP and full-screen start at 100% on launch
+const PIP_ZOOM = 0.5; // the floating PiP window is small - zoomed out so the whole page fits in frame, independent of full-screen's own zoom (see App.js's browserFullScreenZoom, which defaults to 100% since a full screen has room for detail)
+const FULL_SCREEN_ZOOM_FALLBACK = 1; // only used if a caller doesn't pass fullScreenZoom at all - App.js always does in practice
 
 const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
   const {
@@ -51,7 +55,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
     awaitingHuman = false,
     humanReason = null,
     fullScreen = false,
-    fullScreenZoom = DEFAULT_ZOOM,
+    fullScreenZoom = FULL_SCREEN_ZOOM_FALLBACK,
     frameBase64 = null,
     connected = false,
     connectionError = null,
@@ -131,7 +135,7 @@ const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {
 
       {!minimized && (
         <View style={styles.viewportWrap}>
-          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} connected={connected} connectionError={connectionError} isRunning={isRunning} zoom={DEFAULT_ZOOM} />
+          <BrowserStreamView frameBase64={frameBase64} stream={stream} interactive={false} connected={connected} connectionError={connectionError} isRunning={isRunning} zoom={PIP_ZOOM} />
         </View>
       )}
     </Animated.View>

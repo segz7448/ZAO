@@ -23,12 +23,18 @@ REM       the app's Settings > Backend Connection screen.
 REM
 REM  EVERY TIME AFTER THAT: just double-click start.bat.
 REM
-REM  When this window shows a line like:
+REM  By default this uses a Cloudflare Quick Tunnel, which gets a NEW
+REM  random URL every time it starts:
 REM    https://random-words-1234.trycloudflare.com
-REM  that's your rotating remote URL - copy it into the app's
-REM  Settings > Backend Connection > Remote URL field. It changes
-REM  every time you restart this script, so you'll need to update
-REM  it in the app each time you're about to leave home WiFi.
+REM  Copy that into the app's Settings > Backend Connection > Remote URL
+REM  each time you restart this script.
+REM
+REM  WANT A URL THAT NEVER CHANGES INSTEAD? Run this once:
+REM    node scripts/setup-permanent-tunnel.js
+REM  (needs a domain in a Cloudflare account + an API token - the script
+REM  explains exactly what to do). Once that's done, start.bat
+REM  automatically detects it and uses your permanent URL from then on -
+REM  no more copying a new URL in after every restart.
 REM ============================================================
 
 setlocal
@@ -70,11 +76,22 @@ REM tries to point at it.
 timeout /t 3 /nobreak >nul
 
 if not defined SKIP_TUNNEL (
-    echo [ZAO] Starting Cloudflare Quick Tunnel...
-    echo [ZAO] Watch this new window for your remote URL - it looks like:
-    echo [ZAO]   https://random-words-1234.trycloudflare.com
-    echo [ZAO] Copy that into the app's Settings ^> Backend Connection ^> Remote URL.
-    start "ZAO Cloudflare Tunnel" cmd /k ""%CLOUDFLARED_CMD%" tunnel --url http://localhost:8080"
+    if exist "%~dp0tunnel-config.json" (
+        echo [ZAO] Permanent tunnel found - starting named Cloudflare Tunnel...
+        for /f "usebackq tokens=* delims=" %%h in (`node -e "console.log(JSON.parse(require('fs').readFileSync('%~dp0tunnel-config.json','utf8')).hostname)"`) do set "ZAO_TUNNEL_HOSTNAME=%%h"
+        for /f "usebackq tokens=* delims=" %%n in (`node -e "console.log(JSON.parse(require('fs').readFileSync('%~dp0tunnel-config.json','utf8')).tunnelName)"`) do set "ZAO_TUNNEL_NAME=%%n"
+        for /f "usebackq tokens=* delims=" %%c in (`node -e "console.log(JSON.parse(require('fs').readFileSync('%~dp0tunnel-config.json','utf8')).credentialsFile)"`) do set "ZAO_TUNNEL_CREDS=%%c"
+        echo [ZAO] Your permanent URL: https://%ZAO_TUNNEL_HOSTNAME%
+        echo [ZAO] This does not change - no need to update Settings again.
+        start "ZAO Cloudflare Tunnel" cmd /k ""%CLOUDFLARED_CMD%" tunnel --credentials-file "%ZAO_TUNNEL_CREDS%" --url http://localhost:8080 run %ZAO_TUNNEL_NAME%"
+    ) else (
+        echo [ZAO] Starting Cloudflare Quick Tunnel...
+        echo [ZAO] Watch this new window for your remote URL - it looks like:
+        echo [ZAO]   https://random-words-1234.trycloudflare.com
+        echo [ZAO] Copy that into the app's Settings ^> Backend Connection ^> Remote URL.
+        echo [ZAO] Tip: run "node scripts\setup-permanent-tunnel.js" once to get a URL that never changes.
+        start "ZAO Cloudflare Tunnel" cmd /k ""%CLOUDFLARED_CMD%" tunnel --url http://localhost:8080"
+    )
 )
 
 echo.

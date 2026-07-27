@@ -109,10 +109,17 @@ opens two windows:
   `llama-server is ready after N health check(s)` before chatting.
 - **ZAO Cloudflare Tunnel** - prints a URL like
   `https://random-words-1234.trycloudflare.com`. This **rotates every
-  restart** (it's a free Quick Tunnel, not a permanent named tunnel, which
-  would require owning a domain) - copy the fresh URL into the app's
-  Settings > Backend Connection > Remote URL field before using Remote
-  mode away from home.
+  restart** (it's a free Quick Tunnel) - copy the fresh URL into the
+  app's Settings > Backend Connection > Remote URL field before using
+  Remote mode away from home.
+
+  Want a URL that never changes instead? Run
+  `node scripts/setup-permanent-tunnel.js` once - it needs a domain in a
+  Cloudflare account and an API token (the script walks you through
+  getting one), and automates creating a real named tunnel + DNS record
+  via Cloudflare's API. Once set up, `start.bat` detects it automatically
+  and every future restart reuses the same permanent URL - no more
+  copying a new one in each time.
 
 Leave both windows running, then open ZAO on your phone.
 

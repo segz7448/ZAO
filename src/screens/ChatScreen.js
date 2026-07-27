@@ -744,12 +744,12 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
             { backgroundColor: theme.surfaceAlt },
             preferences.browser_access_enabled && styles.browserToggleActive,
           ]}
-          onPress={() => onOpenBrowserAgent?.()}
-          onLongPress={() => setBrowserAccessEnabled(!preferences.browser_access_enabled)}
+          onPress={() => setBrowserAccessEnabled(!preferences.browser_access_enabled)}
+          onLongPress={() => onOpenBrowserAgent?.()}
           hitSlop={4}
           accessibilityRole="button"
           accessibilityState={{ selected: !!preferences.browser_access_enabled }}
-          accessibilityLabel="Open the live browser view. Long-press to toggle browser access."
+          accessibilityLabel="Toggle browser access on or off. Long-press to open the live browser view."
         >
           <Ionicons
             name="globe-outline"

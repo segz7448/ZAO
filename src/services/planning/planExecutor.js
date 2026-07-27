@@ -51,6 +51,7 @@ import {
   startStepAction,
   completeStepAction,
   logStepReasoning,
+  getPreferences,
 } from '../../db/database';
 import { TOOL_REGISTRY } from '../toolOrchestrator';
 import { checkStepResourceReadiness } from './resourcePlanner';
@@ -129,6 +130,24 @@ export function computeReadySteps(steps) {
 }
 
 /**
+ * pc_log_decision reuses fs_create_file's target=path/content=text shape
+ * (see executionPlanner.js's own prompt comment) as
+ * target=decision/content=reasoning, rather than the plan-step schema
+ * growing a whole extra pair of fields just for this one tool. The
+ * generic args-building in runStepTool only ever populates
+ * path/target/name from step.target - it has no way to know THIS
+ * tool's actual parameter names are `decision`/`reasoning`, so without
+ * this translation the real call would always receive
+ * decision:undefined, reasoning:undefined and fail its own
+ * required-field check every single time a PLAN (as opposed to a
+ * direct chat tool-call, which passes real named arguments) tried to
+ * use it - a real bug this function exists to fix.
+ */
+export function translatePcLogDecisionArgs(step, baseArgs) {
+  return { ...baseArgs, decision: step.target, reasoning: baseArgs.content || null, projectPath: baseArgs.projectPath || null };
+}
+
+/**
  * Runs one step's actual tool call via TOOL_REGISTRY - the same
  * function map toolOrchestrator.js's own loop uses. A plan step's
  * `action` should match a TOOL_REGISTRY key exactly (executionPlanner.js
@@ -137,6 +156,33 @@ export function computeReadySteps(steps) {
  * "couldn't resolve" failure rather than a crash.
  */
 async function runStepTool(step, planId, { agentSession = null } = {}) {
+  // ---- Planner failure: executionPlanner.js couldn't get a real,
+  // parseable step out of the model for this unit of work (backend
+  // unreachable, or a response that never resolved to valid JSON even
+  // after its balanced-object extraction - see
+  // executionPlanner.js's fallbackStepForUnit doc for the full story).
+  // Fail this step HONESTLY rather than silently attempting a tool call
+  // with action:null/target:null, which used to run (or silently no-op)
+  // while the model still wrote a plausible "done" summary afterward -
+  // exactly the "it says it's finished but it isn't" / "it explains how
+  // to do it myself instead of doing it" failure this flag exists to
+  // stop. A real failure here lets recoveryPlanner.js actually retry the
+  // unit or surface it to the person, instead of the plan quietly
+  // limping along on a step that never did anything.
+  let plannedDetails = {};
+  try {
+    plannedDetails = step.details_json ? JSON.parse(step.details_json) : {};
+  } catch (err) {
+    plannedDetails = {};
+  }
+  if (plannedDetails.plannerFailed) {
+    return {
+      success: false,
+      noRetry: false,
+      error: `The planner couldn't produce a real action for "${step.description}" - the model's response for this step wasn't usable. Retrying should ask it again.`,
+    };
+  }
+
   // ---- Browser domain: no TOOL_REGISTRY entry exists for this - browsing
   // runs through the live PC agent session (Playwright, server/browserAgent.js),
   // same mechanism orchestrator.js's ad-hoc chat path uses, not a
@@ -159,6 +205,10 @@ async function runStepTool(step, planId, { agentSession = null } = {}) {
     args = { path: step.target, target: step.target, name: step.target, ...details, ...(step.parsedArgs || {}) };
   } catch (err) {
     args = { path: step.target, target: step.target };
+  }
+
+  if (resolvedToolName === 'pc_log_decision') {
+    args = translatePcLogDecisionArgs(step, args);
   }
 
   // fs_create_file with no content isn't a tool-call bug to retry - it's
@@ -257,11 +307,22 @@ async function runBrowserStep(step, planId, agentSession) {
 }
 
 /** Best-effort guess if a step's literal `action` string doesn't exactly match a TOOL_REGISTRY key - tries the most common domain-default action so a near-miss from the model doesn't immediately fail the step. */
-function normalizeActionGuess(step) {
+export function normalizeActionGuess(step) {
   const domainDefaults = {
     files: 'fs_create_file',
     github: 'github_commit_files',
     terminal: 'terminal_pc_run_command',
+    // "time" and "search" each map to exactly one real tool - unlike
+    // files/github/terminal (many possible actions, so a wrong guess
+    // there needs a real re-plan), a wrong action name in these two
+    // domains almost certainly just means the model meant the one tool
+    // that domain exists for (e.g. "get_time", "current_time" instead of
+    // "time_get_current"), so defaulting here is safe insurance rather
+    // than failing a step that would otherwise need a re-plan for no
+    // real ambiguity.
+    time: 'time_get_current',
+    search: 'web_search',
+    test: 'pc_run_tests',
   };
   return domainDefaults[step.domain] || step.action;
 }
@@ -301,6 +362,21 @@ export async function runExecutionPlan(planId, options = {}) {
   }
 
   await updatePlanStatus(planId, PLAN_STATUS.RUNNING);
+
+  // Read once per run, not per step - permission_mode doesn't change
+  // mid-execution, and this loop can iterate many times for a
+  // multi-step plan. 'auto'/'bypassPermissions' skip the is_risky pause
+  // below entirely, same reasoning as backendBrain.js's plan-level gate:
+  // someone who chose auto-run doesn't expect ANY step, risky or not,
+  // to stop and wait, given ZAO's own file/git checkpoints already make
+  // undoing a bad step cheap. Without this, backendBrain.js's plan-level
+  // bypass only skipped the FIRST pause (before any step ran) - this
+  // loop's own is_risky check is a second, independent gate that ran
+  // regardless of mode until now, which is exactly why auto mode still
+  // stopped on the very first risky step of a plan.
+  const prefsResult = await getPreferences().catch(() => null);
+  const permissionMode = prefsResult?.data?.permission_mode || 'default';
+  const skipsRiskGate = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
 
   // Loop: each pass re-reads the plan (cheap - local sqlite), computes
   // which steps are ready, and runs the first ready one. Re-reading
@@ -359,8 +435,8 @@ export async function runExecutionPlan(planId, options = {}) {
 
     const step = ready[0];
 
-    // ---- Risk gate (Phase 1 contract, unchanged) ----
-    if (step.is_risky) {
+    // ---- Risk gate (Phase 1 contract, unchanged for default/acceptEdits/plan modes) ----
+    if (step.is_risky && !skipsRiskGate) {
       await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL });
       onAwaitingApproval?.(step);
       await updatePlanStatus(planId, PLAN_STATUS.AWAITING_APPROVAL);
@@ -388,15 +464,21 @@ export async function runExecutionPlan(planId, options = {}) {
       // Re-read the plan so the step just marked 'done' above is
       // reflected in what evaluateCheckpointPressure() sees - the `plan`
       // object in this closure was fetched before this step ran.
-      const refreshedForCheckpoint = await getPlan(planId);
-      if (refreshedForCheckpoint.success && refreshedForCheckpoint.data) {
-        const evaluation = evaluateCheckpointPressure(refreshedForCheckpoint.data);
-        if (evaluation.shouldSuggest) {
-          const record = buildCheckpointRecord(evaluation);
-          await recordCheckpointSuggestion(planId, record);
-          await updatePlanStatus(planId, PLAN_STATUS.PAUSED);
-          onCheckpointSuggested?.(evaluation);
-          return { success: true, status: PLAN_STATUS.PAUSED, error: null, checkpoint: evaluation };
+      // Skipped entirely in auto/bypassPermissions, same as the risk
+      // gate above - this is a proactive "you may want to check in"
+      // pause rather than a risk approval, but it still stops the plan
+      // and waits, which is exactly what auto mode is for not doing.
+      if (!skipsRiskGate) {
+        const refreshedForCheckpoint = await getPlan(planId);
+        if (refreshedForCheckpoint.success && refreshedForCheckpoint.data) {
+          const evaluation = evaluateCheckpointPressure(refreshedForCheckpoint.data);
+          if (evaluation.shouldSuggest) {
+            const record = buildCheckpointRecord(evaluation);
+            await recordCheckpointSuggestion(planId, record);
+            await updatePlanStatus(planId, PLAN_STATUS.PAUSED);
+            onCheckpointSuggested?.(evaluation);
+            return { success: true, status: PLAN_STATUS.PAUSED, error: null, checkpoint: evaluation };
+          }
         }
       }
 
@@ -514,14 +596,91 @@ async function handleStepFailure(plan, step, result, { onStep }) {
 
     case RECOVERY_STRATEGIES.ASK_PERSON:
     default: {
+      const askReason = decision.reasoning || errorText(result.error);
       await updatePlanStep(step.id, planId, {
         status: STEP_STATUS.AWAITING_APPROVAL,
-        errorMessage: decision.reasoning || result.error,
+        errorMessage: askReason,
       });
       await resolveRecoveryAttempt(attemptRecord.id, 'asked_person');
-      onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: result.error });
+      onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: askReason });
       return 'ask_person';
     }
   }
+}
+
+/**
+ * ============================================================
+ * PERSON-DRIVEN RESUME ACTIONS
+ * ============================================================
+ * The four functions below are what planStore.js's approveStep/
+ * rejectStep/acceptCheckpoint/dismissCheckpoint (in turn called from
+ * PlanScreen.js's Approve/Skip/checkpoint buttons - see App.js's
+ * usePlanStore() destructuring) actually call. Each one resolves
+ * whatever's blocking the plan for exactly the reason the button says,
+ * then calls runExecutionPlan() again to pick the loop back up - the
+ * SAME resumability runExecutionPlan() already has for a reopened app
+ * (it re-reads plan+steps from sqlite rather than trusting anything held
+ * in memory), so "resume after a person's decision" and "resume after
+ * reopening the app mid-plan" are the same code path, not two.
+ */
+
+/**
+ * PlanScreen.js's "Approve & run" button on a step paused by
+ * is_risky (the risk gate above) or a recovery escalation
+ * (RECOVERY_STRATEGIES.ASK_PERSON) - both leave a step at
+ * awaiting_approval, which is why one function handles both origins
+ * rather than needing to know which one paused it.
+ *
+ * @param {object} step - the awaiting_approval step object PlanScreen.js
+ *   already has in hand (from activePlan.steps)
+ * @param {string} planId
+ * @param {object} options - forwarded to runExecutionPlan (githubToken,
+ *   agentSession, onStep, onAwaitingApproval, onCheckpointSuggested,
+ *   shouldContinue)
+ */
+export async function approveStepAndResume(step, planId, options = {}) {
+  await updatePlanStep(step.id, planId, { status: STEP_STATUS.PENDING, errorMessage: null });
+  return runExecutionPlan(planId, options);
+}
+
+/**
+ * PlanScreen.js's "Skip" button on an awaiting_approval step - the
+ * person declining a risky action or a recovery escalation, rather than
+ * approving it. Marked SKIPPED (not FAILED) since this is a deliberate
+ * choice, not an error - mirrors RECOVERY_STRATEGIES.SKIP_AND_CONTINUE's
+ * own status choice for the same reason. Steps depending on this one
+ * will be marked BLOCKED the next time runExecutionPlan()'s loop
+ * computes ready/blocked steps, same as any other unmet dependency.
+ */
+export async function rejectStepAndResume(step, planId, options = {}) {
+  await updatePlanStep(step.id, planId, {
+    status: STEP_STATUS.SKIPPED,
+    errorMessage: 'Skipped by person (declined at approval).',
+  });
+  return runExecutionPlan(planId, options);
+}
+
+/**
+ * PlanScreen.js's "Mark checkpoint & continue" button - the person has
+ * actually verified/tested what's accumulated so far. Resets
+ * checkpointBalancer.js's pressure clock (moves last_checkpoint_at to
+ * now via resolveCheckpointSuggestion's 'accepted' path) and resumes.
+ */
+export async function acceptCheckpointAndResume(planId, options = {}) {
+  await resolveCheckpointSuggestion(planId, 'accepted');
+  await updatePlanStatus(planId, PLAN_STATUS.RUNNING);
+  return runExecutionPlan(planId, options);
+}
+
+/**
+ * PlanScreen.js's "Not now" / dismiss button on a checkpoint suggestion
+ * - explicitly NOT resetting the pressure clock (resolveCheckpointSuggestion's
+ * 'dismissed' path), so the same accumulated pressure carries forward
+ * and will likely suggest again soon rather than going quiet for good.
+ */
+export async function dismissCheckpointAndResume(planId, options = {}) {
+  await resolveCheckpointSuggestion(planId, 'dismissed');
+  await updatePlanStatus(planId, PLAN_STATUS.RUNNING);
+  return runExecutionPlan(planId, options);
 }
   
