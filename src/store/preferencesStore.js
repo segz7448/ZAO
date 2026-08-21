@@ -24,6 +24,7 @@ const DEFAULT_PREFS = {
   backend_lan_url: null,
   backend_remote_url: null,
   backend_auth_token: null,
+  model_api_key: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
@@ -151,6 +152,24 @@ export const usePreferencesStore = create((set, get) => ({
     const prev = get().preferences;
     set({ preferences: { ...prev, backend_auth_token: token } }); // optimistic
     const result = await updatePreferences({ backend_auth_token: token });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+    return result;
+  },
+
+  /**
+   * The API key for the cloud-hosted model (Qwen3-Coder-30B-A3B-Instruct,
+   * served via Alibaba Cloud Model Studio / DashScope). Distinct from
+   * backend_auth_token: that's a self-issued secret gating access to the
+   * person's own VM, this is the actual third-party key the VM needs to
+   * call the model provider. Sent as its own header on every backend
+   * request - see backendClient.js's authHeaders().
+   */
+  async setModelApiKey(key) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, model_api_key: key } }); // optimistic
+    const result = await updatePreferences({ model_api_key: key });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }

@@ -14,7 +14,6 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { usePreferencesStore } from '../store/preferencesStore';
-import { refreshDiscoveredBackendUrl } from '../services/backend/discoveryClient';
 import { useThemeStore } from '../store/themeStore';
 import { useTheme } from '../theme/useTheme';
 import { checkBackendHealth } from '../services/backend/backendClient';
@@ -214,55 +213,38 @@ function FilesystemAccessSection({ preferences, theme }) {
 }
 
 /**
- * Backend connection section - the backend now runs on the person's PC
- * (see /server in the repo root, started via start.bat) instead of
- * on-device in Termux. This section covers everything needed to reach it:
- *   - LAN / Remote toggle (manual, not auto-detected - see
- *     backendClient.js for why)
- *   - LAN URL: the PC's local IP:port, e.g. http://192.168.1.42:8080
- *   - Remote URL: the Cloudflare Quick Tunnel URL shown in the PC's
- *     "ZAO Cloudflare Tunnel" window on startup. This ROTATES every time
- *     start.bat is re-run (free *.trycloudflare.com URL, not a permanent
- *     named tunnel), so it needs re-pasting here each time before Remote
- *     mode will work again.
- *   - Auth token: must match AUTH_TOKEN in the PC's server/config.js.
- * Also covers the PC terminal tool, which runs through this same
- * connection (cmd.exe/PowerShell/Git Bash/Python on the PC via
- * /terminal/run) - the only terminal ZAO has. There is no on-device
+ * Backend connection section - the backend now runs 24/7 on the person's
+ * own Alibaba Cloud VM (FastAPI/uvicorn) instead of a home PC. No more
+ * LAN/Remote toggle and no more rotating Cloudflare Quick Tunnel URL to
+ * re-paste - just one stable address, tested before it's saved:
+ *   - VM address: the VM's public IP (or domain) and port, e.g.
+ *     123.45.67.89:8000. Internally this still writes to
+ *     backend_remote_url with backend_mode='remote' for continuity with
+ *     the fields backendClient.js already reads - there's just nothing
+ *     else surfaced here anymore.
+ *   - Auth token: must match AUTH_TOKEN in the VM's server config.
+ * Also covers the terminal tool, which runs through this same connection
+ * against the VM - the only terminal ZAO has. There is no on-device
  * fallback terminal.
  */
 function BackendConnectionSection({ preferences, theme }) {
   const setBackendMode = usePreferencesStore((s) => s.setBackendMode);
-  const setBackendLanUrl = usePreferencesStore((s) => s.setBackendLanUrl);
   const setBackendRemoteUrl = usePreferencesStore((s) => s.setBackendRemoteUrl);
   const setBackendAuthToken = usePreferencesStore((s) => s.setBackendAuthToken);
-  const setDiscoveryWorkerUrl = usePreferencesStore((s) => s.setDiscoveryWorkerUrl);
-  const setDiscoveryDeviceId = usePreferencesStore((s) => s.setDiscoveryDeviceId);
 
-  const savedMode = preferences?.backend_mode || 'lan';
-  // Local "draft" mode - lets the person pick LAN or Remote and fill in
-  // its fields before anything is written to the store/DB. Only Save
-  // commits it. Re-syncs from the saved value whenever it changes
-  // underneath us (e.g. preferences reload).
-  const [mode, setMode] = useState(savedMode);
-  const [lanUrlValue, setLanUrlValue] = useState(preferences?.backend_lan_url || '');
-  const [remoteUrlValue, setRemoteUrlValue] = useState(preferences?.backend_remote_url || '');
-  const [discoveryWorkerUrlValue, setDiscoveryWorkerUrlValue] = useState(preferences?.discovery_worker_url || '');
-  const [discoveryDeviceIdValue, setDiscoveryDeviceIdValue] = useState(preferences?.discovery_device_id || '');
+  // Local "draft" fields - only Test & Save commits them. Re-syncs from the
+  // saved value whenever it changes underneath us (e.g. preferences reload).
+  const [serverUrlValue, setServerUrlValue] = useState(preferences?.backend_remote_url || '');
   const [tokenValue, setTokenValue] = useState(preferences?.backend_auth_token || '');
   const [status, setStatus] = useState({ connected: false, ready: false, model: null });
   const [checking, setChecking] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
 
   useEffect(() => {
-    setMode(savedMode);
-    setLanUrlValue(preferences?.backend_lan_url || '');
-    setRemoteUrlValue(preferences?.backend_remote_url || '');
-    setDiscoveryWorkerUrlValue(preferences?.discovery_worker_url || '');
-    setDiscoveryDeviceIdValue(preferences?.discovery_device_id || '');
+    setServerUrlValue(preferences?.backend_remote_url || '');
     setTokenValue(preferences?.backend_auth_token || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token, preferences?.discovery_worker_url, preferences?.discovery_device_id]);
+  }, [preferences?.backend_remote_url, preferences?.backend_auth_token]);
 
   const check = async () => {
     setChecking(true);
@@ -273,44 +255,75 @@ function BackendConnectionSection({ preferences, theme }) {
 
   useEffect(() => {
     check();
-  }, [savedMode, preferences?.backend_lan_url, preferences?.backend_remote_url]);
+  }, [preferences?.backend_remote_url]);
 
-  // Anything unsaved? Compares the draft against what's actually
-  // persisted, so the Save button only lights up when there's something
-  // to commit and "Check again" always reflects the last SAVED settings,
-  // not whatever's mid-edit in the boxes.
+  // Anything unsaved? Compares the draft against what's actually persisted.
   const isDirty =
-    mode !== savedMode ||
-    (mode === 'lan' ? lanUrlValue.trim() !== (preferences?.backend_lan_url || '') : remoteUrlValue.trim() !== (preferences?.backend_remote_url || '')) ||
-    tokenValue.trim() !== (preferences?.backend_auth_token || '') ||
-    discoveryWorkerUrlValue.trim() !== (preferences?.discovery_worker_url || '') ||
-    discoveryDeviceIdValue.trim() !== (preferences?.discovery_device_id || '');
+    serverUrlValue.trim() !== (preferences?.backend_remote_url || '') ||
+    tokenValue.trim() !== (preferences?.backend_auth_token || '');
 
-  const handleSave = async () => {
-    setSaving(true);
-    await setBackendMode(mode);
-    if (mode === 'lan') {
-      // Let people type a bare IP:port - no need to remember the http://
-      // prefix. If they do include a scheme (http:// or https://), leave
-      // it alone.
-      let url = lanUrlValue.trim();
-      if (url && !/^https?:\/\//i.test(url)) url = `http://${url}`;
-      await setBackendLanUrl(url);
-    } else {
-      await setBackendRemoteUrl(remoteUrlValue.trim());
+  /**
+   * Test & Save - mirrors the GitHub token pattern below: ping the VM's
+   * /health endpoint directly with whatever's currently typed (not
+   * whatever's already saved) before committing anything, so a typo'd
+   * IP or wrong port never silently gets saved as "working".
+   */
+  const handleTestAndSave = async () => {
+    if (!serverUrlValue.trim()) return;
+    setTesting(true);
+    try {
+      // Let people type a bare IP:port - default to https:// since this is
+      // now a real internet-facing VM, not a home PC on loopback/LAN. If
+      // they already included a scheme, leave it alone.
+      let url = serverUrlValue.trim();
+      if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+      url = url.replace(/\/+$/, '');
+
+      const token = tokenValue.trim();
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+      let response;
+      try {
+        response = await fetch(`${url}/health`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          signal: controller?.signal,
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      if (response.status === 401) {
+        Alert.alert('Connection failed', "Reached the VM, but it rejected the auth token. Check it matches AUTH_TOKEN in the VM's server config.");
+        return;
+      }
+      if (!response.ok) {
+        Alert.alert('Connection failed', `The VM responded with an error (${response.status}). Check the address and port.`);
+        return;
+      }
+      const json = await response.json().catch(() => ({}));
+
+      await setBackendMode('remote');
+      await setBackendRemoteUrl(url);
+      await setBackendAuthToken(token);
+      setServerUrlValue(url);
+      setStatus({ connected: true, ready: json.status === 'ready', model: json.model || null });
+
+      Alert.alert(
+        'Connected',
+        json.status === 'ready'
+          ? `Reached the VM - the model is ready (${json.model || ACTIVE_MODEL.label}).`
+          : 'Reached the VM, but the model may still be loading there.'
+      );
+    } catch (err) {
+      Alert.alert(
+        'Connection failed',
+        err?.name === 'AbortError'
+          ? "The VM took too long to respond. Check it's running and reachable."
+          : 'Could not reach that address. Check the IP/domain, port, and that uvicorn is running on the VM.'
+      );
+    } finally {
+      setTesting(false);
     }
-    await setBackendAuthToken(tokenValue.trim());
-    await setDiscoveryWorkerUrl(discoveryWorkerUrlValue.trim() || null);
-    await setDiscoveryDeviceId(discoveryDeviceIdValue.trim() || null);
-    // If both discovery fields were just filled in, do an immediate
-    // lookup rather than waiting for the next launch or the 5-minute
-    // periodic check (see App.js) - saving these fields IS the moment
-    // the person expects the URL above to fill itself in.
-    if (discoveryWorkerUrlValue.trim() && discoveryDeviceIdValue.trim()) {
-      await refreshDiscoveredBackendUrl();
-    }
-    setSaving(false);
-    check();
   };
 
   const pillColor = status.ready ? '#DCFCE7' : status.connected ? '#FEF3C7' : '#FEE2E2';
@@ -326,7 +339,7 @@ function BackendConnectionSection({ preferences, theme }) {
   return (
     <View style={styles.keyRow}>
       <View style={styles.keyRowHeader}>
-        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>PC backend</Text>
+        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Alibaba Cloud VM</Text>
         {checking ? (
           <ActivityIndicator size="small" color={theme.textTertiary} />
         ) : (
@@ -336,102 +349,22 @@ function BackendConnectionSection({ preferences, theme }) {
         )}
       </View>
 
-      {/* Single either/or picker - LAN or Remote, never both at once. */}
-      <View style={{ flexDirection: 'row', marginTop: 12, gap: 8 }}>
-        <TouchableOpacity
-          onPress={() => setMode('lan')}
-          style={{
-            flex: 1,
-            paddingVertical: 10,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: mode === 'lan' ? theme.info : theme.borderStrong,
-            backgroundColor: mode === 'lan' ? theme.info + '20' : 'transparent',
-            alignItems: 'center',
-          }}
-        >
-          <Text style={{ color: mode === 'lan' ? theme.info : theme.textSecondary, fontWeight: mode === 'lan' ? '600' : '400' }}>
-            LAN (home WiFi)
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setMode('remote')}
-          style={{
-            flex: 1,
-            paddingVertical: 10,
-            borderRadius: 8,
-            borderWidth: 1,
-            borderColor: mode === 'remote' ? theme.info : theme.borderStrong,
-            backgroundColor: mode === 'remote' ? theme.info + '20' : 'transparent',
-            alignItems: 'center',
-          }}
-        >
-          <Text style={{ color: mode === 'remote' ? theme.info : theme.textSecondary, fontWeight: mode === 'remote' ? '600' : '400' }}>
-            Remote (internet)
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {mode === 'lan' ? (
-        <>
-          <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
-            Your PC's local IP and port, e.g. 192.168.1.42:8080. Use this on the same WiFi as your PC.
-          </Text>
-          <TextInput
-            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-            placeholder="192.168.1.42:8080"
-            placeholderTextColor={theme.textTertiary}
-            value={lanUrlValue}
-            onChangeText={setLanUrlValue}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-          />
-        </>
-      ) : (
-        <>
-          <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
-            The tunnel URL shown in the "ZAO Cloudflare Tunnel" window when you run start.bat on your PC. This changes every time start.bat restarts - re-paste it here before using Remote mode away from home.
-          </Text>
-          <TextInput
-            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-            placeholder="https://random-words-1234.trycloudflare.com"
-            placeholderTextColor={theme.textTertiary}
-            value={remoteUrlValue}
-            onChangeText={setRemoteUrlValue}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-          />
-
-          <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 12 }]}>
-            Auto-discovery (optional) - set this ONCE and the URL above fills itself in automatically from then on, even if the PC's tunnel is recreated. Values come from running{' '}
-            <Text style={{ fontWeight: '700' }}>node scripts/setup-permanent-tunnel.js</Text> on your PC - see cloudflare-worker/README.md.
-          </Text>
-          <TextInput
-            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-            placeholder="Discovery Worker URL (e.g. https://zao-discovery.you.workers.dev)"
-            placeholderTextColor={theme.textTertiary}
-            value={discoveryWorkerUrlValue}
-            onChangeText={setDiscoveryWorkerUrlValue}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-          />
-          <TextInput
-            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-            placeholder="Device ID"
-            placeholderTextColor={theme.textTertiary}
-            value={discoveryDeviceIdValue}
-            onChangeText={setDiscoveryDeviceIdValue}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-        </>
-      )}
+      <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
+        Your VM's public IP (or domain) and port, e.g. 123.45.67.89:8000. This is the 24/7 uvicorn/FastAPI server, so unlike a home PC there's no LAN mode and no tunnel URL to re-paste.
+      </Text>
+      <TextInput
+        style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
+        placeholder="123.45.67.89:8000"
+        placeholderTextColor={theme.textTertiary}
+        value={serverUrlValue}
+        onChangeText={setServerUrlValue}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="url"
+      />
 
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 12 }]}>
-        Auth token - must match AUTH_TOKEN in the PC's server/config.js.
+        Auth token - must match AUTH_TOKEN in the VM's server config.
       </Text>
       <TextInput
         style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
@@ -446,19 +379,21 @@ function BackendConnectionSection({ preferences, theme }) {
 
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 12 }]}>
         {status.ready
-          ? 'Chat, coding, reasoning, and the Terminal tool are all running on Qwen2.5 Coder 3B and cmd.exe on your PC.'
+          ? `Chat, coding, reasoning, and the Terminal tool are all running through your VM${status.model ? ` (${status.model})` : ''}.`
           : status.connected
-          ? 'The backend is reachable but the model is still loading - this can take a bit longer on first start. Check again shortly.'
-          : "ZAO couldn't reach the PC backend with these settings. Make sure start.bat is running on your PC and the URL/token above are correct."}
+          ? 'The VM is reachable but the model is still loading - this can take a bit longer on first start. Check again shortly.'
+          : "ZAO couldn't reach the VM with these settings. Make sure the server is running there and the address/token above are correct."}
       </Text>
 
       <View style={{ flexDirection: 'row', marginTop: 12, gap: 16, alignItems: 'center' }}>
         <TouchableOpacity
-          style={[styles.keyEditBtn, { opacity: isDirty ? 1 : 0.4 }]}
-          onPress={handleSave}
-          disabled={!isDirty || saving}
+          style={[styles.keyEditBtn, { opacity: serverUrlValue.trim() && !testing ? 1 : 0.4 }]}
+          onPress={handleTestAndSave}
+          disabled={!serverUrlValue.trim() || testing}
         >
-          <Text style={[styles.keyEditBtnText, { color: theme.info }]}>{saving ? 'Saving…' : 'Save'}</Text>
+          {testing
+            ? <ActivityIndicator size="small" color={theme.info} />
+            : <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Test & Save</Text>}
         </TouchableOpacity>
         <TouchableOpacity style={styles.keyEditBtn} onPress={check} disabled={checking}>
           <Text style={[styles.keyEditBtnText, { color: theme.info }]}>Check again</Text>
@@ -466,8 +401,124 @@ function BackendConnectionSection({ preferences, theme }) {
       </View>
       {isDirty && (
         <Text style={[styles.helperText, { color: theme.textTertiary, marginTop: 6, fontSize: 12 }]}>
-          Unsaved changes - tap Save to apply.
+          Unsaved changes - tap Test & Save to verify and apply.
         </Text>
+      )}
+    </View>
+  );
+}
+
+/**
+ * Model API key section - the model itself moved from a PC-hosted
+ * llama-server process to Qwen3-Coder-30B-A3B-Instruct served over
+ * Alibaba Cloud Model Studio's authenticated API. This key is distinct
+ * from the VM auth token above: the token gates access to the person's
+ * own VM, this key is what the VM's FastAPI service uses to call the
+ * model provider on the person's behalf. Same test-before-save pattern
+ * as GitHub below - see backendClient.js's verifyModelApiKey().
+ */
+function ModelApiKeySection({ preferences, theme }) {
+  const setModelApiKey = usePreferencesStore((s) => s.setModelApiKey);
+  const [keyValue, setKeyValue] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const configured = !!preferences?.model_api_key;
+
+  const handleTestAndSave = async () => {
+    if (!keyValue.trim()) return;
+    setTesting(true);
+    try {
+      const { verifyModelApiKey } = await import('../services/backend/backendClient');
+      const result = await verifyModelApiKey(keyValue.trim());
+      if (result.valid) {
+        await setModelApiKey(keyValue.trim());
+        setEditing(false);
+        setKeyValue('');
+        Alert.alert('Connected', 'API key verified against Qwen3-Coder-30B-A3B-Instruct.');
+      } else {
+        Alert.alert('Connection failed', result.error?.message || 'Could not verify this key. Check it and try again.');
+      }
+    } catch (err) {
+      Alert.alert('Error', 'Something went wrong testing this key. Please try again.');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleRemove = () => {
+    Alert.alert(
+      'Remove model API key?',
+      "ZAO won't be able to reach Qwen3-Coder-30B-A3B-Instruct until you add a key again.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => setModelApiKey(null) },
+      ]
+    );
+  };
+
+  return (
+    <View style={styles.keyRow}>
+      <View style={styles.keyRowHeader}>
+        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Qwen3-Coder-30B-A3B-Instruct</Text>
+        <View style={[styles.statusPill, { backgroundColor: configured ? '#DCFCE7' : theme.surfaceAlt }]}>
+          <Text style={[styles.statusPillText, { color: configured ? '#166534' : theme.textSecondary }]}>
+            {configured ? 'Connected' : 'Not set'}
+          </Text>
+        </View>
+      </View>
+
+      <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 4 }]}>
+        Alibaba Cloud Model Studio API key for Qwen3-Coder-30B-A3B-Instruct. Your VM forwards this to the model provider - it never needs to touch your PC.
+      </Text>
+
+      {editing ? (
+        <View>
+          <TextInput
+            style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
+            value={keyValue}
+            onChangeText={setKeyValue}
+            placeholder="Model Studio API key"
+            placeholderTextColor={theme.textTertiary}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={styles.keyRowButtons}>
+            <TouchableOpacity
+              style={styles.keySecondaryBtn}
+              onPress={() => { setEditing(false); setKeyValue(''); }}
+            >
+              <Text style={[styles.keySecondaryBtnText, { color: theme.textSecondary }]}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.keyPrimaryBtn,
+                { backgroundColor: theme.accent },
+                (!keyValue.trim() || testing) && { backgroundColor: theme.borderStrong },
+              ]}
+              onPress={handleTestAndSave}
+              disabled={!keyValue.trim() || testing}
+            >
+              {testing
+                ? <ActivityIndicator size="small" color={theme.textInverse} />
+                : <Text style={[styles.keyPrimaryBtnText, { color: theme.textInverse }]}>Test & Save</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        <View style={[styles.keyRowButtons, { marginTop: 12 }]}>
+          {configured && (
+            <TouchableOpacity style={styles.keySecondaryBtn} onPress={handleRemove}>
+              <Text style={[styles.keyRemoveBtnText, { color: theme.danger }]}>Remove</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={styles.keyEditBtn} onPress={() => setEditing(true)}>
+            <Text style={[styles.keyEditBtnText, { color: theme.info }]}>
+              {configured ? 'Update' : 'Add API key'}
+            </Text>
+          </TouchableOpacity>
+        </View>
       )}
     </View>
   );
@@ -1476,6 +1527,11 @@ export default function SettingsScreen({ onOpenSidebar }) {
       <SectionHeader title="Backend Connection" theme={theme} />
       <View style={[styles.card, { backgroundColor: theme.surface }]}>
         <BackendConnectionSection preferences={preferences} theme={theme} />
+      </View>
+
+      <SectionHeader title="Model" theme={theme} />
+      <View style={[styles.card, { backgroundColor: theme.surface }]}>
+        <ModelApiKeySection preferences={preferences} theme={theme} />
       </View>
 
       <SectionHeader title="GitHub" theme={theme} />

@@ -983,6 +983,23 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
 
+    // Migration: model_api_key - added when the model moved from a PC-hosted
+    // llama-server process to Qwen3-Coder-30B-A3B-Instruct served over an
+    // authenticated cloud API (Alibaba Cloud Model Studio / DashScope,
+    // reached through the person's own Alibaba Cloud VM - see
+    // backend_lan_url/backend_remote_url above, now repurposed as the VM's
+    // address rather than a home PC's). Unlike backend_auth_token (a
+    // self-issued shared secret matching the VM's own AUTH_TOKEN), this is
+    // the actual third-party API key the VM's FastAPI/uvicorn service needs
+    // to call the model provider - sent as its own header (see
+    // backendClient.js's authHeaders()) so the VM can forward it rather than
+    // confusing it with the VM's own auth token.
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN model_api_key TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
     // Migration: plan_id added to messages so an assistant reply that was
     // produced by the hierarchical planning system (src/services/brain/
     // backendBrain.js -> planCoordinator.js/planExecutor.js, wired in via
@@ -1654,6 +1671,7 @@ const DEFAULT_PREFS_ROW = {
   backend_lan_url: null,
   backend_remote_url: null,
   backend_auth_token: null,
+  model_api_key: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
@@ -1698,7 +1716,7 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token', 'preferred_timezone', 'discovery_worker_url', 'discovery_device_id', 'browser_router_url']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_mode', 'backend_lan_url', 'backend_remote_url', 'backend_auth_token', 'model_api_key', 'preferred_timezone', 'discovery_worker_url', 'discovery_device_id', 'browser_router_url']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
         const value = (key === 'browser_access_enabled' || key === 'memory_enabled') ? (patch[key] ? 1 : 0) : patch[key];

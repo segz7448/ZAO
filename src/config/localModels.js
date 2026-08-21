@@ -27,8 +27,8 @@ export const MODEL_KEYS = {
 
 export const ACTIVE_MODEL = {
   key: MODEL_KEYS.QWEN25_CODER_3B,
-  label: 'Qwen2.5 Coder 3B',
-  description: 'Chat, coding, reasoning, and tool-calling - served from your PC',
+  label: 'Qwen3 Coder 30B A3B Instruct',
+  description: 'Chat, coding, reasoning, and tool-calling - served from your Alibaba Cloud VM via Model Studio',
 };
 
 /**
