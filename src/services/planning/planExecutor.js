@@ -148,6 +148,25 @@ export function translatePcLogDecisionArgs(step, baseArgs) {
 }
 
 /**
+ * terminal_pc_run_command and pc_process_start both require a real
+ * `command` string (see their TOOL_REGISTRY.run() signatures in
+ * toolOrchestrator.js), but the generic args builder above only ever
+ * populates path/target/name from step.target - it never sets `command`
+ * unless the model's details_json for this step happened to include one
+ * explicitly. When it didn't, args.command was undefined, so the VM
+ * backend correctly rejected every attempt with "Missing \"command\"
+ * string in request body" - and recoveryPlanner.js kept retrying the
+ * exact same shape, since nothing in the retry path added the missing
+ * field either. step.target IS the intended command for a terminal step
+ * (executionPlanner.js's prompt asks the model to put it there), so
+ * fall back to that - same convention translatePcLogDecisionArgs above
+ * already uses for pc_log_decision's mismatched shape.
+ */
+export function translateTerminalArgs(step, baseArgs) {
+  return { ...baseArgs, command: baseArgs.command || step.target || null };
+}
+
+/**
  * Runs one step's actual tool call via TOOL_REGISTRY - the same
  * function map toolOrchestrator.js's own loop uses. A plan step's
  * `action` should match a TOOL_REGISTRY key exactly (executionPlanner.js
@@ -209,6 +228,10 @@ async function runStepTool(step, planId, { agentSession = null } = {}) {
 
   if (resolvedToolName === 'pc_log_decision') {
     args = translatePcLogDecisionArgs(step, args);
+  }
+
+  if (resolvedToolName === 'terminal_pc_run_command' || resolvedToolName === 'pc_process_start') {
+    args = translateTerminalArgs(step, args);
   }
 
   // fs_create_file with no content isn't a tool-call bug to retry - it's

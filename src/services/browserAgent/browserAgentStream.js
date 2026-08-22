@@ -21,9 +21,17 @@ import { usePreferencesStore } from '../../store/preferencesStore';
 
 function getActiveWsUrl() {
   const prefs = usePreferencesStore.getState().preferences || {};
+  // NOTE: this used to branch on prefs.backend_mode ('lan' vs 'remote')
+  // and read backend_lan_url / backend_remote_url. Those keys were
+  // retired when the app moved to a single always-on Alibaba Cloud VM
+  // backend (see backendClient.js / SettingsScreen.js), which now store
+  // just backend_vm_url. This function wasn't updated at the time, so it
+  // silently resolved to a null baseUrl and the browser agent stream
+  // could never connect even though chat worked fine.
   const baseUrl = prefs.backend_vm_url;
   const token = prefs.backend_auth_token || '';
   if (!baseUrl) return null;
+  // ws(s):// instead of http(s):// - same host/port, different scheme.
   const wsBase = baseUrl.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://').replace(/\/+$/, '');
   return `${wsBase}/browser-agent/stream?token=${encodeURIComponent(token)}`;
 }
