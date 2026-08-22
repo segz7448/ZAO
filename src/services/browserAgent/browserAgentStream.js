@@ -21,11 +21,9 @@ import { usePreferencesStore } from '../../store/preferencesStore';
 
 function getActiveWsUrl() {
   const prefs = usePreferencesStore.getState().preferences || {};
-  const mode = prefs.backend_mode || 'lan';
-  const baseUrl = mode === 'remote' ? prefs.backend_remote_url : prefs.backend_lan_url;
+  const baseUrl = prefs.backend_vm_url;
   const token = prefs.backend_auth_token || '';
   if (!baseUrl) return null;
-  // ws(s):// instead of http(s):// - same host/port, different scheme.
   const wsBase = baseUrl.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://').replace(/\/+$/, '');
   return `${wsBase}/browser-agent/stream?token=${encodeURIComponent(token)}`;
 }
