@@ -218,7 +218,7 @@ function FilesystemAccessSection({ preferences, theme }) {
  * or on a person's PC. Two independent Test & Save flows, same pattern
  * as GithubCredentialsSection above:
  *   - VmConnectionSection: the VM's IP (or IP:port), e.g.
- *     http://123.45.67.89:8080 - Test just confirms the server is
+ *     http://123.45.67.89:8000 - Test just confirms the server is
  *     reachable (no API key needed for that half of the check).
  *   - ModelApiKeySection: the qwen3-coder-30b-a3b-instruct API key, sent
  *     as `Authorization: Bearer <token>` on every request - must match
@@ -293,11 +293,11 @@ function VmConnectionSection({ preferences, theme }) {
       </View>
 
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
-        The VM's IP and port, e.g. 123.45.67.89:8080. The VM runs 24/7, so this stays the same once set.
+        The VM's IP and port, e.g. 123.45.67.89:8000. The VM runs 24/7, so this stays the same once set.
       </Text>
       <TextInput
         style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
-        placeholder="123.45.67.89:8080"
+        placeholder="123.45.67.89:8000"
         placeholderTextColor={theme.textTertiary}
         value={urlValue}
         onChangeText={setUrlValue}

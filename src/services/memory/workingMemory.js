@@ -27,7 +27,7 @@
  * chatStore.js, in a fixed order (see buildFullHistory there).
  */
 
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import { getRollingSummary, setRollingSummary } from '../../db/database';
 
@@ -142,7 +142,7 @@ async function extendSummary(priorSummary, newMessages) {
       ? `Here is a running summary of an ongoing conversation so far:\n${priorSummary}\n\nUpdate it to also account for this next part of the conversation:\n${transcript}\n\nRespond with ONLY the updated summary paragraph (plain text, no preamble, no markdown) - concise, third person, factual, preserving anything a person would need to remember to keep the conversation coherent (decisions made, tasks in progress, names/numbers mentioned).`
       : `Summarize this part of a conversation in one concise paragraph, third person, factual, preserving anything a person would need to remember to keep the conversation coherent (decisions made, tasks in progress, names/numbers mentioned):\n${transcript}\n\nRespond with ONLY the summary paragraph, no preamble, no markdown.`;
 
-    const result = await llamaEngine.sendMessage(
+    const result = await modelClient.sendMessage(
       [{ role: 'user', content: prompt }],
       SUMMARY_MODEL_KEY,
       { maxTokens: 400, temperature: 0.2 }

@@ -94,7 +94,7 @@ export const usePreferencesStore = create((set, get) => ({
 
   /**
    * The Alibaba Cloud VM's fixed IP (or IP:port), e.g.
-   * http://123.45.67.89:8080 - the one server ZAO now talks to for
+   * http://123.45.67.89:8000 - the one server ZAO now talks to for
    * everything (model inference, terminal, filesystem, git, etc.). No
    * LAN/Remote toggle anymore - the VM is 24/7 and always reachable at
    * this same address.

@@ -2,23 +2,25 @@
 # ============================================================
 #  ZAO Backend - Alibaba Cloud VM startup script
 #
-#  Run this to start the Node backend (which in turn spawns
-#  llama-server as a child process). The VM is 24/7, so once
-#  this is running - or better yet, installed as a systemd
-#  service (see the bottom of this file) - the phone app just
-#  connects straight to the VM's fixed IP. No LAN/tunnel toggle,
-#  nothing that rotates.
+#  Run this to start the Node backend. No local model, no
+#  llama-server child process - this just relays
+#  /v1/chat/completions to Alibaba Cloud's Model Studio
+#  (DashScope) API, which hosts qwen3-coder-30b-a3b-instruct.
+#  The VM is 24/7, so once this is running - or better yet,
+#  installed as a systemd service (see the bottom of this file)
+#  - the phone app just connects straight to the VM's fixed IP.
+#  No LAN/tunnel toggle, nothing that rotates.
 #
 #  FIRST-TIME SETUP (only needed once):
 #    1. npm install                     (run in this folder)
-#    2. Edit config.js if your model/llama-server binary aren't
-#       in /opt/zao/model (or set ZAO_MODEL_DIR)
+#    2. Set DASHSCOPE_API_KEY (env var, or edit config.js) to
+#       your Alibaba Cloud Model Studio API key.
 #    3. Change AUTH_TOKEN in config.js (or set the ZAO_AUTH_TOKEN
 #       env var) to a real secret, then enter that same value in
 #       the app's Settings > Server Connection > Model API key
 #       field.
 #    4. Open the VM's firewall / Alibaba Cloud Security Group for
-#       the PORT you're using (8080 by default) so the phone can
+#       the PORT you're using (8000 by default) so the phone can
 #       actually reach it from outside the VM.
 #
 #  EVERY TIME AFTER THAT: just run ./start.sh - or better, set
@@ -37,7 +39,7 @@ cd "$(dirname "$0")"
 export ZAO_PC_BRIDGE_ROOT="${ZAO_PC_BRIDGE_ROOT:-$HOME}"
 
 echo "[ZAO] Starting backend server..."
-echo "[ZAO] Listening on 0.0.0.0:${PORT:-8080} - reachable at this VM's public IP."
+echo "[ZAO] Listening on 0.0.0.0:${PORT:-8000} - reachable at this VM's public IP."
 echo "[ZAO] Enter that IP (and port) in the app's Settings > Server Connection."
 echo
 

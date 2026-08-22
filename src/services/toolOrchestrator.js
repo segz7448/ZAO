@@ -24,9 +24,10 @@
  * loop.
  *
  * MIGRATION NOTE: this used to call runQwenCoderWithCascade, a 4-step
- * OpenRouter/Hugging Face fallback, and later a local llama.rn context.
- * Both are gone - the coder model is now served by a PC-hosted
- * backend (src/services/backend/backendClient.js) with no rate limit and
+ * OpenRouter/Hugging Face fallback, and later a local on-device model
+ * context. Both are gone - the coder model is now served by Alibaba
+ * Cloud Model Studio, relayed through the VM backend
+ * (src/services/backend/backendClient.js) with no rate limit and
  * nothing to fall back to, so this calls it directly.
  *
  * WHY THIS MODULE BUILDS RAW OpenAI-FORMAT MESSAGES: a tool-calling
@@ -38,7 +39,7 @@
  * than routing through any shared text-message conversion helper.
  */
 
-import * as llamaEngine from './backend/backendClient';
+import * as modelClient from './backend/backendClient';
 import { MODEL_KEYS } from '../config/localModels';
 import * as githubTool from './github/githubTool';
 import * as filesystemTool from './filesystem/filesystemTool';
@@ -2226,10 +2227,11 @@ function toolResultMessage(toolCallId, resultPayload) {
 }
 
 /**
- * Runs one user request through the local Qwen3 Coder model with all
+ * Runs one user request through the Qwen3 Coder model (relayed via the
+ * VM backend to Alibaba Cloud Model Studio) with all
  * tools available, looping through any tool_calls it makes until it gives
  * a final plain-language answer (or MAX_TOOL_STEPS is hit). Calls the
- * local llama.rn context directly (src/services/llama/llamaEngine.js) -
+ * VM backend directly (src/services/backend/backendClient.js) -
  * no cascade, no cloud fallback, since there's only one coder model and no
  * rate limit to fall back from.
  *
@@ -2440,7 +2442,7 @@ When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, fs_
   ];
 
   for (let i = 0; i < MAX_TOOL_STEPS; i++) {
-    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       tools: allSchemas,
       maxTokens: 2048,
       temperature: 0.3,
@@ -2714,8 +2716,8 @@ export async function approveAndRunPendingTool(pendingConfirmation) {
 export const approveAndRunTerminalCommand = approveAndRunPendingTool;
 
 // This module builds { role, content, tool_calls, tool_call_id } messages
-// directly in OpenAI's tool-calling shape. llamaEngine.js's own
-// toLlamaMessage() detects already-OpenAI-shaped messages (role: 'tool',
+// directly in OpenAI's tool-calling shape. backendClient.js's own
+// toBackendMessage() detects already-OpenAI-shaped messages (role: 'tool',
 // or an assistant message carrying tool_calls) and passes them through
 // unchanged instead of mangling them, so this module's history works as-is
-// with llama.rn's Jinja-templated tool-calling support (use_jinja: true).
+// with Model Studio's tool-calling support.

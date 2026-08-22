@@ -24,7 +24,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import { PLANNING_TYPES, PLAN_LEVELS } from './planTypes';
 
@@ -60,7 +60,7 @@ export async function planProjects(strategicPlan) {
       },
     ];
 
-    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       maxTokens: 400,
       temperature: 0.2,
     });

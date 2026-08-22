@@ -8,8 +8,9 @@ that rotates - the VM is 24/7.
 ## What it is
 
 A small Node/Express server that:
-1. Spawns `llama-server` (from llama.cpp) as a child process, running
-   Qwen3-Coder-30B-A3B-Instruct.
+1. Relays chat requests to Alibaba Cloud's Model Studio (DashScope)
+   OpenAI-compatible API, which hosts Qwen3-Coder-30B-A3B-Instruct - no
+   local model, no GPU/CPU inference on this VM.
 2. Exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
 3. Exposes `/terminal/run`, which runs real shell commands on this VM -
    auto-detecting bash or a raw Python interpreter per command (see
@@ -35,8 +36,7 @@ A small Node/Express server that:
    browser agent already runs (see `browserAgent.js`'s `getBrowser()`) -
    closes the loop on "does this actually render right" without you
    checking manually.
-7. Restarts `llama-server` automatically if it crashes.
-8. Requires an `Authorization: Bearer <token>` header on every request
+7. Requires an `Authorization: Bearer <token>` header on every request
    except `/health`, since this server is reachable over the public
    internet at the VM's IP, not just loopback.
 
@@ -51,17 +51,23 @@ cd server
 npm install
 ```
 
-Then edit `config.js` (or set the matching env vars) if your model/binary
-aren't in `/opt/zao/model`:
+Then set these (env vars, or edit `config.js` directly):
 
-- `MODEL_PATH` - full path to `Qwen3-coder-30B-A3B-instruct-Q4_K_M.gguf`
-- `LLAMA_SERVER_BIN` - full path to the `llama-server` binary (Linux build)
-- `ZAO_AUTH_TOKEN` - **change this from the placeholder** to a real secret
-  before exposing this beyond your own machine. Put the same value in the
-  app's Settings > Server Connection > Model API key field.
+- `DASHSCOPE_API_KEY` - your Alibaba Cloud Model Studio API key (Model
+  Studio > API-KEY in the console). Required - the server refuses to
+  start without it.
+- `DASHSCOPE_BASE_URL` - only if your Model Studio workspace uses a
+  different endpoint than the one already set as the default in
+  `config.js`.
+- `ZAO_AUTH_TOKEN` - **change this from the placeholder** to a real
+  secret before exposing this beyond your own machine. Put the same
+  value in the app's Settings > Server Connection > Model API key
+  field. (This is a different secret from `DASHSCOPE_API_KEY` above -
+  `DASHSCOPE_API_KEY` is what this VM sends to Alibaba, `ZAO_AUTH_TOKEN`
+  is what the phone sends to this VM.)
 
 Open the VM's firewall / Alibaba Cloud Security Group for whichever port
-you're using (`8080` by default) so the phone can actually reach it from
+you're using (`8000` by default) so the phone can actually reach it from
 outside the VM.
 
 ### OCR (optional, but needed for scanned PDFs / text-in-images)
@@ -105,9 +111,9 @@ Run:
 ./start.sh
 ```
 
-It prints `ZAO backend listening on 0.0.0.0:<port>` and then
-`llama-server is ready after N health check(s)` once the model has
-loaded and chat requests will actually work.
+It prints `ZAO backend listening on 0.0.0.0:<port>` followed by the model
+name and Model Studio endpoint it's relaying to - chat requests work
+immediately, there's no local model-load wait.
 
 Since the VM is 24/7, you'll want this running as a real background
 service rather than tied to an SSH session - `start.sh`'s own header has
@@ -121,7 +127,7 @@ sudo journalctl -u zao-backend -f    # tail logs
 ## Connecting the phone app
 
 Find the VM's public IP (from the Alibaba Cloud console, or `curl
-ifconfig.me` on the VM itself) and enter `<that-ip>:8080` as the VM
+ifconfig.me` on the VM itself) and enter `<that-ip>:8000` as the VM
 address in **Settings > Server Connection** - tap **Test & Save**. Then
 enter the same value you set for `ZAO_AUTH_TOKEN` as the **Model API
 key** and tap its own **Test & Save**. Both checks hit `/health`
@@ -131,9 +137,12 @@ directly, so you'll know immediately if either one is wrong.
 
 Edit `config.js` directly, or set these env vars:
 
-- `MODEL_PATH` - full path to the GGUF file
-- `LLAMA_SERVER_BIN` - full path to the `llama-server` binary
-- `LLAMA_THREADS` - CPU thread count (defaults to all logical cores)
+- `DASHSCOPE_API_KEY` - your Alibaba Cloud Model Studio API key (required)
+- `DASHSCOPE_BASE_URL` - Model Studio OpenAI-compatible endpoint (defaults
+  to this VM's workspace endpoint, already set in `config.js`)
+- `ZAO_MODEL_NAME` - model id sent to Model Studio (default
+  `qwen3-coder-30b-a3b-instruct`)
+- `ZAO_MODEL_TIMEOUT_MS` - max time a Model Studio call can take (default 120000)
 - `ZAO_AUTH_TOKEN` - shared secret, must match what's entered in the app
 - `ZAO_TERMINAL_CWD` - default working directory for Terminal tool
   commands (default `/root`)
@@ -141,4 +150,4 @@ Edit `config.js` directly, or set these env vars:
   see OCR setup above
 - `ZAO_OCR_TIMEOUT_MS` - max time an OCR request can run (default 180000)
 - `ZAO_DATA_TIMEOUT_MS` - max time a /data/analyze request can run (default 180000)
-- `PORT` - the server's public-facing port (default 8080)
+- `PORT` - the server's public-facing port (default 8000)

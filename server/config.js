@@ -5,37 +5,35 @@
  * on-device or on a person's PC. The phone app talks to it over a single
  * fixed IP - see server/start.sh and the Settings screen's Server
  * Connection section.
+ *
+ * MODEL: no local inference. This VM is a thin, always-on relay - it
+ * forwards /v1/chat/completions straight to Alibaba Cloud's Model Studio
+ * (DashScope) OpenAI-compatible API, which actually hosts
+ * qwen3-coder-30b-a3b-instruct. There is no local model process,
+ * no GGUF weights, and no local GPU/CPU inference on this VM anymore.
  */
 
-const path = require('path');
-
-// Folder where llama-server and the model weights both live.
-const MODEL_DIR = process.env.ZAO_MODEL_DIR || '/opt/zao/model';
-
 module.exports = {
-  // The ZAO app's public-facing port.
-  PORT: Number(process.env.PORT || 8080),
+  // The ZAO app's public-facing port on this VM.
+  PORT: Number(process.env.PORT || 8000),
 
-  // Internal port llama-server itself listens on (not exposed directly -
-  // index.js proxies to it). Different from PORT so the two processes
-  // never collide.
-  LLAMA_PORT: Number(process.env.LLAMA_PORT || 8081),
+  // Alibaba Cloud Model Studio (DashScope) OpenAI-compatible endpoint -
+  // this VM's dedicated workspace host (ap-southeast-1 MaaS), not the
+  // generic dashscope-intl.aliyuncs.com one.
+  DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL || 'https://ws-huaqujanfkq8v50o.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
 
-  // Path to the llama-server binary (Linux build).
-  LLAMA_SERVER_BIN: process.env.LLAMA_SERVER_BIN || path.join(MODEL_DIR, 'llama-server'),
+  // Model Studio API key (from the Alibaba Cloud console - Model Studio >
+  // API-KEY). This is DIFFERENT from AUTH_TOKEN below: this key is what
+  // this VM sends to Alibaba; AUTH_TOKEN is what the phone sends to this
+  // VM. Required - there's no local fallback if this is missing.
+  DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY || '',
 
-  // Path to the Qwen3-Coder-30B-A3B-Instruct GGUF.
-  MODEL_PATH: process.env.MODEL_PATH || path.join(MODEL_DIR, 'Qwen3-coder-30B-A3B-instruct-Q4_K_M.gguf'),
+  MODEL_NAME: process.env.ZAO_MODEL_NAME || 'qwen3-coder-30b-a3b-instruct',
 
-  MODEL_LABEL: 'Qwen3 Coder 30B A3B Instruct (Q4_K_M)',
+  MODEL_LABEL: 'Qwen3 Coder 30B A3B Instruct (Alibaba Model Studio)',
 
-  CONTEXT_SIZE: Number(process.env.ZAO_CONTEXT_SIZE || 4096),
-
-  // Thread count for llama-server's CPU inference. Defaults to the VM's
-  // actual logical core count (os.cpus().length). Override with
-  // LLAMA_THREADS if you're offloading to GPU instead (-ngl > 0) and
-  // want fewer CPU threads reserved for llama-server itself.
-  THREADS: Number(process.env.LLAMA_THREADS || require('os').cpus().length),
+  // Timeout for calls out to Model Studio.
+  MODEL_TIMEOUT_MS: Number(process.env.ZAO_MODEL_TIMEOUT_MS || 120000),
 
   // The model API key. The phone app must send this as `Authorization:
   // Bearer <token>` on every request. Change this to your own value and

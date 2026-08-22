@@ -3,7 +3,7 @@
  *
  * WHAT THIS FIXES: every existing tool loop (toolOrchestrator.js's
  * runToolTask, backendBrain.js's hierarchical planner) runs IN THE PHONE
- * APP - the model call goes phone -> PC backend -> llama-server and back,
+ * APP - the model call goes phone -> VM backend -> Alibaba Model Studio and back,
  * but the loop itself (which tool to call next, when to stop) is JS
  * running on the device. Close the app - or lock the phone, or lose
  * signal for a few minutes - and the loop dies with it, mid-task, even

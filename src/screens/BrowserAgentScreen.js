@@ -131,7 +131,7 @@ export default function BrowserAgentScreen({ stream, isAgentRunning = false, awa
                 value={taskText}
                 onChangeText={setTaskText}
                 onSubmitEditing={handleSendTask}
-                placeholder="Tell it what to do, e.g. 'open github.com and search llama.cpp android'"
+                placeholder="Tell it what to do, e.g. 'open github.com and search react native android'"
                 placeholderTextColor={theme.textTertiary}
                 returnKeyType="go"
               />

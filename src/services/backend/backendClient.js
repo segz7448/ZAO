@@ -8,7 +8,7 @@
  *
  * CONNECTION: a single fixed address, configured once in Settings >
  * Server Connection:
- *   - VM IP (or IP:port), e.g. http://123.45.67.89:8080 - the VM is
+ *   - VM IP (or IP:port), e.g. http://123.45.67.89:8000 - the VM is
  *     24/7, so there's no LAN/Remote toggle and nothing that rotates.
  * Every request carries an Authorization: Bearer <token> header - the
  * model API key, matching AUTH_TOKEN in the VM's server/config.js -
@@ -172,8 +172,8 @@ function toBackendMessage(message) {
  *   multi-model signature; ignored, since there is only one model now.
  * @param {object} options - { maxTokens, temperature, tools, toolChoice, onToken }
  * @param {function} [options.onToken] - if provided (and no `tools` are requested -
- *   see note below), the request streams via SSE (server/index.js's proxyToLlama
- *   already pipes llama-server's response through as-is, so this only needed the
+ *   see note below), the request streams via SSE (server/index.js's proxyToDashScope
+ *   already pipes Model Studio's response through as-is, so this only needed the
  *   client side wired up - see sseClient.js's header for why XHR, not fetch).
  *   Called with the full accumulated content string after every chunk, so callers
  *   can just do `setState(text)` rather than concatenating themselves. The
@@ -181,7 +181,7 @@ function toBackendMessage(message) {
  *   { success, data: { content, toolCalls, raw }, error } shape as the
  *   non-streaming path, so this is purely additive - existing callers that don't
  *   pass onToken are unaffected.
- *   NOT used when `tools` are passed: llama-server streams tool_calls as
+ *   NOT used when `tools` are passed: Model Studio streams tool_calls as
  *   incremental argument-string fragments (index/id/name/arguments split across
  *   multiple deltas), a different accumulation problem than plain content text -
  *   tool-calling callers (toolOrchestrator.js etc.) need the complete, parsed
@@ -222,7 +222,7 @@ export async function sendMessage(history, modelKey, options = {}) {
   const canStream = typeof options.onToken === 'function' && !body.tools;
 
   if (canStream) {
-    return sendMessageStreaming(baseUrl, token, body, options.onToken, mode);
+    return sendMessageStreaming(baseUrl, token, body, options.onToken);
   }
 
   try {
@@ -289,9 +289,8 @@ export async function sendMessage(history, modelKey, options = {}) {
  * @param {string|null} token
  * @param {object} body - already built by sendMessage(), mutated here to set stream: true
  * @param {(text: string) => void} onToken
- * @param {string} mode - 'lan' | 'remote', for error messages only
  */
-function sendMessageStreaming(baseUrl, token, body, onToken, mode) {
+function sendMessageStreaming(baseUrl, token, body, onToken) {
   return new Promise((resolve) => {
     let accumulated = '';
     let lastRaw = null;
@@ -305,7 +304,7 @@ function sendMessageStreaming(baseUrl, token, body, onToken, mode) {
       timeoutMs: COMPLETION_TIMEOUT_MS,
       onEvent: (event) => {
         lastRaw = event;
-        // llama-server can emit a plain {error:{message}} frame instead of
+        // Model Studio can emit a plain {error:{message}} frame instead of
         // a normal delta if generation fails mid-stream (out of context,
         // etc.) - surface it the same as a non-2xx response would.
         if (event?.error) {

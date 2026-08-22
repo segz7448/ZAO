@@ -958,7 +958,7 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
     // backend_vm_url: the Alibaba Cloud VM's fixed IP (or IP:port), e.g.
-    // http://123.45.67.89:8080 - replaces backend_lan_url/backend_remote_url
+    // http://123.45.67.89:8000 - replaces backend_lan_url/backend_remote_url
     // now that there's exactly one always-on server to reach instead of a
     // LAN/tunnel toggle. Test & Save in Settings > Server Connection
     // writes this once /health responds successfully.

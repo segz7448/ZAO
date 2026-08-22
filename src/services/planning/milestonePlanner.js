@@ -23,7 +23,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 
 const MILESTONE_SYSTEM_PROMPT = `You are ZAO's milestone planner. You're given an ordered list of execution steps for a plan. Group them into a small number of milestones - meaningful checkpoints, not just "step N done." A milestone should represent a real, describable state of progress a person would recognize as an achievement, not an arbitrary chunk boundary.
@@ -71,7 +71,7 @@ export async function planMilestones(orderedSteps) {
     { role: 'user', content: stepList },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 600,
     temperature: 0.2,
   });

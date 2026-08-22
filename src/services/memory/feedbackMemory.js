@@ -42,7 +42,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import {
   getAllFeedbackPatterns,
@@ -189,7 +189,7 @@ ${assistantText.slice(0, 1200)}
 
 Respond with ONLY the instruction (no quotes, no preamble, no "Avoid:" prefix needed but fine either way), or exactly "none".`;
 
-    const result = await llamaEngine.sendMessage(
+    const result = await modelClient.sendMessage(
       [{ role: 'user', content: distillPrompt }],
       DISTILL_MODEL_KEY,
       { maxTokens: 60, temperature: 0.2 }

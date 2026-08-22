@@ -28,7 +28,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import { RECOVERY_STRATEGIES } from './planTypes';
 
@@ -140,7 +140,7 @@ Respond with ONLY a JSON object, no markdown fences, no commentary:
     { role: 'user', content: userContent },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 300,
     temperature: 0.3,
   });

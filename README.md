@@ -2,10 +2,12 @@
 
 An Android chat app whose "brain" runs on a dedicated Alibaba Cloud VM,
 not the phone or a third-party cloud API. One model - **Qwen3 Coder 30B
-A3B Instruct**, served by a small Node backend on the VM (`/server`) via
-`llama-server` (llama.cpp) - handles chat, coding, reasoning, and
-tool-calling. The phone talks to it over the VM's fixed public IP. Beyond
-chat, ZAO acts as an on-device agent: it can browse the web (via a
+A3B Instruct**, served via Alibaba Cloud's Model Studio (DashScope) API
+and relayed through a small Node backend on the VM (`/server`) - handles
+chat, coding, reasoning, and tool-calling. The phone talks to the VM over
+its fixed public IP; the VM in turn talks to Model Studio over HTTPS -
+there's no local model weights or GPU/CPU inference on the VM itself.
+Beyond chat, ZAO acts as an on-device agent: it can browse the web (via a
 Playwright agent also running on the VM), push code to GitHub, run real
 shell commands on the VM, and create/read PDF/Word/Excel/PowerPoint files
 - all invoked automatically by the model deciding what a request needs,
@@ -21,7 +23,7 @@ voice mode, and no image generation anywhere in the app.
 
 | Model | Where it runs | Used for |
 |---|---|---|
-| **Qwen3 Coder 30B A3B Instruct Instruct** (Q4_K_M GGUF) | Your PC, via `llama-server` | Everything: chat, coding, reasoning, tool-calling/routing |
+| **Qwen3 Coder 30B A3B Instruct** | Alibaba Cloud Model Studio, relayed via your VM | Everything: chat, coding, reasoning, tool-calling/routing |
 
 That's it - one model, no fallback chain, no task-based switching, no
 on-device weights on the phone. `src/config/localModels.js` keeps a single
@@ -127,8 +129,8 @@ src/
   theme/                        tokens.js (light+dark palettes) + useTheme.js.
 
 server/                        Alibaba Cloud VM backend (Node/Express) - see server/README.md.
-  index.js                       Spawns/monitors llama-server, proxies
-                              /v1/chat/completions, health check + internet-
+  index.js                       Relays /v1/chat/completions to Alibaba
+                              Model Studio, health check + internet-
                               reachability self-check, rate limiting, auth.
   terminal.js                    /terminal/run - real bash/Python execution.
   ocr.js + scripts/ocr_extract.py  /ocr/extract - free, open-source OCR
@@ -154,17 +156,17 @@ For the deeper architectural picture (what "brain," "reasoning," and
 
 ## Setup
 
-**PC backend** (does the actual model inference - see `server/README.md`
-for full detail):
+**VM backend** (relays chat to Alibaba Model Studio - see
+`server/README.md` for full detail):
 ```
 cd server
 npm install
-# edit config.js: MODEL_PATH, LLAMA_SERVER_BIN, ZAO_AUTH_TOKEN
+# set DASHSCOPE_API_KEY and ZAO_AUTH_TOKEN (env vars, or edit config.js)
 ```
 Run `./start.sh` (or set it up as a systemd service - see that file's own
 header) each time before using the app - it starts the Node server, which
-in turn spawns `llama-server`. The VM is 24/7, so once running there's
-nothing else to keep restarting.
+relays requests straight to Alibaba Model Studio. The VM is 24/7, so once
+running there's nothing else to keep restarting.
 
 **Phone app**:
 ```bash

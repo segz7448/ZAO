@@ -2,11 +2,13 @@
 /**
  * ZAO Backend - Alibaba Cloud VM edition
  *
- * Single-model, single-user. Wraps llama.cpp's `llama-server` (started as a
- * child process) with a small Express layer that:
- *   - Spawns/monitors llama-server on startup, restarts it if it dies
- *   - Exposes /v1/chat/completions (proxies straight to llama-server, same
- *     OpenAI-compatible shape the app already expects)
+ * Single-model, single-user. No local inference: this is a thin, always-on
+ * Express relay that:
+ *   - Exposes /v1/chat/completions and forwards it straight to Alibaba
+ *     Cloud's Model Studio (DashScope) OpenAI-compatible API, which hosts
+ *     qwen3-coder-30b-a3b-instruct - same request/response shape the app
+ *     already expects, just relayed over HTTPS instead of proxied to a
+ *     Model Studio relay (no local model process)
  *   - Exposes /health so the app can check the backend is up at the VM's
  *     IP - also reports whether the VM currently has internet access
  *     (internetAvailable), so the app can tell the person plainly when an
@@ -41,15 +43,14 @@
  * Run with: server/start.sh (or set it up as a systemd service - see that
  * file's own header - so it survives reboots on the 24/7 VM).
  *
- * Config is entirely in config.js - edit ZAO_MODEL_DIR there (or set the
- * env var) if your model/binary aren't in /opt/zao/model.
+ * Config is entirely in config.js - set DASHSCOPE_API_KEY there (or the
+ * env var) to your Alibaba Cloud Model Studio key.
  */
 
 const express = require('express');
-const { spawn } = require('child_process');
 const http = require('http');
-const path = require('path');
-const fs = require('fs');
+const https = require('https');
+const { URL } = require('url');
 const config = require('./config');
 const { registerTerminalRoute } = require('./terminal');
 const { registerProcessRoutes } = require('./processManager');
@@ -192,118 +193,54 @@ async function refreshInternetStatus() {
 
 // ---------------------------------------------------------------------------
 // Startup sanity checks - fail loudly and clearly rather than a cryptic
-// spawn ENOENT if paths in config.js are wrong.
+// upstream 401 the first time the app tries to send a message.
 // ---------------------------------------------------------------------------
 function checkPathsOrExit() {
   const problems = [];
-  if (!fs.existsSync(config.LLAMA_SERVER_BIN)) {
-    problems.push(`llama-server not found at: ${config.LLAMA_SERVER_BIN}`);
-  }
-  if (!fs.existsSync(config.MODEL_PATH)) {
-    problems.push(`Model GGUF not found at: ${config.MODEL_PATH}`);
+  if (!config.DASHSCOPE_API_KEY) {
+    problems.push('DASHSCOPE_API_KEY is not set - export it (or set it in config.js) to your Alibaba Cloud Model Studio API key.');
   }
   if (config.AUTH_TOKEN === 'change-me-to-a-real-secret') {
     log('WARNING: AUTH_TOKEN is still the default placeholder. Set ZAO_AUTH_TOKEN (or edit config.js) to a real secret before exposing this over the public internet.');
   }
   if (problems.length) {
-    log('Cannot start - fix these paths in config.js (or the matching env vars) first:');
+    log('Cannot start - fix these first:');
     problems.forEach((p) => log('  - ' + p));
     process.exit(1);
   }
 }
 
 // ---------------------------------------------------------------------------
-// llama-server child process management
+// Alibaba Cloud Model Studio (DashScope) relay - no local inference. This
+// VM just forwards chat completions to Alibaba's hosted
+// qwen3-coder-30b-a3b-instruct over HTTPS and streams the response straight
+// back to the phone. "Ready" simply means DASHSCOPE_API_KEY is configured -
+// there's no model-load wait since nothing loads locally anymore.
 // ---------------------------------------------------------------------------
-let llamaProcess = null;
-let llamaReady = false;
-let restartCount = 0;
-const MAX_RESTARTS = 5;
-
-function startLlamaServer() {
-  log(`Starting llama-server (model: ${config.MODEL_PATH})...`);
-  llamaReady = false;
-
-  llamaProcess = spawn(
-    config.LLAMA_SERVER_BIN,
-    [
-      '-m', config.MODEL_PATH,
-      '--host', '127.0.0.1',
-      '--port', String(config.LLAMA_PORT),
-      '-c', String(config.CONTEXT_SIZE),
-      '-t', String(config.THREADS),
-      '--jinja', // enables chat template + tool-calling
-      '-ngl', '0', // CPU-only build
-    ],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }
-  );
-
-  llamaProcess.stdout.on('data', (d) => process.stdout.write(`[llama-server] ${d}`));
-  llamaProcess.stderr.on('data', (d) => process.stderr.write(`[llama-server] ${d.toString()}`));
-  pollLlamaHealth();
-
-  llamaProcess.on('exit', (code, signal) => {
-    llamaReady = false;
-    if (healthPollTimer) { clearInterval(healthPollTimer); healthPollTimer = null; }
-    log(`llama-server exited (code=${code}, signal=${signal}).`);
-    if (restartCount < MAX_RESTARTS) {
-      restartCount += 1;
-      log(`Restarting (attempt ${restartCount}/${MAX_RESTARTS}) in 2s...`);
-      setTimeout(startLlamaServer, 2000);
-    } else {
-      log('Too many restarts - giving up. Check MODEL_PATH / LLAMA_SERVER_BIN in config.js.');
-    }
-  });
+function modelReady() {
+  return Boolean(config.DASHSCOPE_API_KEY);
 }
 
-function llamaBaseUrl() {
-  return `http://127.0.0.1:${config.LLAMA_PORT}`;
-}
+/** Forwards a request to DashScope, injecting the model name and streaming the response back. */
+function proxyToDashScope(req, res, reqPath) {
+  const upstream = new URL(config.DASHSCOPE_BASE_URL + reqPath);
+  const bodyObj = { ...req.body, model: req.body?.model || config.MODEL_NAME };
+  const body = JSON.stringify(bodyObj);
 
-let healthPollTimer = null;
-
-function pollLlamaHealth() {
-  if (healthPollTimer) clearInterval(healthPollTimer);
-  llamaReady = false;
-  let attempts = 0;
-
-  healthPollTimer = setInterval(() => {
-    attempts += 1;
-    const req = http.get(`${llamaBaseUrl()}/health`, { timeout: 2000 }, (res) => {
-      res.on('data', () => {});
-      res.on('end', () => {
-        if (res.statusCode === 200 && !llamaReady) {
-          llamaReady = true;
-          log(`llama-server is ready after ${attempts} health check(s).`);
-          clearInterval(healthPollTimer);
-          healthPollTimer = null;
-        }
-      });
-    });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => {
-      // Not up yet - keep polling silently, expected during model load.
-    });
-  }, 1500);
-}
-
-/** Proxies a request to llama-server, forwarding body as-is and streaming back the response. */
-function proxyToLlama(req, res, reqPath) {
-  const body = JSON.stringify(req.body);
   const options = {
-    hostname: '127.0.0.1',
-    port: config.LLAMA_PORT,
-    path: reqPath,
+    hostname: upstream.hostname,
+    port: upstream.port || 443,
+    path: upstream.pathname + upstream.search,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(body),
+      Authorization: `Bearer ${config.DASHSCOPE_API_KEY}`,
     },
+    timeout: config.MODEL_TIMEOUT_MS,
   };
 
-  const proxyReq = http.request(options, (proxyRes) => {
+  const proxyReq = https.request(options, (proxyRes) => {
     res.status(proxyRes.statusCode || 200);
     for (const [key, value] of Object.entries(proxyRes.headers)) {
       if (value !== undefined) res.setHeader(key, value);
@@ -311,9 +248,12 @@ function proxyToLlama(req, res, reqPath) {
     proxyRes.pipe(res);
   });
 
+  proxyReq.on('timeout', () => proxyReq.destroy(new Error('Model Studio request timed out')));
   proxyReq.on('error', (err) => {
-    log('Proxy to llama-server failed:', err.message);
-    res.status(502).json({ error: { message: `llama-server is not responding: ${err.message}` } });
+    log('Relay to Model Studio failed:', err.message);
+    if (!res.headersSent) {
+      res.status(502).json({ error: { message: `Alibaba Model Studio is not responding: ${err.message}` } });
+    }
   });
 
   proxyReq.write(body);
@@ -321,27 +261,29 @@ function proxyToLlama(req, res, reqPath) {
 }
 
 /**
- * Sends a chat history straight to llama-server and returns the same
+ * Sends a chat history straight to DashScope and returns the same
  * { success, content, error } shape the old backendClient.js's
  * _callModel() used - the browser agent (browserAgent.js) needs this same
  * call but isn't itself an Express request/response, so it can't reuse
- * proxyToLlama() above directly.
+ * proxyToDashScope() above directly.
  */
 function sendToModel(history) {
   return new Promise((resolve) => {
-    if (!llamaReady) {
-      resolve({ success: false, content: null, error: { message: 'Model is still loading.' } });
+    if (!modelReady()) {
+      resolve({ success: false, content: null, error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
       return;
     }
-    const body = JSON.stringify({ messages: history, max_tokens: 1024, temperature: 0.2 });
+    const body = JSON.stringify({ model: config.MODEL_NAME, messages: history, max_tokens: 1024, temperature: 0.2 });
+    const upstream = new URL(config.DASHSCOPE_BASE_URL + '/chat/completions');
     const options = {
-      hostname: '127.0.0.1',
-      port: config.LLAMA_PORT,
-      path: '/v1/chat/completions',
+      hostname: upstream.hostname,
+      port: upstream.port || 443,
+      path: upstream.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${config.DASHSCOPE_API_KEY}` },
+      timeout: config.MODEL_TIMEOUT_MS,
     };
-    const req = http.request(options, (res) => {
+    const req = https.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -349,7 +291,7 @@ function sendToModel(history) {
           const parsed = JSON.parse(data);
           const content = parsed?.choices?.[0]?.message?.content || null;
           if (!content) {
-            resolve({ success: false, content: null, error: { message: 'No content from model.' } });
+            resolve({ success: false, content: null, error: { message: parsed?.error?.message || 'No content from model.' } });
             return;
           }
           resolve({ success: true, content, error: null });
@@ -358,6 +300,7 @@ function sendToModel(history) {
         }
       });
     });
+    req.on('timeout', () => req.destroy(new Error('Model Studio request timed out')));
     req.on('error', (err) => resolve({ success: false, content: null, error: { message: err.message } }));
     req.write(body);
     req.end();
@@ -372,25 +315,27 @@ function sendToModel(history) {
  * loop has no tool-calling needs); this is what backgroundSessions.js's
  * server-side agent loop drives - the toolOrchestrator.js pattern already
  * used for the phone's in-app tool loop, just with the model call and the
- * tool loop both running here on the PC instead of split across a phone
+ * tool loop both running here on the VM instead of split across a phone
  * app + this backend.
  * @returns {Promise<{success: boolean, content: string|null, toolCalls: Array|null, error: object|null}>}
  */
 function sendToolCall(history, tools) {
   return new Promise((resolve) => {
-    if (!llamaReady) {
-      resolve({ success: false, content: null, toolCalls: null, error: { message: 'Model is still loading.' } });
+    if (!modelReady()) {
+      resolve({ success: false, content: null, toolCalls: null, error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
       return;
     }
-    const body = JSON.stringify({ messages: history, tools, max_tokens: 2048, temperature: 0.3 });
+    const body = JSON.stringify({ model: config.MODEL_NAME, messages: history, tools, max_tokens: 2048, temperature: 0.3 });
+    const upstream = new URL(config.DASHSCOPE_BASE_URL + '/chat/completions');
     const options = {
-      hostname: '127.0.0.1',
-      port: config.LLAMA_PORT,
-      path: '/v1/chat/completions',
+      hostname: upstream.hostname,
+      port: upstream.port || 443,
+      path: upstream.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${config.DASHSCOPE_API_KEY}` },
+      timeout: config.MODEL_TIMEOUT_MS,
     };
-    const req = http.request(options, (res) => {
+    const req = https.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -398,7 +343,7 @@ function sendToolCall(history, tools) {
           const parsed = JSON.parse(data);
           const message = parsed?.choices?.[0]?.message;
           if (!message) {
-            resolve({ success: false, content: null, toolCalls: null, error: { message: 'No message from model.' } });
+            resolve({ success: false, content: null, toolCalls: null, error: { message: parsed?.error?.message || 'No message from model.' } });
             return;
           }
           resolve({ success: true, content: message.content || null, toolCalls: message.tool_calls || null, error: null });
@@ -407,6 +352,7 @@ function sendToolCall(history, tools) {
         }
       });
     });
+    req.on('timeout', () => req.destroy(new Error('Model Studio request timed out')));
     req.on('error', (err) => resolve({ success: false, content: null, toolCalls: null, error: { message: err.message } }));
     req.write(body);
     req.end();
@@ -431,7 +377,7 @@ app.get('/health', (req, res) => {
   const header = req.headers.authorization || '';
   const suppliedToken = header.startsWith('Bearer ') ? header.slice(7) : null;
   res.json({
-    status: llamaReady ? 'ready' : 'starting',
+    status: modelReady() ? 'ready' : 'starting',
     model: config.MODEL_LABEL,
     port: config.PORT,
     internetAvailable, // null until the first background check completes (~15s after startup)
@@ -440,8 +386,8 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/v1/chat/completions', (req, res) => {
-  if (!llamaReady) {
-    return res.status(503).json({ error: { message: 'Model is still loading. Try again in a moment.' } });
+  if (!modelReady()) {
+    return res.status(503).json({ error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
   }
   // NOTE: "live tool-choice: no" here does NOT mean tools are broken or
   // unavailable - most requests never need it. The hierarchical-plan
@@ -456,7 +402,7 @@ app.post('/v1/chat/completions', (req, res) => {
   // activity log instead of this line.
   const liveToolCount = req.body?.tools?.length || 0;
   log(`Chat request (${(req.body?.messages || []).length} messages, live tool-choice: ${liveToolCount > 0 ? `yes, ${liveToolCount} tool(s) offered` : 'no (tool already decided upstream, if any)'})`);
-  proxyToLlama(req, res, '/v1/chat/completions');
+  proxyToDashScope(req, res, '/chat/completions');
 });
 
 registerTerminalRoute(app, config, log);
@@ -483,11 +429,11 @@ if (config.AUTH_TOKEN === config.DEFAULT_AUTH_TOKEN) {
 }
 
 const httpServer = app.listen(config.PORT, '0.0.0.0', () => {
+  checkPathsOrExit();
   log(`ZAO backend listening on http://0.0.0.0:${config.PORT} (reachable via the VM's public IP)`);
   log(`Health check: http://127.0.0.1:${config.PORT}/health`);
   log(`Browser agent stream: ws://0.0.0.0:${config.PORT}/browser-agent/stream`);
-  checkPathsOrExit();
-  startLlamaServer();
+  log(`Model: ${config.MODEL_NAME} via ${config.DASHSCOPE_BASE_URL} (Alibaba Cloud Model Studio)`);
   refreshInternetStatus(); // fire immediately so /health has a real value ASAP, not just after the first interval tick
   setInterval(refreshInternetStatus, INTERNET_CHECK_INTERVAL_MS);
 });
@@ -496,8 +442,6 @@ registerBrowserAgentStream(httpServer, config, log, sendToModel);
 
 process.on('SIGINT', async () => {
   log('Shutting down...');
-  if (healthPollTimer) clearInterval(healthPollTimer);
-  if (llamaProcess) llamaProcess.kill();
   shutdownAllPreviewServers();
   await shutdownBrowser();
   process.exit(0);

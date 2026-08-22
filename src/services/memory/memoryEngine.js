@@ -32,7 +32,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import * as llamaEngine from '../backend/backendClient';
+import * as modelClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import {
   getActiveMemories,
@@ -43,7 +43,7 @@ import {
 
 // Extraction now runs on Qwen3-4B, the same local general-purpose model
 // used for normal chat (see src/config/localModels.js). There's no
-// separate "cheap model" concern anymore - it's a local llama.rn call with
+// separate "cheap model" concern anymore - it's a Model Studio call with
 // no per-call cost, so reusing Qwen3-4B rather than maintaining a second
 // resident model just for extraction is the simpler and more
 // memory-friendly choice on a phone. Gemma 4 (OpenRouter) is gone.
@@ -338,7 +338,7 @@ Assistant: ${(assistantText || '').slice(0, 1000)}
 
 Respond with ONLY a JSON array (no markdown fences, no commentary). Each item: {"content": "concise fact in third person, e.g. 'User lives in Lagos'", "category": "personal|work|preference|project|general"}. If nothing is worth remembering, respond with exactly: []`;
 
-    const result = await llamaEngine.sendMessage(
+    const result = await modelClient.sendMessage(
       [{ role: 'user', content: extractionPrompt }],
       EXTRACTION_MODEL_KEY,
       { maxTokens: 500, temperature: 0.2 }
