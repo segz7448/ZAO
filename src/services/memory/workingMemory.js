@@ -51,7 +51,7 @@ const MIN_RAW_MESSAGES_KEPT = 8;
 // chats exactly as fast as before this module existed.
 const COMPACTION_THRESHOLD_CHARS = 20000;
 
-const SUMMARY_MODEL_KEY = MODEL_KEYS.QWEN25_CODER_3B;
+const SUMMARY_MODEL_KEY = MODEL_KEYS.QWEN3_CODER_30B_A3B;
 
 function estimateChars(messages) {
   return messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);

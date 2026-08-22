@@ -56,7 +56,6 @@ function registerOcrRoute(app, config, log) {
     log(`OCR request: ${fileName} (${(fileBase64.length * 0.75 / 1024).toFixed(0)} KB decoded)`);
 
     const child = spawn(config.PYTHON_BIN, [SCRIPT_PATH, tempPath], {
-      windowsHide: true,
       timeout: config.OCR_TIMEOUT_MS,
     });
 

@@ -71,7 +71,7 @@ export async function planMilestones(orderedSteps) {
     { role: 'user', content: stepList },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 600,
     temperature: 0.2,
   });

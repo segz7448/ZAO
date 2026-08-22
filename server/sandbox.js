@@ -12,12 +12,12 @@
  * matching.
  *
  * HOW: when Docker is reachable, a command is run inside an ephemeral
- * (--rm) Linux container instead of directly on the host:
+ * (--rm) Linux container instead of directly on the VM's own host:
  *   - --read-only root filesystem; only the project's own working
- *     directory is bind-mounted (read-write) - nothing else on the PC's
+ *     directory is bind-mounted (read-write) - nothing else on the VM's
  *     disk is visible to the command at all, let alone writable. A
  *     malicious `rm -rf /` inside the sandbox hits the container's own
- *     throwaway root, not your PC.
+ *     throwaway root, not the VM.
  *   - --network none by default - no outbound access at all unless the
  *     caller explicitly says the command needs it (npm/pip install, git
  *     pull, curl), in which case a network-enabled bridge is used
@@ -27,33 +27,22 @@
  *     outside the mount, can't load kernel modules, etc.) and no
  *     privilege escalation via setuid binaries.
  *   - --memory / --pids-limit / --cpus - a runaway or fork-bombing
- *     command can't take the whole PC down; it's capped to the
+ *     command can't take the whole VM down; it's capped to the
  *     container's own cgroup.
  *   - runs as a non-root container user (see the Dockerfile referenced
  *     in ensureSandboxImage() below), so even inside the container's own
  *     throwaway filesystem, most of it still isn't writable.
  *
- * HONEST LIMITATION, stated plainly rather than glossed over: Docker
- * Desktop on Windows runs LINUX containers (via its WSL2 backend) by
- * default - genuine kernel namespace/cgroup isolation, but a *Linux*
- * one. That means only commands already being run through bash (see
- * terminal.js's chooseShell() -> 'gitbash' or 'python') can be
- * transparently sandboxed this way; there's no equivalent way to drop a
- * raw cmd.exe/PowerShell invocation into an isolated Windows namespace
- * without Windows containers, which are far heavier and poorly
- * supported on Docker Desktop. So:
- *   - shell === 'gitbash' or 'python'  -> sandboxed here when Docker is
- *     available and the caller hasn't set hostAccess: true.
- *   - shell === 'cmd' or 'powershell'  -> still runs directly on the
- *     host, exactly as before. This is unavoidable without Windows
- *     containers, not a bug - and terminal.js reports `sandboxed: false`
- *     for these so the model/UI never claims isolation that didn't
- *     happen.
+ * The VM itself is Linux, so this is native Docker running native Linux
+ * containers - no cross-platform caveat to document here (unlike the old
+ * Windows/Docker Desktop setup, where only bash-routed commands could be
+ * sandboxed this way). Every terminal command (bash or python) is
+ * eligible.
  *   - hostAccess: true (from the client) always skips the sandbox on
- *     purpose - APK builds, the Android emulator, Visual Studio, Docker
- *     itself, and anything else that genuinely needs the real PC can't
- *     function inside a throwaway container, so this is an explicit,
- *     visible opt-out rather than the sandbox silently failing closed.
+ *     purpose - anything that genuinely needs the real VM filesystem
+ *     directly can't function inside a throwaway container, so this is
+ *     an explicit, visible opt-out rather than the sandbox silently
+ *     failing closed.
  */
 
 const { spawn, execFile } = require('child_process');
@@ -134,7 +123,7 @@ function ensureSandboxImage(log) {
 }
 
 /**
- * @param {'gitbash'|'python'} shell - only these two are ever sandboxable (see header)
+ * @param {'bash'|'python'} shell
  * @param {string} command
  * @param {object} opts - { cwd, allowNetwork, memoryLimit, cpuLimit, pidsLimit }
  * @returns {{ bin: string, args: string[] }} a `docker run ...` invocation
@@ -150,9 +139,9 @@ function buildSandboxedSpawnArgs(shell, command, opts) {
     pidsLimit = '256',
   } = opts;
 
-  // The project directory is the ONLY thing from the host filesystem
+  // The project directory is the ONLY thing from the VM's own filesystem
   // visible inside the container, and only that one folder - not the
-  // user's whole home directory, not the C: drive, nothing else.
+  // rest of the VM, nothing else.
   const mountSource = cwd || os.homedir();
   const mountTarget = '/work';
 
@@ -176,8 +165,7 @@ function buildSandboxedSpawnArgs(shell, command, opts) {
     const code = match ? match[2] : command;
     args.push('python3', '-c', code);
   } else {
-    // gitbash - run through bash inside the container, same -lc shape
-    // terminal.js uses for the real Git Bash path.
+    // bash - same -lc shape terminal.js uses for the real bash path.
     args.push('bash', '-lc', command);
   }
 

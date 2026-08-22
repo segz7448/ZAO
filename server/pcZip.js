@@ -10,9 +10,8 @@
  *
  * Uses jszip (already a dependency for the phone's on-device PDF/DOCX
  * extractors) rather than shelling out to a platform zip binary - one
- * implementation instead of "zip on posix, PowerShell's
- * Compress-Archive on Windows, and hoping both produce compatible
- * output".
+ * implementation instead of depending on whatever zip/unzip happens to
+ * be installed on the VM.
  *
  * Same PC_BRIDGE_ROOT confinement as pcFiles.js - resolveInsideRoot is
  * imported from there rather than reimplemented, since a path-traversal

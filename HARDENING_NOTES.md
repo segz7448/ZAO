@@ -28,8 +28,8 @@ Status reflects what's fixed in this pass vs. still open.
   `AUTH_TOKEN` fell back to the literal string
   `'change-me-to-a-real-secret'` with nothing telling you if you'd
   forgotten to change it - on a server bound to `0.0.0.0` and reachable
-  over the public Cloudflare tunnel. `server/index.js` now logs a loud,
-  impossible-to-miss warning at startup if the token is still the
+  over the public internet at the VM's IP. `server/index.js` now logs a
+  loud, impossible-to-miss warning at startup if the token is still the
   placeholder.
 - **No rate limiting.** Added a crude in-memory sliding-window limiter
   (120 req/min/IP) to `server/index.js` - not about fairness (it's a

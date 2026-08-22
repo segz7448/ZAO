@@ -16,9 +16,9 @@
  * pcFilesystemTool.js on the app side.
  *
  * Every route here is restricted to PC_BRIDGE_ROOT (config.js); any path
- * that resolves outside of it (via ../, absolute paths, drive letters,
- * etc.) is rejected, since this server is reachable over LAN and the
- * public Cloudflare tunnel, not just 127.0.0.1.
+ * that resolves outside of it (via ../, absolute paths, etc.) is
+ * rejected, since this server is reachable over the public internet at
+ * the VM's IP, not just 127.0.0.1.
  */
 
 const fs = require('fs');

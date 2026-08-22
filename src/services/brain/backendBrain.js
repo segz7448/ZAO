@@ -1,9 +1,9 @@
 /**
  * ZAO - Backend Brain (the "cortex")
  *
- * Runs on the PC (server/, src/services/backend/backendClient.js) - this
+ * Runs on the Alibaba Cloud VM (server/, src/services/backend/backendClient.js) - this
  * is where every actual model call happens. There is exactly one model
- * underneath (Qwen2.5-Coder-3B, DENSE_TRANSFORMER - see brainTypes.js),
+ * underneath (Qwen3-Coder-30B-A3B-Instruct, MIXTURE_OF_EXPERTS - see brainTypes.js),
  * but this app puts it to work as a MULTI_BRAIN_ENSEMBLE: several
  * distinct ROLES, each its own system prompt/temperature/job, all
  * hitting that same model. This file is the single place that names

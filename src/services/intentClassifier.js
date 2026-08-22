@@ -86,7 +86,7 @@ export async function classifyIntent(messageText, options = {}) {
   const MAX_ATTEMPTS = 3;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+      const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
         maxTokens: 20,
         temperature: 0,
       });

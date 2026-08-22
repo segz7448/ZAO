@@ -1,19 +1,20 @@
-# ZAO Backend (PC edition)
+# ZAO Backend (Alibaba Cloud VM edition)
 
-Single model, single user. Runs on your Windows PC instead of on-device in
-Termux, so the phone app just needs network access to it - over your home
-WiFi (LAN mode) or a Cloudflare Quick Tunnel (Remote mode) when you're out.
+Single model, single user. Runs on a dedicated, always-on Alibaba Cloud VM
+instead of on-device or on a person's PC, so the phone app just needs
+network access to the VM's fixed public IP. No LAN/tunnel toggle, nothing
+that rotates - the VM is 24/7.
 
 ## What it is
 
 A small Node/Express server that:
 1. Spawns `llama-server` (from llama.cpp) as a child process, running
-   Qwen2.5-Coder-3B.
+   Qwen3-Coder-30B-A3B-Instruct.
 2. Exposes an OpenAI-compatible `/v1/chat/completions` endpoint.
-3. Exposes `/terminal/run`, which runs real shell commands on this PC -
-   auto-detecting cmd.exe, PowerShell, Git Bash, or a raw Python
-   interpreter per command (see `terminal.js`'s `chooseShell()`) - this is
-   what ZAO's Terminal tool calls, and the only terminal ZAO has.
+3. Exposes `/terminal/run`, which runs real shell commands on this VM -
+   auto-detecting bash or a raw Python interpreter per command (see
+   `terminal.js`'s `chooseShell()`) - this is what ZAO's Terminal tool
+   calls, and the only terminal ZAO has.
 4. Exposes `/ocr/extract`, which runs free, open-source OCR (Tesseract via
    the `pytesseract` wrapper, with PyMuPDF rendering PDF pages to images
    first) in a Python subprocess - this is what lets ZAO read
@@ -36,14 +37,14 @@ A small Node/Express server that:
    checking manually.
 7. Restarts `llama-server` automatically if it crashes.
 8. Requires an `Authorization: Bearer <token>` header on every request
-   except `/health`, since this server is reachable over LAN and the
-   public internet (via the tunnel), not just loopback.
+   except `/health`, since this server is reachable over the public
+   internet at the VM's IP, not just loopback.
 
-Unlike the old Termux setup, there's no fixed URL the app auto-detects -
-you configure the connection once in the app's **Settings > Backend
-Connection** screen (LAN URL, Remote/tunnel URL, and the auth token).
+You configure the connection once in the app's **Settings > Server
+Connection** screen: the VM's IP (or IP:port), tested and saved
+independently from the model API key.
 
-## One-time setup
+## One-time setup (on the VM)
 
 ```
 cd server
@@ -51,22 +52,17 @@ npm install
 ```
 
 Then edit `config.js` (or set the matching env vars) if your model/binary
-aren't in `C:\Users\User\Downloads\Model`:
+aren't in `/opt/zao/model`:
 
-- `MODEL_PATH` - full path to `Qwen2.5-coder-3B-instruct-Q4_K_M.gguf`
-- `LLAMA_SERVER_BIN` - full path to `llama-server.exe`
+- `MODEL_PATH` - full path to `Qwen3-coder-30B-A3B-instruct-Q4_K_M.gguf`
+- `LLAMA_SERVER_BIN` - full path to the `llama-server` binary (Linux build)
 - `ZAO_AUTH_TOKEN` - **change this from the placeholder** to a real secret
-  before using Remote mode. Put the same value in the app's Settings.
+  before exposing this beyond your own machine. Put the same value in the
+  app's Settings > Server Connection > Model API key field.
 
-For Remote mode (Cloudflare Quick Tunnel), get `cloudflared.exe`:
-
-```
-winget install --id Cloudflare.cloudflared
-```
-
-or download it manually from
-https://github.com/cloudflare/cloudflared/releases and place
-`cloudflared.exe` on your PATH or directly in this `server/` folder.
+Open the VM's firewall / Alibaba Cloud Security Group for whichever port
+you're using (`8080` by default) so the phone can actually reach it from
+outside the VM.
 
 ### OCR (optional, but needed for scanned PDFs / text-in-images)
 
@@ -80,8 +76,9 @@ pip install pytesseract pymupdf pillow
 
 Plus the Tesseract engine itself (a system binary, not a pip package):
 
-- Windows: install from https://github.com/UB-Mannheim/tesseract/wiki and
-  make sure `tesseract.exe`'s folder is on your PATH.
+```
+sudo apt-get install tesseract-ocr
+```
 
 If you have multiple Python installs, set `PYTHON_BIN` in `config.js` (or
 the `ZAO_PYTHON_BIN` env var) to whichever one has the packages above
@@ -102,45 +99,46 @@ No system binary needed beyond Python itself (unlike OCR's Tesseract).
 
 ## Every time after that
 
-Double-click `start.bat` (or run it from cmd/PowerShell/Git Bash). It
-opens two windows:
+Run:
 
-- **ZAO Backend** - the Node server + llama-server. Watch for
-  `llama-server is ready after N health check(s)` before chatting.
-- **ZAO Cloudflare Tunnel** - prints a URL like
-  `https://random-words-1234.trycloudflare.com`. This **rotates every
-  restart** (it's a free Quick Tunnel) - copy the fresh URL into the
-  app's Settings > Backend Connection > Remote URL field before using
-  Remote mode away from home.
+```
+./start.sh
+```
 
-  Want a URL that never changes instead? Run
-  `node scripts/setup-permanent-tunnel.js` once - it needs a domain in a
-  Cloudflare account and an API token (the script walks you through
-  getting one), and automates creating a real named tunnel + DNS record
-  via Cloudflare's API. Once set up, `start.bat` detects it automatically
-  and every future restart reuses the same permanent URL - no more
-  copying a new one in each time.
+It prints `ZAO backend listening on 0.0.0.0:<port>` and then
+`llama-server is ready after N health check(s)` once the model has
+loaded and chat requests will actually work.
 
-Leave both windows running, then open ZAO on your phone.
+Since the VM is 24/7, you'll want this running as a real background
+service rather than tied to an SSH session - `start.sh`'s own header has
+a ready-to-use `systemd` unit file for exactly that. Once installed:
 
-## LAN mode
+```
+sudo systemctl enable --now zao-backend
+sudo journalctl -u zao-backend -f    # tail logs
+```
 
-Find your PC's local IP (`ipconfig` in cmd, look for IPv4 Address) and
-enter `http://<that-ip>:8080` as the LAN URL in Settings. Works as long as
-your phone is on the same WiFi as this PC.
+## Connecting the phone app
+
+Find the VM's public IP (from the Alibaba Cloud console, or `curl
+ifconfig.me` on the VM itself) and enter `<that-ip>:8080` as the VM
+address in **Settings > Server Connection** - tap **Test & Save**. Then
+enter the same value you set for `ZAO_AUTH_TOKEN` as the **Model API
+key** and tap its own **Test & Save**. Both checks hit `/health`
+directly, so you'll know immediately if either one is wrong.
 
 ## Config
 
 Edit `config.js` directly, or set these env vars:
 
 - `MODEL_PATH` - full path to the GGUF file
-- `LLAMA_SERVER_BIN` - full path to `llama-server.exe`
+- `LLAMA_SERVER_BIN` - full path to the `llama-server` binary
 - `LLAMA_THREADS` - CPU thread count (defaults to all logical cores)
 - `ZAO_AUTH_TOKEN` - shared secret, must match what's entered in the app
 - `ZAO_TERMINAL_CWD` - default working directory for Terminal tool
-  commands (default `C:\Users\User`)
-- `ZAO_PYTHON_BIN` - Python command used for OCR (default `python`) - see
-  OCR setup above
+  commands (default `/root`)
+- `ZAO_PYTHON_BIN` - Python command used for OCR (default `python3`) -
+  see OCR setup above
 - `ZAO_OCR_TIMEOUT_MS` - max time an OCR request can run (default 180000)
 - `ZAO_DATA_TIMEOUT_MS` - max time a /data/analyze request can run (default 180000)
 - `PORT` - the server's public-facing port (default 8080)

@@ -93,7 +93,7 @@
  * the product surface around the model (e.g. an agent harness choosing
  * to branch, critique, and pick), not in the model's own weights or a
  * single forward pass. ZAO's reasoning layer mirrors that: every
- * strategy below is built as ORCHESTRATION around the one Qwen2.5-Coder-3B
+ * strategy below is built as ORCHESTRATION around the one Qwen3-Coder-30B-A3B-Instruct
  * model (one or more calls, structured prompts, parsed results) - never
  * a claim that the model itself natively branches or self-plays.
  */

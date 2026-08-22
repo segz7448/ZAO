@@ -21,7 +21,7 @@ one is about how a single turn actually REASONS its way to an answer.
 | Analogical | Reasoning by mapping to a known, structurally similar situation | **Yes** - `inferenceModes.js` (`runAnalogical`) |
 | Hybrid symbolic plan | The Strategic->Project->Task->Execution planning tree | **Yes**, pre-existing (`src/services/planning/`) - cross-referenced here only so the chat reasoning chip can label it consistently |
 
-Every strategy is orchestration around ZAO's one Qwen2.5-Coder-3B model
+Every strategy is orchestration around ZAO's one Qwen3-Coder-30B-A3B-Instruct model
 (one or more structured calls, parsed results) - none of them are a
 claim that the model itself natively branches, self-plays, or reflects
 in a single forward pass. Per the person's own framing this mirrors

@@ -36,7 +36,7 @@ export async function runChainOfThought(history, onToken, onThinking) {
   const hasOnToken = typeof onToken === 'function';
   const hasOnThinking = typeof onThinking === 'function';
 
-  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN25_CODER_3B, {
+  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 1024,
     temperature: 0.7,
     onToken: (hasOnToken || hasOnThinking)

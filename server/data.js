@@ -55,7 +55,6 @@ function registerDataRoute(app, config, log) {
     log(`Data analysis request: ${fileName} (${(fileBase64.length * 0.75 / 1024).toFixed(0)} KB decoded), operation=${options.operation || 'describe'}`);
 
     const child = spawn(config.PYTHON_BIN, [SCRIPT_PATH, tempPath, JSON.stringify(options)], {
-      windowsHide: true,
       timeout: config.DATA_TIMEOUT_MS,
     });
 

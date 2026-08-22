@@ -16,7 +16,6 @@ import { initReminderListeners, reconcileReminders } from './src/services/remind
 import { runSessionStartHooks } from './src/services/execution/hooksEngine';
 import { useChatStore } from './src/store/chatStore';
 import { usePreferencesStore } from './src/store/preferencesStore';
-import { refreshDiscoveredBackendUrl } from './src/services/backend/discoveryClient';
 import { usePlanStore } from './src/store/planStore';
 import { useThemeStore } from './src/store/themeStore';
 import { useTheme, useResolvedThemeMode } from './src/theme/useTheme';
@@ -89,12 +88,6 @@ function AppShell() {
       }
       await loadThemePreference();
       await loadPreferences();
-      // Auto-discovery (see discoveryClient.js's own header) - a no-op
-      // unless discovery_worker_url + discovery_device_id are both set
-      // in Settings. Runs AFTER loadPreferences so it can read those
-      // two fields; silently keeps whatever backend_remote_url already
-      // had if the lookup fails, never blocks app startup on it.
-      refreshDiscoveredBackendUrl();
       await loadConversationList();
       // Surfaces any plan left running/paused/awaiting-approval when the
       // app was last closed (src/store/planStore.js's
@@ -176,35 +169,21 @@ function AppShell() {
     };
   }, []);
 
-  // Periodic re-check for auto-discovery (see discoveryClient.js) - the
-  // launch-time call above catches the common case (tunnel already
-  // changed before the app was opened), this catches the PC's tunnel
-  // being recreated WHILE the phone app is already open and sitting on
-  // an older hostname. A no-op every tick unless discovery is actually
-  // configured (see refreshDiscoveredBackendUrl's own early-return), so
-  // this costs nothing for anyone using a manually-entered URL.
-  useEffect(() => {
-    const interval = setInterval(() => {
-      refreshDiscoveredBackendUrl();
-    }, 5 * 60 * 1000); // every 5 minutes - frequent enough to notice a tunnel change within one sitting, rare enough not to hammer the Worker
-    return () => clearInterval(interval);
-  }, []);
-
   // Re-attempts the connection whenever the backend connection settings
   // themselves change - the common first-run case is: launch the app
-  // (no LAN/Remote URL set yet, so the effect above's connect() attempt
-  // fails immediately with "no backend URL configured" and gives up),
-  // THEN go to Settings > Backend Connection and actually type one in.
-  // Without this, nothing would ever retry until the next full app
-  // restart even though the person just fixed the exact thing that was
-  // missing. connect() itself already no-ops safely if a connection is
-  // already open/connecting, so this is safe to fire on every
-  // preferences change, not just the first one.
+  // (no VM URL set yet, so the effect above's connect() attempt fails
+  // immediately with "no backend URL configured" and gives up), THEN go
+  // to Settings > Server Connection and actually type one in. Without
+  // this, nothing would ever retry until the next full app restart even
+  // though the person just fixed the exact thing that was missing.
+  // connect() itself already no-ops safely if a connection is already
+  // open/connecting, so this is safe to fire on every preferences
+  // change, not just the first one.
   useEffect(() => {
-    if (preferences?.backend_lan_url || preferences?.backend_remote_url) {
+    if (preferences?.backend_vm_url) {
       streamRef.current.connect();
     }
-  }, [preferences?.backend_mode, preferences?.backend_lan_url, preferences?.backend_remote_url, preferences?.backend_auth_token]);
+  }, [preferences?.backend_vm_url, preferences?.backend_auth_token]);
 
   const handleNewChat = async () => {
     setSidebarVisible(false);

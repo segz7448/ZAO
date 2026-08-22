@@ -63,7 +63,7 @@ export async function planTasks(parentPlan) {
     { role: 'user', content: `Piece of work: ${contextLabel}\nDetail: ${contextDetail}` },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 900,
     temperature: 0.25,
   });

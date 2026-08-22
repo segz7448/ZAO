@@ -1,70 +1,55 @@
 /**
- * ZAO Backend - Terminal route (PC edition)
+ * ZAO Backend - Terminal route (Alibaba Cloud VM edition)
  *
  * The app POSTs the command it wants run to this server, and
- * this file picks a shell for it and spawns it on the PC itself.
+ * this file picks a shell for it and spawns it on the VM itself.
  *
- * PC is the full terminal, and the ONLY terminal ZAO has: cmd.exe,
- * PowerShell, Git Bash, and Python are all real options here, not just
- * cmd. chooseShell() below auto-detects which one a command actually
- * needs (PowerShell cmdlet syntax, unix/bash syntax, or a raw Python
- * snippet vs. a plain `python file.py` PATH call) so the model doesn't
- * have to think about shells at all - it just sends the command it wants
- * run, the way it would to a person's real PC. An explicit `shell` field
- * in the request body always overrides the guess, for the rare case the
- * model (or you) wants to pin one.
+ * The VM is the full terminal, and the ONLY terminal ZAO has: bash and
+ * Python are the two real options here - this is a Linux VM, so there's
+ * no cmd.exe/PowerShell/Git Bash to route between anymore. chooseShell()
+ * below auto-detects which one a command actually needs (a raw Python
+ * snippet vs. everything else, which just runs through bash) so the
+ * model doesn't have to think about shells at all - it just sends the
+ * command it wants run, the way it would to a real Linux box. An
+ * explicit `shell` field in the request body always overrides the
+ * guess, for the rare case the model (or you) wants to pin one.
  *
- * SANDBOXING: gitbash/python commands run inside a real, isolated Docker
+ * SANDBOXING: every command runs inside a real, isolated Docker
  * container (see sandbox.js) whenever Docker is available and the
  * request hasn't set hostAccess: true - actual kernel-level filesystem/
  * network isolation, not just commandSafety.js's regex pattern-matching.
- * cmd/powershell commands, and anything with hostAccess: true, still run
- * directly on the host (see sandbox.js's header for exactly why). Every
- * response reports `sandboxed: true/false` so the model/UI never claims
- * isolation that didn't actually happen.
+ * Every response reports `sandboxed: true/false` so the model/UI never
+ * claims isolation that didn't actually happen.
  *
- * There is no on-device fallback terminal - if this PC backend is
+ * There is no on-device fallback terminal - if this VM backend is
  * unreachable, terminal commands simply cannot run right now (see
  * terminalRouter.js's checkTerminalStatus on the app side).
  */
 
 const { spawn } = require('child_process');
-const fs = require('fs');
 const sandbox = require('./sandbox');
 
 // ---------------------------------------------------------------------------
 // Shell auto-detection
 // ---------------------------------------------------------------------------
 
-// PowerShell-only syntax: cmdlets (Verb-Noun), $env:/$PSVersionTable,
-// object pipelines (Select-Object, Where-Object, ForEach-Object), or an
-// explicit "powershell"/"pwsh" invocation.
-const POWERSHELL_PATTERN = /(^|\s)(pwsh|powershell)(\.exe)?(\s|$)|\b[A-Z][a-zA-Z]*-[A-Z][a-zA-Z]*\b|\$env:|\$PSVersionTable|\bSelect-Object\b|\bWhere-Object\b|\bForEach-Object\b/;
-
-// Bash/unix-only syntax that cmd.exe simply can't run: command
-// substitution, unix env-var export, a leading ./script, chmod/chown,
-// unix pipes into grep/sed/awk, heredocs, or an explicit bash/sh call.
-const GITBASH_PATTERN = /\$\([^)]*\)|`[^`]*`|^\s*export\s+\w+=|^\s*\.\/|^\s*chmod\b|^\s*chown\b|\|\s*(grep|sed|awk|xargs)\b|<<['"]?\w+['"]?|(^|\s)(bash|sh)(\s|$)/;
-
 // A raw multi-line/quoted Python snippet meant to run directly (not
-// `python script.py args`, which is just a normal PATH command any
-// shell can run as-is).
+// `python script.py args`, which is just a normal PATH command bash can
+// run as-is).
 const PYTHON_SNIPPET_PATTERN = /^\s*python[0-9.]*\s+-c\s+["']/;
 
 /**
  * Picks which shell a command needs, unless the caller already forced
  * one via the `shell` request field or config.TERMINAL_AUTO_SHELL is off.
- * @returns {'cmd'|'powershell'|'gitbash'|'python'}
+ * @returns {'bash'|'python'}
  */
 function chooseShell(command, explicitShell, config) {
-  const valid = new Set(['cmd', 'powershell', 'gitbash', 'python']);
+  const valid = new Set(['bash', 'python']);
   if (explicitShell && valid.has(explicitShell)) return explicitShell;
-  if (!config.TERMINAL_AUTO_SHELL) return config.TERMINAL_SHELL || 'cmd';
+  if (!config.TERMINAL_AUTO_SHELL) return config.TERMINAL_SHELL || 'bash';
 
   if (PYTHON_SNIPPET_PATTERN.test(command)) return 'python';
-  if (GITBASH_PATTERN.test(command)) return 'gitbash';
-  if (POWERSHELL_PATTERN.test(command)) return 'powershell';
-  return 'cmd';
+  return 'bash';
 }
 
 /**
@@ -72,10 +57,6 @@ function chooseShell(command, explicitShell, config) {
  */
 function buildSpawnArgs(shell, command, config) {
   switch (shell) {
-    case 'powershell':
-      return { bin: config.POWERSHELL_BIN, args: ['-NoProfile', '-NonInteractive', '-Command', command] };
-    case 'gitbash':
-      return { bin: config.GIT_BASH_PATH, args: ['-lc', command] };
     case 'python': {
       // Strip the leading `python -c "..."` wrapper if present and run
       // the snippet directly - avoids double-quoting the code through
@@ -84,15 +65,15 @@ function buildSpawnArgs(shell, command, config) {
       const code = match ? match[2] : command;
       return { bin: config.PYTHON_BIN, args: ['-c', code] };
     }
-    case 'cmd':
+    case 'bash':
     default:
-      return { bin: 'cmd.exe', args: ['/d', '/s', '/c', command] };
+      return { bin: '/bin/bash', args: ['-lc', command] };
   }
 }
 
 /**
  * POST /terminal/run
- * body: { command: string, cwd?: string, timeoutMs?: number, shell?: 'cmd'|'powershell'|'gitbash'|'python', hostAccess?: boolean, allowNetwork?: boolean }
+ * body: { command: string, cwd?: string, timeoutMs?: number, shell?: 'bash'|'python', hostAccess?: boolean, allowNetwork?: boolean }
  */
 function registerTerminalRoute(app, config, log) {
   app.post('/terminal/run', async (req, res) => {
@@ -107,13 +88,12 @@ function registerTerminalRoute(app, config, log) {
 
     const shell = chooseShell(command, req.body?.shell, config);
 
-    // ---- Try the sandbox first (gitbash/python only - see sandbox.js's
-    // header for why cmd/powershell can't go through Docker) ----
+    // ---- Try the sandbox first ----
     let sandboxed = false;
     let bin;
     let args;
 
-    const sandboxEligible = !hostAccess && config.SANDBOX_ENABLED && (shell === 'gitbash' || shell === 'python');
+    const sandboxEligible = !hostAccess && config.SANDBOX_ENABLED;
     if (sandboxEligible && await sandbox.isDockerAvailable()) {
       const imageReady = await sandbox.ensureSandboxImage(log);
       if (imageReady) {
@@ -132,11 +112,6 @@ function registerTerminalRoute(app, config, log) {
     }
 
     if (!sandboxed) {
-      if (shell === 'gitbash' && !fs.existsSync(config.GIT_BASH_PATH)) {
-        return res.status(500).json({
-          error: { message: `Git Bash not found at "${config.GIT_BASH_PATH}". Set ZAO_GIT_BASH_PATH to your actual bash.exe location, or pass "shell": "cmd" to bypass auto-detection for this command.` },
-        });
-      }
       const built = buildSpawnArgs(shell, command, config);
       bin = built.bin;
       args = built.args;
@@ -146,7 +121,6 @@ function registerTerminalRoute(app, config, log) {
 
     const child = spawn(bin, args, {
       cwd: sandboxed ? undefined : cwd, // the sandbox's cwd is set via docker's own -w flag instead
-      windowsHide: true,
       timeout: timeoutMs,
     });
 

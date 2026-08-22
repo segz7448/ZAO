@@ -2,7 +2,7 @@
  * ZAO - Orchestrator
  *
  * The single entry point the UI calls to "send a message and get a
- * response." Everything text-based goes to the one Qwen2.5-Coder-3B model
+ * response." Everything text-based goes to the one Qwen3-Coder-30B-A3B-Instruct model
  * served by the PC backend (src/services/backend/backendClient.js) -
  * no manual mode, no fallback chain, no per-task model switching.
  *
@@ -329,7 +329,7 @@ async function runBrowsingHandler(effectiveMessage, params) {
 }
 
 // ========================================================================
-// NORMAL CHAT COMPLETION - the one Qwen2.5-Coder-3B model, served by the
+// NORMAL CHAT COMPLETION - the one Qwen3-Coder-30B-A3B-Instruct model, served by the
 // PC backend, put to work through the REASONING ENGINE
 // (src/services/reasoning/reasoningEngine.js) - a chosen reasoning
 // strategy (chain-of-thought by default; tree-of-thought/deductive/

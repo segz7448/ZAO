@@ -60,7 +60,7 @@ export async function planProjects(strategicPlan) {
       },
     ];
 
-    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       maxTokens: 400,
       temperature: 0.2,
     });

@@ -14,8 +14,8 @@
  * wants - the process itself keeps running on the PC in between.
  *
  * SHELL SELECTION: reuses terminal.js's chooseShell()/buildSpawnArgs so a
- * background command gets the same cmd/PowerShell/Git Bash/Python
- * auto-detection as a foreground one.
+ * background command gets the same bash/Python auto-detection as a
+ * foreground one.
  *
  * NOT SANDBOXED: unlike /terminal/run, background processes always run
  * directly on the host, never through sandbox.js's Docker isolation.
@@ -36,7 +36,6 @@
  */
 
 const { spawn } = require('child_process');
-const fs = require('fs');
 const crypto = require('crypto');
 const { chooseShell } = require('./terminal');
 
@@ -63,18 +62,14 @@ const processes = new Map();
 
 function buildSpawnArgsForShell(shell, command, config) {
   switch (shell) {
-    case 'powershell':
-      return { bin: config.POWERSHELL_BIN, args: ['-NoProfile', '-NonInteractive', '-Command', command] };
-    case 'gitbash':
-      return { bin: config.GIT_BASH_PATH, args: ['-lc', command] };
     case 'python': {
       const match = command.match(/^\s*python[0-9.]*\s+-c\s+(["'])([\s\S]*)\1\s*$/);
       const code = match ? match[2] : command;
       return { bin: config.PYTHON_BIN, args: ['-c', code] };
     }
-    case 'cmd':
+    case 'bash':
     default:
-      return { bin: 'cmd.exe', args: ['/d', '/s', '/c', command] };
+      return { bin: '/bin/bash', args: ['-lc', command] };
   }
 }
 
@@ -98,16 +93,11 @@ function appendLog(record, stream, chunk) {
 function startProcess({ command, cwd, shell: explicitShell, config, log }) {
   const shell = chooseShell(command, explicitShell, config);
 
-  if (shell === 'gitbash' && !fs.existsSync(config.GIT_BASH_PATH)) {
-    return { error: `Git Bash not found at "${config.GIT_BASH_PATH}". Set ZAO_GIT_BASH_PATH, or pass "shell": "cmd" to bypass auto-detection.` };
-  }
-
   const { bin, args } = buildSpawnArgsForShell(shell, command, config);
   const id = crypto.randomUUID();
 
   const child = spawn(bin, args, {
     cwd: cwd || config.TERMINAL_CWD,
-    windowsHide: true,
   });
 
   const record = {
@@ -205,9 +195,6 @@ function stopProcess(id, { signal = 'SIGTERM' } = {}) {
   }
   record.killRequested = true;
   try {
-    // On Windows, child_process signals other than SIGKILL are mapped to
-    // an unconditional taskkill anyway - passing the requested signal
-    // through is still correct on POSIX PCs running this same backend.
     record.child.kill(signal);
     return { stopped: true };
   } catch (err) {

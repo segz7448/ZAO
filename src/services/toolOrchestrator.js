@@ -1,10 +1,10 @@
 /**
- * ZAO - Tool Orchestrator (local Qwen2.5 Coder as Project Manager)
+ * ZAO - Tool Orchestrator (local Qwen3 Coder as Project Manager)
  *
  * This is the layer that makes tools invisible, per the intended
  * architecture:
  *
- *   User -> Chat Screen -> Qwen2.5 Coder (local, Router) -> Tools/Plugins
+ *   User -> Chat Screen -> Qwen3 Coder (local, Router) -> Tools/Plugins
  *
  * The person never sees a "GitHub button" or a "Terminal button" - they
  * type a plain-language request, the local coder model decides which
@@ -82,7 +82,7 @@ const TERMINAL_TOOL_NAMES_MODULE = new Set(['terminal_pc_run_command', 'pc_proce
 
 /**
  * OpenAI-style function-calling schema for every GitHub tool function.
- * The local Qwen2.5 Coder model sees these descriptions and decides on its own which to
+ * The local Qwen3 Coder model sees these descriptions and decides on its own which to
  * call and in what order - e.g. "create an Expo app and push it to
  * GitHub" naturally chains create_repo -> commit_files.
  */
@@ -675,21 +675,20 @@ const OFFICE_TOOL_SCHEMAS = [
   },
 ];
 
-// ZAO has exactly ONE terminal tool - PC is the full terminal
-// (cmd/PowerShell/Git Bash/Python, auto-selected per command by the PC
-// backend itself - see chooseShell() in server/terminal.js). There is
-// no on-device fallback terminal.
+// ZAO has exactly ONE terminal tool - the Alibaba Cloud VM is the full
+// terminal (bash/Python, auto-selected per command by the VM backend
+// itself - see chooseShell() in server/terminal.js). There is no
+// on-device fallback terminal.
 //   - terminal_pc_run_command: the full terminal. One command in, the
-//     PC backend (server/terminal.js) figures out on its own whether it
-//     needs cmd.exe, powershell.exe, Git Bash, or a raw Python
-//     interpreter, and runs it there - Docker, APK builds, Android
-//     emulator, Visual Studio, AI inference, video processing, unix-style
-//     pipelines, PowerShell cmdlets, all of it. Pass `shell` explicitly
-//     only to override a wrong auto-detected guess. Requires the PC
-//     backend to be reachable (LAN or Remote/Cloudflare tunnel) - if it
-//     isn't, terminal commands simply can't run right now.
+//     VM backend (server/terminal.js) figures out on its own whether it
+//     needs bash or a raw Python interpreter, and runs it there -
+//     Docker, video processing, AI inference, npm/pip installs, git
+//     operations, unix-style pipelines, all of it. Pass `shell`
+//     explicitly only to override a wrong auto-detected guess. Requires
+//     the VM backend to be reachable - if it isn't, terminal commands
+//     simply can't run right now.
 //   - terminal_check_status: cheap status check the model can call
-//     before running a command if it isn't sure the PC is currently
+//     before running a command if it isn't sure the VM is currently
 //     reachable (see terminalRouter.js).
 //   - pc_process_start/status/logs/stop: for anything that shouldn't
 //     block on exiting (dev servers, watchers, long builds) - see
@@ -700,7 +699,7 @@ const TERMINAL_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'terminal_check_status',
-      description: "Checks whether the PC backend is currently reachable and whether the PC itself has internet access right now, plus a plain-language status. There is no fallback terminal - if the PC backend is unreachable, terminal commands simply cannot run. Call this if you aren't sure the PC is currently reachable before attempting a command.",
+      description: "Checks whether the Alibaba Cloud VM backend is currently reachable and whether the VM itself has internet access right now, plus a plain-language status. There is no fallback terminal - if the VM backend is unreachable, terminal commands simply cannot run. Call this if you aren't sure the VM is currently reachable before attempting a command.",
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -708,19 +707,19 @@ const TERMINAL_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'terminal_pc_run_command',
-      description: "Runs a real shell command on the person's PC - the full terminal, and the ONLY terminal ZAO has. The PC backend auto-detects which shell the command actually needs (cmd.exe, PowerShell, Git Bash, or a raw Python interpreter) and runs it there, so just send the command as you normally would; only set `shell` explicitly if an auto-detected run used the wrong one. Use it for everything - APK builds, Docker, Android emulator, Visual Studio builds, video processing, AI inference, npm/pip installs, git operations, PowerShell cmdlets, unix-style pipelines, multiple Python versions (python39, python311, etc.). Requires the PC backend to be reachable - if it isn't, this returns a clear connection error instead of pretending the command ran; there is no fallback to fall back to. Bash/Python-shell commands run inside a real isolated sandbox by default when Docker is available on the PC (see the returned `sandboxed` field) - leave hostAccess unset for ordinary commands so you get that isolation; only set hostAccess: true for something that genuinely needs the real PC (an APK build reaching the Android SDK, the emulator, Visual Studio, Docker itself).",
+      description: "Runs a real shell command on the Alibaba Cloud VM - the full terminal, and the ONLY terminal ZAO has. The VM backend auto-detects whether the command needs bash or a raw Python interpreter and runs it there, so just send the command as you normally would; only set `shell` explicitly if an auto-detected run used the wrong one. Use it for everything - Docker, video processing, AI inference, npm/pip installs, git operations, unix-style pipelines, multiple Python versions (python3.10, python3.11, etc.). Requires the VM backend to be reachable - if it isn't, this returns a clear connection error instead of pretending the command ran; there is no fallback to fall back to. Commands run inside a real isolated sandbox by default when Docker is available on the VM (see the returned `sandboxed` field) - leave hostAccess unset for ordinary commands so you get that isolation; only set hostAccess: true for something that genuinely needs the real VM filesystem beyond the sandbox (Docker itself, a system service).",
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string' },
           shell: {
             type: 'string',
-            enum: ['cmd', 'powershell', 'gitbash', 'python'],
-            description: 'Optional. Only set this to force a specific shell - otherwise the PC backend auto-detects the right one for the command.',
+            enum: ['bash', 'python'],
+            description: 'Optional. Only set this to force a specific shell - otherwise the VM backend auto-detects the right one for the command.',
           },
           hostAccess: {
             type: 'boolean',
-            description: 'Optional, defaults false. Set true to skip the sandbox and run directly on the real PC - needed for anything that has to touch real host state beyond the project folder (APK builds needing the Android SDK, the Android emulator, Visual Studio, Docker itself). Leave unset for ordinary commands so they get real sandbox isolation instead.',
+            description: 'Optional, defaults false. Set true to skip the sandbox and run directly on the real VM - needed for anything that has to touch real host state beyond the project folder (Docker itself, a system service, apt/systemctl). Leave unset for ordinary commands so they get real sandbox isolation instead.',
           },
           allowNetwork: {
             type: 'boolean',
@@ -815,8 +814,8 @@ const TERMINAL_TOOL_SCHEMAS = [
           cwd: { type: 'string', description: 'Optional working directory on the PC. Defaults to the configured project root.' },
           shell: {
             type: 'string',
-            enum: ['cmd', 'powershell', 'gitbash', 'python'],
-            description: 'Optional. Only set this to force a specific shell - otherwise the PC backend auto-detects the right one for the command.',
+            enum: ['bash', 'python'],
+            description: 'Optional. Only set this to force a specific shell - otherwise the VM backend auto-detects the right one for the command.',
           },
         },
         required: ['command'],
@@ -2227,7 +2226,7 @@ function toolResultMessage(toolCallId, resultPayload) {
 }
 
 /**
- * Runs one user request through the local Qwen2.5 Coder model with all
+ * Runs one user request through the local Qwen3 Coder model with all
  * tools available, looping through any tool_calls it makes until it gives
  * a final plain-language answer (or MAX_TOOL_STEPS is hit). Calls the
  * local llama.rn context directly (src/services/llama/llamaEngine.js) -
@@ -2333,7 +2332,7 @@ For "what time is it" / "what's the time in [place]" requests, call time_get_cur
 
 For any task with 3 or more distinct steps, call todo_write first to lay out the plan (one item 'in_progress', the rest 'pending'), then call it again as each step's status changes - this is how the person sees live progress instead of silence until everything finishes.
 
-Terminal: terminal_pc_run_command is the full terminal and the only one ZAO has - full system access, and the PC backend itself auto-detects whether a command needs cmd.exe, PowerShell, Git Bash, or a raw Python interpreter, so just send the command normally (only set \`shell\` explicitly to override a wrong guess). Use it for everything - APK builds, Docker, Android emulator, Visual Studio, video processing, AI inference, npm/pip installs, git operations, quick scripts, all of it. If terminal_pc_run_command fails because the PC backend is unreachable, call terminal_check_status to confirm, then tell the person clearly that terminal commands aren't possible right now rather than attempting a workaround that won't actually work - there is no fallback terminal.
+Terminal: terminal_pc_run_command is the full terminal and the only one ZAO has - full system access, and the VM backend itself auto-detects whether a command needs bash or a raw Python interpreter, so just send the command normally (only set \`shell\` explicitly to override a wrong guess). Use it for everything - Docker, video processing, AI inference, npm/pip installs, git operations, quick scripts, all of it. If terminal_pc_run_command fails because the VM backend is unreachable, call terminal_check_status to confirm, then tell the person clearly that terminal commands aren't possible right now rather than attempting a workaround that won't actually work - there is no fallback terminal.
 
 Dev server + visual preview: NEVER start a dev server (npm start, vite, expo start --web, python -m http.server, etc.) with terminal_pc_run_command - it runs to completion/timeout and a dev server never completes, so that just wastes the call and leaves nothing running. Use dev_server_start instead, which tracks it as a background process and hands back its local URL. Then call dev_preview_screenshot with that previewId to actually render the page and see whether the HTML/CSS looks right - you can't view the image yourself, but the returned page title, HTTP status, and browser console errors tell you concretely whether it loaded, 404'd, or threw JS errors, and the PNG itself is saved to the person's phone for them to look at. Call dev_server_stop when you're done with it so the port doesn't stay held.
 
@@ -2441,7 +2440,7 @@ When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, fs_
   ];
 
   for (let i = 0; i < MAX_TOOL_STEPS; i++) {
-    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+    const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       tools: allSchemas,
       maxTokens: 2048,
       temperature: 0.3,

@@ -140,7 +140,7 @@ Respond with ONLY a JSON object, no markdown fences, no commentary:
     { role: 'user', content: userContent },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 300,
     temperature: 0.3,
   });

@@ -9,8 +9,7 @@
  *     child_process.execFile('git', [...argsArray], { cwd }), never a
  *     shell string. Commit messages, branch names, anything with
  *     quotes/spaces/special characters just goes in as one array
- *     element - there's no cmd.exe/PowerShell/bash quoting dialect to
- *     get wrong. (This exact class of bug - a mobile keyboard's smart
+ *     element - there's no bash quoting dialect to get wrong. (This exact class of bug - a mobile keyboard's smart
  *     quotes mangling a shell command - bit an earlier ZAO project hard
  *     enough to be worth solving permanently for git specifically,
  *     rather than "be more careful with terminal_pc_run_command" every

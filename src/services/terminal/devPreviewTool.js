@@ -14,18 +14,18 @@
  * person checking manually or the model just reasoning from source.
  *
  * SAFETY: starting a dev server is still running a real shell command
- * on the PC, so it goes through the exact same two gates
+ * on the VM, so it goes through the exact same two gates
  * terminal_pc_run_command uses before anything is spawned:
  *   1. commandSafety.js - regex-level catastrophic/risky command check.
  *   2. projectRunGate.js - syntax-checks the project before letting a
  *      start/serve/build command run, so a broken project doesn't get
  *      "started" only to crash immediately with a confusing error.
- * There is no separate sandbox for dev servers (unlike gitbash/python
- * commands in sandbox.js) - a dev server binds a real port and needs to
- * be reachable from the PC's own Chromium instance, which a network-
- * isolated container would block by default. It runs directly on the
- * host, same trust level as hostAccess: true would give a terminal
- * command.
+ * There is no separate sandbox for dev servers (unlike ordinary
+ * terminal commands in sandbox.js) - a dev server binds a real port and
+ * needs to be reachable from the VM's own Chromium instance, which a
+ * network-isolated container would block by default. It runs directly
+ * on the host, same trust level as hostAccess: true would give a
+ * terminal command.
  */
 
 import { startDevServer as backendStartDevServer, screenshotDevPreview as backendScreenshotDevPreview, stopDevServer as backendStopDevServer } from '../backend/backendClient';
@@ -77,7 +77,7 @@ export async function startServer(command, options = {}) {
  * so the person can actually open and look at it.
  *
  * WHY IT'S SAVED RATHER THAN RETURNED INLINE: the local model driving
- * this tool loop is Qwen2.5-Coder-3B (see server/config.js) - text-only,
+ * this tool loop is Qwen3-Coder-30B-A3B-Instruct (see server/config.js) - text-only,
  * no vision input - so handing raw image bytes back into its own
  * tool-result context would be useless; there's nowhere for it to
  * "look" at them. Saving the PNG and returning its path plus real,

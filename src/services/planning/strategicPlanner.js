@@ -69,7 +69,7 @@ export async function planGoal(goalText, context = {}) {
     { role: 'user', content: goalText },
   ];
 
-  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+  const modelResult = await llamaEngine.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 512,
     temperature: 0.2,
   });

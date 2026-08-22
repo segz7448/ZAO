@@ -166,13 +166,13 @@ const BG_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'terminal_run',
-      description: 'Runs a shell command on the PC (same auto-detected cmd/PowerShell/Git Bash/Python shell selection as the interactive terminal tool). Blocks until the command exits.',
+      description: 'Runs a shell command on the VM (same auto-detected bash/Python shell selection as the interactive terminal tool). Blocks until the command exits.',
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string' },
-          shell: { type: 'string', enum: ['cmd', 'powershell', 'gitbash', 'python'] },
-          hostAccess: { type: 'boolean', description: 'Set true only for something that needs the real PC beyond the project folder (Android SDK, emulator, Docker itself).' },
+          shell: { type: 'string', enum: ['bash', 'python'] },
+          hostAccess: { type: 'boolean', description: 'Set true only for something that needs the real VM filesystem beyond the sandbox (e.g. Docker itself, a system service).' },
         },
         required: ['command'],
       },

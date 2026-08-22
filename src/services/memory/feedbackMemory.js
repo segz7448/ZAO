@@ -54,7 +54,7 @@ import {
 // Same model used for semantic-memory extraction (memoryEngine.js) - a
 // local, no-per-call-cost model, so there's no reason to reserve a
 // separate one just for this.
-const DISTILL_MODEL_KEY = MODEL_KEYS.QWEN25_CODER_3B;
+const DISTILL_MODEL_KEY = MODEL_KEYS.QWEN3_CODER_30B_A3B;
 
 // Hard ceiling on distinct stored patterns, mirroring
 // memoryEngine.js's MAX_ACTIVE_MEMORIES - keeps the injected guidance

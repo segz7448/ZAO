@@ -127,7 +127,7 @@ export async function decideReasoningStrategy(messageText) {
       { role: 'user', content: text },
     ];
 
-    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       maxTokens: 20,
       temperature: 0,
     });

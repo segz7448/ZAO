@@ -1,27 +1,26 @@
 /**
  * ZAO - Backend Client
  *
- * The backend now runs 24/7 on a person-owned Alibaba Cloud VM (FastAPI/
- * uvicorn) instead of the old PC-hosted or on-device setups - the VM has a
- * stable public IP, so there's no more LAN/Remote toggle or rotating
- * Cloudflare Quick Tunnel URL to keep re-pasting.
+ * The backend runs on a dedicated, always-on Alibaba Cloud VM (see
+ * /server in the repo root) instead of on-device or on a person's PC -
+ * the VM hosts qwen3-coder-30b-a3b-instruct plus the Terminal/
+ * Filesystem/Office tools against its own Linux filesystem.
  *
- * CONNECTION: the person sets the VM's address once in Settings > Backend
- * Connection (test, then save) - internally still stored under
- * backend_remote_url/backend_mode='remote' for continuity with existing
- * installs, but there's no LAN mode surfaced anymore. Every request also
- * carries an Authorization: Bearer <token> header matching AUTH_TOKEN in
- * the VM's server config, plus an X-Model-Api-Key header (see
- * authHeaders() below) carrying the separate API key for the cloud model
- * itself (Qwen3-Coder-30B-A3B-Instruct via Alibaba Cloud Model Studio),
- * set in Settings > Model.
+ * CONNECTION: a single fixed address, configured once in Settings >
+ * Server Connection:
+ *   - VM IP (or IP:port), e.g. http://123.45.67.89:8080 - the VM is
+ *     24/7, so there's no LAN/Remote toggle and nothing that rotates.
+ * Every request carries an Authorization: Bearer <token> header - the
+ * model API key, matching AUTH_TOKEN in the VM's server/config.js -
+ * since the backend is reachable over the public internet, not just
+ * loopback.
  *
  * CONTRACT: sendMessage() keeps the same shape used throughout the app -
  * { success, data: { content, toolCalls, raw }, error } - so
  * orchestrator.js, toolOrchestrator.js, and memoryEngine.js need no
  * changes beyond whatever already imports this file. (The browser agent
  * doesn't call through here - see server/browserAgent.js, which talks to
- * llama-server directly on the PC.)
+ * the model server directly on the VM.)
  */
 
 import { usePreferencesStore } from '../../store/preferencesStore';
@@ -44,81 +43,27 @@ const ERROR_TYPES = {
 };
 
 /**
- * Resolves the active backend base URL + auth token from preferences,
- * based on the LAN/Remote toggle. Returns null for baseUrl if the active
- * mode hasn't been configured yet, so callers can show a clear
- * "not configured" error instead of a confusing network failure.
+ * Resolves the VM's base URL + model API key from preferences. Returns
+ * null for baseUrl if it hasn't been configured yet in Settings > Server
+ * Connection, so callers can show a clear "not configured" error instead
+ * of a confusing network failure.
  */
 function getActiveConnection() {
   const prefs = usePreferencesStore.getState().preferences || {};
-  const mode = prefs.backend_mode || 'lan';
-  const baseUrl = mode === 'remote' ? prefs.backend_remote_url : prefs.backend_lan_url;
+  const baseUrl = prefs.backend_vm_url || null;
   return {
-    mode,
+    // Kept as a fixed constant (rather than removed) purely for call-site
+    // compatibility - every function below still destructures `mode` out
+    // of this object. There's only one connection now (the VM), so it's
+    // otherwise unused.
+    mode: 'vm',
     baseUrl: baseUrl ? baseUrl.replace(/\/+$/, '') : null,
     token: prefs.backend_auth_token || null,
   };
 }
 
 function authHeaders(token) {
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  // The model API key (Alibaba Cloud Model Studio / DashScope key for
-  // Qwen3-Coder-30B-A3B-Instruct - see Settings > Model) is a separate
-  // secret from the VM's own `token` above, so it rides along as its own
-  // header rather than overloading Authorization. The VM's FastAPI/uvicorn
-  // service is expected to read this and forward it to the model provider.
-  const modelApiKey = usePreferencesStore.getState().preferences?.model_api_key;
-  if (modelApiKey) headers['X-Model-Api-Key'] = modelApiKey;
-  return headers;
-}
-
-const MODEL_API_KEY_TEST_TIMEOUT_MS = 15 * 1000;
-const ALIBABA_MODEL_STUDIO_ENDPOINT = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
-const CLOUD_MODEL_NAME = 'qwen3-coder-30b-a3b-instruct';
-
-/**
- * Verifies a Model Studio API key actually works against
- * Qwen3-Coder-30B-A3B-Instruct before it's saved, the same "test before
- * save" pattern used for the GitHub token in Settings. Talks directly to
- * Alibaba's OpenAI-compatible endpoint (not through the VM) with a
- * 1-token request, purely to confirm the key + model combination is
- * valid - this does not exercise the person's own VM at all.
- * @param {string} apiKey
- * @returns {Promise<{valid: boolean, error?: {message: string}}>}
- */
-export async function verifyModelApiKey(apiKey) {
-  if (!apiKey || !apiKey.trim()) {
-    return { valid: false, error: { message: 'Enter an API key first.' } };
-  }
-  try {
-    const response = await withTimeout(
-      fetch(ALIBABA_MODEL_STUDIO_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          model: CLOUD_MODEL_NAME,
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
-        }),
-      }),
-      MODEL_API_KEY_TEST_TIMEOUT_MS,
-      'Model API key check timed out.'
-    );
-    if (response.status === 401 || response.status === 403) {
-      return { valid: false, error: { message: 'Key was rejected - check it and try again.' } };
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      return { valid: false, error: { message: `Provider returned an error (${response.status}): ${text.slice(0, 200)}` } };
-    }
-    return { valid: true };
-  } catch (err) {
-    return { valid: false, error: { message: err?.message || 'Could not reach the model provider to verify this key.' } };
-  }
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function withTimeout(promise, ms, timeoutMessage) {
@@ -130,9 +75,10 @@ function withTimeout(promise, ms, timeoutMessage) {
 }
 
 /**
- * Pings the VM backend's /health endpoint. Used at app launch/foreground, by Settings
- * to show a live connection indicator, and by terminalRouter.js to decide
- * connection status - never throws.
+ * Pings the VM's /health endpoint using whichever connection (baseUrl +
+ * token) is currently saved in preferences. Used at app launch/
+ * foreground, by Settings to show a live connection indicator, and by
+ * terminalRouter.js to decide connection status - never throws.
  * @returns {Promise<{connected: boolean, ready: boolean, model: string|null, mode: string, internetAvailable: boolean|null}>}
  */
 export async function checkBackendHealth() {
@@ -155,14 +101,52 @@ export async function checkBackendHealth() {
       ready: json.status === 'ready',
       model: json.model || null,
       mode,
-      // Whether the PC itself currently has internet access (distinct from
-      // "is the PC backend reachable", which connected:true already
+      // Whether the VM itself currently has internet access (distinct from
+      // "is the VM backend reachable", which connected:true already
       // covers) - see server/index.js's refreshInternetStatus(). null
-      // means the PC backend hasn't completed its first check yet.
+      // means the VM backend hasn't completed its first check yet.
       internetAvailable: typeof json.internetAvailable === 'boolean' ? json.internetAvailable : null,
     };
   } catch (err) {
     return { connected: false, ready: false, model: null, mode, internetAvailable: null };
+  }
+}
+
+/**
+ * Tests a VM IP/URL and/or model API key BEFORE they're saved to
+ * preferences - what Settings > Server Connection's two "Test & Save"
+ * buttons call. Pass just `url` to test reachability only (no
+ * Authorization header sent, so this works even before a key exists);
+ * pass `url` + `token` together to also confirm the key itself is
+ * valid, via /health's `authValid` field (see server/index.js).
+ * Never throws.
+ * @param {{ url: string, token?: string }} params
+ * @returns {Promise<{ reachable: boolean, ready: boolean, authValid: boolean|null, model: string|null, error: string|null }>}
+ */
+export async function testBackendConnection({ url, token }) {
+  const baseUrl = (url || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    return { reachable: false, ready: false, authValid: null, model: null, error: 'No address entered.' };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/health`, { headers: authHeaders(token) }),
+      HEALTH_TIMEOUT_MS,
+      'Connection test timed out'
+    );
+    if (!response.ok) {
+      return { reachable: false, ready: false, authValid: null, model: null, error: `Server responded with ${response.status}.` };
+    }
+    const json = await response.json();
+    return {
+      reachable: true,
+      ready: json.status === 'ready',
+      authValid: typeof json.authValid === 'boolean' ? json.authValid : null,
+      model: json.model || null,
+      error: null,
+    };
+  } catch (err) {
+    return { reachable: false, ready: false, authValid: null, model: null, error: err?.message || 'Could not reach the VM.' };
   }
 }
 
@@ -210,14 +194,14 @@ export async function sendMessage(history, modelKey, options = {}) {
     return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Empty conversation history' } };
   }
 
-  const { mode, baseUrl, token } = getActiveConnection();
+  const { baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
     return {
       success: false,
       data: null,
       error: {
         type: ERROR_TYPES.NOT_CONFIGURED,
-        message: 'No VM server address is set. Add it in Settings > Backend Connection.',
+        message: 'No VM address is set. Add it in Settings > Server Connection.',
       },
     };
   }
@@ -249,7 +233,7 @@ export async function sendMessage(history, modelKey, options = {}) {
         body: JSON.stringify(body),
       }),
       COMPLETION_TIMEOUT_MS,
-      `Backend took longer than ${COMPLETION_TIMEOUT_MS / 1000}s to respond. Check that the server is still running on your VM.`
+      `Backend took longer than ${COMPLETION_TIMEOUT_MS / 1000}s to respond. Check that the server is still running on the VM.`
     );
 
     if (response.status === 401) {
@@ -288,7 +272,7 @@ export async function sendMessage(history, modelKey, options = {}) {
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
         message: isNetworkError
-          ? `Can't reach the ZAO backend on your VM. Make sure the server is running there and the address/auth token in Settings are correct.`
+          ? `Can't reach the ZAO backend. Make sure the server is running on the VM and the IP/API key in Settings > Server Connection are correct.`
           : err?.message || 'Backend request failed.',
       },
     };
@@ -369,7 +353,7 @@ function sendMessageStreaming(baseUrl, token, body, onToken, mode) {
           error: {
             type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
             message: isNetworkError
-              ? `Can't reach the ZAO backend on your VM. Make sure the server is running there and the address/auth token in Settings are correct.`
+              ? `Can't reach the ZAO backend. Make sure the server is running on the VM and the IP/API key in Settings > Server Connection are correct.`
               : msg || 'Backend request failed.',
           },
         });
@@ -392,7 +376,7 @@ export async function runTerminalCommand(command, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -434,7 +418,7 @@ export async function runTerminalCommand(command, options = {}) {
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
         message: isNetworkError
-          ? `Can't reach the ZAO backend (VM) to run the command.`
+          ? `Can't reach the ZAO backend to run the command.`
           : err?.message || 'Terminal request failed.',
       },
     };
@@ -461,7 +445,7 @@ export async function startDevServer(command, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -492,7 +476,7 @@ export async function startDevServer(command, options = {}) {
       data: null,
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
-        message: isNetworkError ? `Can't reach the ZAO backend (VM) to start the dev server.` : err?.message || 'Dev server start failed.',
+        message: isNetworkError ? `Can't reach the ZAO backend to start the dev server.` : err?.message || 'Dev server start failed.',
       },
     };
   }
@@ -512,7 +496,7 @@ export async function screenshotDevPreview(options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -549,7 +533,7 @@ export async function screenshotDevPreview(options = {}) {
       data: null,
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
-        message: isNetworkError ? `Can't reach the ZAO backend (VM) to take the screenshot.` : err?.message || 'Screenshot failed.',
+        message: isNetworkError ? `Can't reach the ZAO backend to take the screenshot.` : err?.message || 'Screenshot failed.',
       },
     };
   }
@@ -566,7 +550,7 @@ export async function stopDevServer(previewId) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -596,7 +580,7 @@ export async function stopDevServer(previewId) {
       data: null,
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
-        message: isNetworkError ? `Can't reach the ZAO backend (VM) to stop the dev server.` : err?.message || 'Dev server stop failed.',
+        message: isNetworkError ? `Can't reach the ZAO backend to stop the dev server.` : err?.message || 'Dev server stop failed.',
       },
     };
   }
@@ -619,7 +603,7 @@ export async function startPcProcess(command, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -652,7 +636,7 @@ export async function startPcProcess(command, options = {}) {
       data: null,
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
-        message: isNetworkError ? `Can't reach the ZAO backend (VM) to start the process.` : err?.message || 'Failed to start process.',
+        message: isNetworkError ? `Can't reach the ZAO backend to start the process.` : err?.message || 'Failed to start process.',
       },
     };
   }
@@ -666,12 +650,12 @@ export async function startPcProcess(command, options = {}) {
 export async function getPcProcessStatus(processId) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   try {
     const response = await withTimeout(fetch(`${baseUrl}/process/${processId}/status`, { headers: authHeaders(token) }), HEALTH_TIMEOUT_MS, 'Process status check timed out.');
     if (response.status === 404) {
-      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'No process found with that id - it may have never started, or the VM backend has since restarted.' } };
+      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'No process found with that id - it may have never started, or the PC backend has since restarted.' } };
     }
     if (!response.ok) {
       return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Failed to get process status (${response.status}).` } };
@@ -683,7 +667,7 @@ export async function getPcProcessStatus(processId) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (VM).` : err?.message || 'Failed to get process status.' },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend.` : err?.message || 'Failed to get process status.' },
     };
   }
 }
@@ -699,7 +683,7 @@ export async function getPcProcessStatus(processId) {
 export async function getPcProcessLogs(processId, options = {}) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   const params = new URLSearchParams();
   if (options.tail) params.set('tail', String(options.tail));
@@ -721,7 +705,7 @@ export async function getPcProcessLogs(processId, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (VM).` : err?.message || 'Failed to get process logs.' },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend.` : err?.message || 'Failed to get process logs.' },
     };
   }
 }
@@ -735,7 +719,7 @@ export async function getPcProcessLogs(processId, options = {}) {
 export async function stopPcProcess(processId, options = {}) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   try {
     const response = await withTimeout(
@@ -761,7 +745,7 @@ export async function stopPcProcess(processId, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend (VM) to stop the process.` : err?.message || 'Failed to stop process.' },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend to stop the process.` : err?.message || 'Failed to stop process.' },
     };
   }
 }
@@ -780,7 +764,7 @@ export async function listPcDirectory(relativePath = '') {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -799,7 +783,7 @@ export async function listPcDirectory(relativePath = '') {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the VM backend to list files." : err?.message || 'VM file listing failed.' },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the PC backend to list files." : err?.message || 'PC file listing failed.' },
     };
   }
 }
@@ -819,7 +803,7 @@ export async function readPcFile(relativePath) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -838,7 +822,7 @@ export async function readPcFile(relativePath) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the VM backend to read the file." : err?.message || 'VM file read failed.' },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? "Can't reach the PC backend to read the file." : err?.message || 'PC file read failed.' },
     };
   }
 }
@@ -976,7 +960,7 @@ export async function extractZipPc(zipPath, destinationFolderPath) {
 export async function grepPc(query, options = {}) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` } };
   }
   const params = new URLSearchParams({ query, path: options.path || '', maxResults: String(options.maxResults || 50) });
   if (options.caseSensitive) params.set('caseSensitive', 'true');
@@ -1024,7 +1008,7 @@ export async function rewindPcCheckpoint(checkpointId) {
 async function getPcFilesJson(routePathWithQuery, actionDescription) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` } };
   }
   try {
     const response = await withTimeout(
@@ -1042,7 +1026,7 @@ async function getPcFilesJson(routePathWithQuery, actionDescription) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the VM backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the PC backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
     };
   }
 }
@@ -1059,7 +1043,7 @@ async function postPcFilesJson(routePath, body, actionDescription) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
   try {
@@ -1082,7 +1066,7 @@ async function postPcFilesJson(routePath, body, actionDescription) {
     return {
       success: false,
       data: null,
-      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the VM backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the PC backend to ${actionDescription}.` : err?.message || `Failed to ${actionDescription}.` },
     };
   }
 }
@@ -1153,7 +1137,7 @@ export async function runWebSearch(query, maxResults = 5) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -1211,7 +1195,7 @@ export async function runWebFetch(url) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -1265,7 +1249,7 @@ export async function runWebFetch(url) {
 export async function startBackgroundSession(prompt) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` } };
   }
   try {
     const response = await withTimeout(
@@ -1295,7 +1279,7 @@ export async function startBackgroundSession(prompt) {
 export async function getBackgroundSession(id) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   try {
     const response = await withTimeout(
@@ -1320,7 +1304,7 @@ export async function getBackgroundSession(id) {
 export async function listBackgroundSessions() {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   try {
     const response = await withTimeout(
@@ -1346,7 +1330,7 @@ export async function listBackgroundSessions() {
 export async function stopBackgroundSession(id) {
   const { mode, baseUrl, token } = getActiveConnection();
   if (!baseUrl) {
-    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set.' } };
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
   }
   try {
     const response = await withTimeout(
@@ -1385,7 +1369,7 @@ export async function runOcrExtraction(base64Data, fileName) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -1428,7 +1412,7 @@ export async function runOcrExtraction(base64Data, fileName) {
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
         message: isNetworkError
-          ? `Can't reach the ZAO backend (VM) to run OCR.`
+          ? `Can't reach the ZAO backend to run OCR.`
           : err?.message || 'OCR request failed.',
       },
     };
@@ -1455,7 +1439,7 @@ export async function runDataAnalysis(base64Data, fileName, options = {}) {
     return {
       success: false,
       data: null,
-      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: 'No VM server address is set. Add it in Settings > Backend Connection.' },
+      error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set. Add it in Settings > Server Connection.` },
     };
   }
 
@@ -1498,7 +1482,7 @@ export async function runDataAnalysis(base64Data, fileName, options = {}) {
       error: {
         type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
         message: isNetworkError
-          ? `Can't reach the ZAO backend (VM) to run data analysis.`
+          ? `Can't reach the ZAO backend to run data analysis.`
           : err?.message || 'Data analysis request failed.',
       },
     };

@@ -162,7 +162,7 @@ export async function runReasoningChat(history, messageText, onToken, onThinking
     // for what might just be a JSON-parsing hiccup on a small model. This
     // is a raw completion with no <thinking>/<answer> wrapping, so unlike
     // chainOfThought.js it can stream straight through with no tag parsing.
-    const plain = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, { maxTokens: 1024, temperature: 0.7, onToken });
+    const plain = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, { maxTokens: 1024, temperature: 0.7, onToken });
     if (!plain.success) {
       return { success: false, content: '', reasoningType: null, reasoningTrace: null, error: plain.error };
     }

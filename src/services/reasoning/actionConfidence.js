@@ -48,7 +48,7 @@ export async function assessActionConfidence({ userRequest, label, toolName, arg
     },
   ];
 
-  const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+  const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 150,
     temperature: 0.1,
   });

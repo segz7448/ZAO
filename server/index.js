@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 /**
- * ZAO Backend - PC (Windows) edition
+ * ZAO Backend - Alibaba Cloud VM edition
  *
  * Single-model, single-user. Wraps llama.cpp's `llama-server` (started as a
  * child process) with a small Express layer that:
  *   - Spawns/monitors llama-server on startup, restarts it if it dies
  *   - Exposes /v1/chat/completions (proxies straight to llama-server, same
  *     OpenAI-compatible shape the app already expects)
- *   - Exposes /health so the app can check the backend is up, both over
- *     LAN and through the Cloudflare tunnel - also reports whether THIS PC
- *     currently has internet access (internetAvailable), so the app can
- *     tell the person plainly when an internet-dependent terminal command
- *     (npm/pip install, git pull/clone/push, curl, downloads) will fail,
- *     even though the PC backend itself is perfectly reachable
- *   - Exposes /terminal/run so the app's Terminal tool can run cmd
- *     commands on this PC (see terminal.js)
+ *   - Exposes /health so the app can check the backend is up at the VM's
+ *     IP - also reports whether the VM currently has internet access
+ *     (internetAvailable), so the app can tell the person plainly when an
+ *     internet-dependent terminal command (npm/pip install, git
+ *     pull/clone/push, curl, downloads) will fail, even though the VM
+ *     backend itself is perfectly reachable
+ *   - Exposes /terminal/run so the app's Terminal tool can run bash/Python
+ *     commands on this VM (see terminal.js)
  *   - Exposes /process/start, /process/:id/status, /process/:id/logs,
  *     and /process/:id/stop so the app can run long-lived commands (dev
  *     servers, watchers) in the background instead of blocking a single
@@ -22,7 +22,7 @@
  *     processManager.js)
  *   - Exposes /ocr/extract for scanned/image-based PDFs and plain images -
  *     runs free, open-source OCR (Tesseract via pytesseract + PyMuPDF) in
- *     a Python subprocess on this PC (see ocr.js)
+ *     a Python subprocess on this VM (see ocr.js)
  *   - Exposes a WebSocket at /browser-agent/stream for the autonomous
  *     Playwright browser agent (see browserAgent.js, browserStream.js) -
  *     live screenshot streaming to the phone plus two-way manual control
@@ -35,14 +35,14 @@
  *     closes the loop on "does this HTML/CSS actually render right"
  *     without the person checking manually
  *   - Requires an Authorization: Bearer <token> header on every request
- *     except /health, since this is now reachable over LAN and the public
- *     internet (via Cloudflare Quick Tunnel), not just 127.0.0.1
+ *     except /health, since this is reachable over the public internet at
+ *     the VM's IP, not just 127.0.0.1
  *
- * Run with: start.bat (double-click, or run from cmd/PowerShell/Git Bash)
+ * Run with: server/start.sh (or set it up as a systemd service - see that
+ * file's own header - so it survives reboots on the 24/7 VM).
  *
- * Config is entirely in config.js - edit MODEL_DIR there (or set the
- * ZAO_MODEL_DIR env var) if your model/binary aren't in
- * C:\Users\User\Downloads\Model.
+ * Config is entirely in config.js - edit ZAO_MODEL_DIR there (or set the
+ * env var) if your model/binary aren't in /opt/zao/model.
  */
 
 const express = require('express');
@@ -82,9 +82,8 @@ app.use((req, res, next) => {
 
 // ---------------------------------------------------------------------------
 // Auth - every route except /health requires the shared-secret token.
-// Required now that this server is bound to 0.0.0.0 and reachable over LAN
-// and the public Cloudflare tunnel, not just loopback like the old Termux
-// version.
+// Required since this server is bound to 0.0.0.0 and reachable over the
+// public internet at the VM's IP, not just loopback.
 // ---------------------------------------------------------------------------
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
@@ -198,13 +197,13 @@ async function refreshInternetStatus() {
 function checkPathsOrExit() {
   const problems = [];
   if (!fs.existsSync(config.LLAMA_SERVER_BIN)) {
-    problems.push(`llama-server.exe not found at: ${config.LLAMA_SERVER_BIN}`);
+    problems.push(`llama-server not found at: ${config.LLAMA_SERVER_BIN}`);
   }
   if (!fs.existsSync(config.MODEL_PATH)) {
     problems.push(`Model GGUF not found at: ${config.MODEL_PATH}`);
   }
   if (config.AUTH_TOKEN === 'change-me-to-a-real-secret') {
-    log('WARNING: AUTH_TOKEN is still the default placeholder. Set ZAO_AUTH_TOKEN (or edit config.js) to a real secret before exposing this over the Cloudflare tunnel.');
+    log('WARNING: AUTH_TOKEN is still the default placeholder. Set ZAO_AUTH_TOKEN (or edit config.js) to a real secret before exposing this over the public internet.');
   }
   if (problems.length) {
     log('Cannot start - fix these paths in config.js (or the matching env vars) first:');
@@ -238,7 +237,6 @@ function startLlamaServer() {
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
     }
   );
 
@@ -423,11 +421,21 @@ function sendToolCall(history, tools) {
 // before you've even entered a token, and so a quick browser visit to
 // http://<tunnel-url>/health works for a sanity check.
 app.get('/health', (req, res) => {
+  // /health is intentionally exempt from the auth middleware above (see
+  // that block) so the app can always tell whether the VM itself is
+  // reachable, even with no token yet. If a token WAS sent, though, this
+  // reports whether it's valid - that's what lets Settings run "Test &
+  // Save" on the VM IP and the model API key as two independent checks:
+  // the IP test never sends a token and only cares about `status`; the
+  // API key test sends the token and reads `authValid`.
+  const header = req.headers.authorization || '';
+  const suppliedToken = header.startsWith('Bearer ') ? header.slice(7) : null;
   res.json({
     status: llamaReady ? 'ready' : 'starting',
     model: config.MODEL_LABEL,
     port: config.PORT,
     internetAvailable, // null until the first background check completes (~15s after startup)
+    authValid: suppliedToken === null ? null : suppliedToken === config.AUTH_TOKEN,
   });
 });
 
@@ -466,16 +474,16 @@ registerSessionRoutes(app, config, log, sendToolCall);
 if (config.AUTH_TOKEN === config.DEFAULT_AUTH_TOKEN) {
   log('='.repeat(70));
   log('WARNING: AUTH_TOKEN is still the default placeholder value.');
-  log('This server binds to 0.0.0.0 and is reachable over LAN, and over the');
-  log('public internet if you run the Cloudflare tunnel. Anyone who can');
-  log('reach it can use the default token to run commands on this PC.');
+  log('This server binds to 0.0.0.0 and is reachable over the public');
+  log('internet at this VM\'s IP. Anyone who can reach it can use the');
+  log('default token to run commands on this VM.');
   log('Set ZAO_AUTH_TOKEN to a real secret (env var, or edit config.js)');
   log('before exposing this beyond your own machine.');
   log('='.repeat(70));
 }
 
 const httpServer = app.listen(config.PORT, '0.0.0.0', () => {
-  log(`ZAO backend listening on http://0.0.0.0:${config.PORT} (reachable via LAN IP and Cloudflare tunnel)`);
+  log(`ZAO backend listening on http://0.0.0.0:${config.PORT} (reachable via the VM's public IP)`);
   log(`Health check: http://127.0.0.1:${config.PORT}/health`);
   log(`Browser agent stream: ws://0.0.0.0:${config.PORT}/browser-agent/stream`);
   checkPathsOrExit();

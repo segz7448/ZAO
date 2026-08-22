@@ -9,10 +9,10 @@
  * module is now the SECOND layer, defense-in-depth on top of
  * server/sandbox.js's actual Docker-based filesystem/network isolation
  * (see that file's header for exactly what it does and doesn't cover) -
- * not the only thing standing between a bad command and the PC anymore.
+ * not the only thing standing between a bad command and the VM anymore.
  * It's still worth having on its own: it's instant (no container to
- * spin up), it covers cmd.exe/PowerShell commands the sandbox
- * architecturally can't reach (see sandbox.js), and it catches the
+ * spin up), it covers anything the sandbox architecturally can't reach
+ * (see sandbox.js - e.g. hostAccess: true commands), and it catches the
  * common, non-obfuscated case cheaply before a container is even
  * considered.
  *

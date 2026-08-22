@@ -14,21 +14,23 @@
  *
  * 1. DENSE TRANSFORMER
  *    One network. Every parameter is active on every token. Simplest,
- *    most predictable, cheapest to reason about - what most open-weight
- *    models are, including ZAO's own Qwen2.5-Coder-3B.
+ *    most predictable, cheapest to reason about - what many open-weight
+ *    models are (though not ZAO's own model - see #2 below).
  *
  * 2. MIXTURE-OF-EXPERTS (MoE)
  *    Many sub-networks ("experts") behind a gate; only a handful are
- *    active per token. Lets frontier-scale labs get more effective
- *    capacity per unit of inference compute. Requires a large param
- *    budget to be worth the added complexity (routing, load-balancing,
- *    expert imbalance) - not something a single 3B model benefits from.
+ *    active per token. Lets a model reach a much larger total parameter
+ *    count while keeping per-token inference compute closer to a dense
+ *    model of the "active" size. ZAO's own model,
+ *    Qwen3-Coder-30B-A3B-Instruct, is exactly this: 30B total
+ *    parameters, ~3B active per token (the "A3B" in the name literally
+ *    means "activated 3B") - see localModels.js's header comment.
  *
  * 3. MULTI-BRAIN / ENSEMBLE
  *    Separate MODELS for separate roles - e.g. a small router model
  *    deciding what to do, handing off to a larger specialist model to
  *    actually do it. ZAO's variant of this is deliberately constrained:
- *    there is only ever ONE underlying model (Qwen2.5-Coder-3B, served
+ *    there is only ever ONE underlying model (Qwen3-Coder-30B-A3B-Instruct, served
  *    by the PC backend - see src/config/localModels.js). "Multi-brain"
  *    here means multiple ROLES, each with its own system prompt,
  *    temperature, and job, all calling that one model - a router role,
@@ -76,8 +78,9 @@
  * ============================================================
  * ZAO'S ACTUAL BRAIN ARCHITECTURE, END TO END
  * ============================================================
- *   Model layer      -> DENSE_TRANSFORMER (Qwen2.5-Coder-3B; no MoE -
- *                        see localModels.js's header comment)
+ *   Model layer      -> MIXTURE_OF_EXPERTS (Qwen3-Coder-30B-A3B-Instruct;
+ *                        30B total / ~3B active params per token - see
+ *                        localModels.js's header comment)
  *   Prompting layer   -> MULTI_BRAIN_ENSEMBLE (BRAIN_ROLES below - one
  *                        model, many system-prompt "hats")
  *   Control-flow layer -> HYBRID_SYMBOLIC_NEURAL (src/services/planning/
@@ -88,11 +91,11 @@
  *                        call: routing heuristics, UI state, "does this
  *                        even need a model?" gating. See
  *                        frontendBrain.js.
- *     BACKEND BRAIN   -> runs on the PC (server/, backendClient.js).
- *                        Every actual model call - classification,
- *                        planning, execution judgment, recovery
- *                        judgment, plain chat - happens here. See
- *                        backendBrain.js.
+ *     BACKEND BRAIN   -> runs on the Alibaba Cloud VM (server/,
+ *                        backendClient.js). Every actual model call -
+ *                        classification, planning, execution judgment,
+ *                        recovery judgment, plain chat - happens here.
+ *                        See backendBrain.js.
  */
 
 export const BRAIN_ARCHITECTURES = Object.freeze({
@@ -112,21 +115,22 @@ export const BRAIN_ARCHITECTURE_LABELS = Object.freeze({
 
 /**
  * ZAO's own classification against the taxonomy above. `implemented:
- * false` on MIXTURE_OF_EXPERTS is intentional and permanent, not a
- * TODO - a single 3B dense model has no expert-routing to speak of;
- * MoE only pays for itself at a parameter scale ZAO's one-model,
- * phone-plus-PC architecture was never meant to reach. Listed here so
- * the taxonomy stays complete even though this app doesn't use it.
+ * true` on MIXTURE_OF_EXPERTS reflects the model itself
+ * (Qwen3-Coder-30B-A3B-Instruct is MoE at the weights level) - ZAO's own
+ * code never does any expert routing; that's entirely internal to the
+ * model and opaque to everything in this app. Listed here so the
+ * taxonomy accurately reflects what's actually running, not just what
+ * ZAO's own orchestration code implements.
  */
 export const ZAO_BRAIN_PROFILE = Object.freeze({
   [BRAIN_ARCHITECTURES.DENSE_TRANSFORMER]: {
-    implemented: true,
-    where: 'The one model itself - Qwen2.5-Coder-3B, served by the PC backend (src/config/localModels.js, server/).',
-  },
-  [BRAIN_ARCHITECTURES.MIXTURE_OF_EXPERTS]: {
     implemented: false,
     where: null,
-    reason: 'Single 3B dense model - no expert routing exists or is planned; MoE only pays off at a param scale this architecture was never meant to reach.',
+    reason: 'The one model, Qwen3-Coder-30B-A3B-Instruct, is Mixture-of-Experts, not dense - see MIXTURE_OF_EXPERTS below.',
+  },
+  [BRAIN_ARCHITECTURES.MIXTURE_OF_EXPERTS]: {
+    implemented: true,
+    where: 'The one model itself - Qwen3-Coder-30B-A3B-Instruct (30B total / ~3B active params), served by the Alibaba Cloud VM backend (src/config/localModels.js, server/). The MoE routing happens entirely inside the model\'s own weights - ZAO\'s code never touches it directly.',
   },
   [BRAIN_ARCHITECTURES.MULTI_BRAIN_ENSEMBLE]: {
     implemented: true,

@@ -2,19 +2,19 @@
  * ZAO - Model Configuration
  *
  * Single model, everything: chat, coding, reasoning, math, and the
- * tool-calling router all go through Qwen2.5-Coder-3B, served by the PC
- * backend (see /server and src/services/backend/backendClient.js) -
- * reachable over LAN or a Cloudflare Quick Tunnel, see Settings > Backend
- * Connection.
+ * tool-calling router all go through Qwen3-Coder-30B-A3B-Instruct, served
+ * by the Alibaba Cloud VM backend (see /server and
+ * src/services/backend/backendClient.js) - reachable at a single fixed
+ * IP, see Settings > Server Connection.
  *
  * No fallback chain, no task-based model switching, no on-device weights -
- * the model runs entirely on the PC backend. There's exactly one
- * "model key" left (QWEN25_CODER_3B) purely so toolOrchestrator.js and
+ * the model runs entirely on the VM backend. There's exactly one
+ * "model key" left (QWEN3_CODER_30B_A3B) purely so toolOrchestrator.js and
  * memoryEngine.js - which both call
  * backendClient.sendMessage(history, modelKey, options) - didn't need
  * their call sites rewritten. (The browser agent's model calls are
  * separate - see server/browserAgent.js - since they run entirely on the
- * PC and call llama-server directly rather than through this phone-side
+ * VM and call the model server directly rather than through this phone-side
  * client.) The key is otherwise inert; the backend only
  * ever runs the one model it was started with (whatever MODEL_PATH in
  * server/config.js points to - this label is cosmetic/display-only and
@@ -22,13 +22,13 @@
  */
 
 export const MODEL_KEYS = {
-  QWEN25_CODER_3B: 'qwen25_coder_3b',
+  QWEN3_CODER_30B_A3B: 'qwen3_coder_30b_a3b',
 };
 
 export const ACTIVE_MODEL = {
-  key: MODEL_KEYS.QWEN25_CODER_3B,
+  key: MODEL_KEYS.QWEN3_CODER_30B_A3B,
   label: 'Qwen3 Coder 30B A3B Instruct',
-  description: 'Chat, coding, reasoning, and tool-calling - served from your Alibaba Cloud VM via Model Studio',
+  description: 'Chat, coding, reasoning, and tool-calling - served from your Alibaba Cloud VM',
 };
 
 /**
@@ -149,5 +149,5 @@ export function classifyTask(messageText = '') {
 
 export function getModelKeyForTask() {
   // Kept for call-site compatibility (orchestrator.js) - always the one model.
-  return MODEL_KEYS.QWEN25_CODER_3B;
+  return MODEL_KEYS.QWEN3_CODER_30B_A3B;
 }

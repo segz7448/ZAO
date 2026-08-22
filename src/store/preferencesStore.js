@@ -20,16 +20,11 @@ const DEFAULT_PREFS = {
   memory_enabled: true,
   project_instructions: null,
   auto_memory_notes: null,
-  backend_mode: 'lan',
-  backend_lan_url: null,
-  backend_remote_url: null,
+  backend_vm_url: null,
   backend_auth_token: null,
-  model_api_key: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
-  discovery_worker_url: null,
-  discovery_device_id: null,
   browser_router_url: null, // dead field - see database.js's DEFAULT_PREFS_ROW comment
 };
 
@@ -98,26 +93,16 @@ export const usePreferencesStore = create((set, get) => ({
   },
 
   /**
-   * Toggles which backend connection the app uses: 'lan' (PC's local IP,
-   * used at home) or 'remote' (the Cloudflare Quick Tunnel URL, used away
-   * from home). Manual toggle by design - see backendClient.js for why
-   * this isn't auto-detected.
+   * The Alibaba Cloud VM's fixed IP (or IP:port), e.g.
+   * http://123.45.67.89:8080 - the one server ZAO now talks to for
+   * everything (model inference, terminal, filesystem, git, etc.). No
+   * LAN/Remote toggle anymore - the VM is 24/7 and always reachable at
+   * this same address.
    */
-  async setBackendMode(mode) {
+  async setBackendVmUrl(url) {
     const prev = get().preferences;
-    set({ preferences: { ...prev, backend_mode: mode } }); // optimistic
-    const result = await updatePreferences({ backend_mode: mode });
-    if (!result.success) {
-      set({ preferences: prev }); // revert on failure
-    }
-    return result;
-  },
-
-  /** PC's local IP:port, e.g. http://192.168.1.42:8080 - used in LAN mode. */
-  async setBackendLanUrl(url) {
-    const prev = get().preferences;
-    set({ preferences: { ...prev, backend_lan_url: url } }); // optimistic
-    const result = await updatePreferences({ backend_lan_url: url });
+    set({ preferences: { ...prev, backend_vm_url: url } }); // optimistic
+    const result = await updatePreferences({ backend_vm_url: url });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }
@@ -125,51 +110,18 @@ export const usePreferencesStore = create((set, get) => ({
   },
 
   /**
-   * The Cloudflare Quick Tunnel URL - used in Remote mode. Rotates every
-   * time start.bat is re-run on the PC (free *.trycloudflare.com URL, not
-   * a permanent named tunnel), so this needs to be re-entered whenever the
-   * PC's tunnel restarts.
-   */
-  async setBackendRemoteUrl(url) {
-    const prev = get().preferences;
-    set({ preferences: { ...prev, backend_remote_url: url } }); // optimistic
-    const result = await updatePreferences({ backend_remote_url: url });
-    if (!result.success) {
-      set({ preferences: prev }); // revert on failure
-    }
-    return result;
-  },
-
-  /**
-   * Shared-secret token sent as `Authorization: Bearer <token>` on every
-   * backend request - must match AUTH_TOKEN in the PC's server/config.js.
-   * Stored as a plain preference rather than the secure api_keys table:
-   * it's a self-issued value the person picks (not a third-party secret
-   * like a GitHub PAT), and it needs to be trivially copy/paste-visible in
-   * Settings for the person to match it against their PC's config.js.
+   * API key for the qwen3-coder-30b-a3b-instruct model, sent as
+   * `Authorization: Bearer <token>` on every request to the VM - must
+   * match AUTH_TOKEN in the VM's server/config.js. Stored as a plain
+   * preference rather than the secure api_keys table: it's a self-issued
+   * value the person picks (not a third-party secret like a GitHub PAT),
+   * and it needs to be trivially copy/paste-visible in Settings for the
+   * person to match it against their VM's config.js.
    */
   async setBackendAuthToken(token) {
     const prev = get().preferences;
     set({ preferences: { ...prev, backend_auth_token: token } }); // optimistic
     const result = await updatePreferences({ backend_auth_token: token });
-    if (!result.success) {
-      set({ preferences: prev }); // revert on failure
-    }
-    return result;
-  },
-
-  /**
-   * The API key for the cloud-hosted model (Qwen3-Coder-30B-A3B-Instruct,
-   * served via Alibaba Cloud Model Studio / DashScope). Distinct from
-   * backend_auth_token: that's a self-issued secret gating access to the
-   * person's own VM, this is the actual third-party key the VM needs to
-   * call the model provider. Sent as its own header on every backend
-   * request - see backendClient.js's authHeaders().
-   */
-  async setModelApiKey(key) {
-    const prev = get().preferences;
-    set({ preferences: { ...prev, model_api_key: key } }); // optimistic
-    const result = await updatePreferences({ model_api_key: key });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }
@@ -208,33 +160,6 @@ export const usePreferencesStore = create((set, get) => ({
     const prev = get().preferences;
     set({ preferences: { ...prev, otel_export_endpoint: url } }); // optimistic
     const result = await updatePreferences({ otel_export_endpoint: url });
-    if (!result.success) {
-      set({ preferences: prev }); // revert on failure
-    }
-    return result;
-  },
-
-  /**
-   * Auto-discovery pair (see src/services/backend/discoveryClient.js) -
-   * set together, once, from the values
-   * server/scripts/setup-permanent-tunnel.js prints after publishing to
-   * a deployed discovery Worker. Both null means discovery is off and
-   * backend_remote_url works exactly as it always has.
-   */
-  async setDiscoveryWorkerUrl(url) {
-    const prev = get().preferences;
-    set({ preferences: { ...prev, discovery_worker_url: url } }); // optimistic
-    const result = await updatePreferences({ discovery_worker_url: url });
-    if (!result.success) {
-      set({ preferences: prev }); // revert on failure
-    }
-    return result;
-  },
-
-  async setDiscoveryDeviceId(deviceId) {
-    const prev = get().preferences;
-    set({ preferences: { ...prev, discovery_device_id: deviceId } }); // optimistic
-    const result = await updatePreferences({ discovery_device_id: deviceId });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }

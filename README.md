@@ -1,12 +1,13 @@
 # ZAO
 
-An Android chat app whose "brain" runs on your PC, not the phone or the
-cloud. One model - **Qwen2.5 Coder 3B**, served by a small Node backend on
-your PC (`/server`) via `llama-server` (llama.cpp) - handles chat, coding,
-reasoning, and tool-calling. The phone talks to it over LAN or a
-Cloudflare Quick Tunnel. Beyond chat, ZAO acts as an on-device agent: it
-can browse the web (via a Playwright agent also running on the PC), push
-code to GitHub, run real shell commands on the PC, and create/read PDF/Word/Excel/PowerPoint files
+An Android chat app whose "brain" runs on a dedicated Alibaba Cloud VM,
+not the phone or a third-party cloud API. One model - **Qwen3 Coder 30B
+A3B Instruct**, served by a small Node backend on the VM (`/server`) via
+`llama-server` (llama.cpp) - handles chat, coding, reasoning, and
+tool-calling. The phone talks to it over the VM's fixed public IP. Beyond
+chat, ZAO acts as an on-device agent: it can browse the web (via a
+Playwright agent also running on the VM), push code to GitHub, run real
+shell commands on the VM, and create/read PDF/Word/Excel/PowerPoint files
 - all invoked automatically by the model deciding what a request needs,
 not through dedicated buttons.
 
@@ -20,7 +21,7 @@ voice mode, and no image generation anywhere in the app.
 
 | Model | Where it runs | Used for |
 |---|---|---|
-| **Qwen2.5 Coder 3B Instruct** (Q4_K_M GGUF) | Your PC, via `llama-server` | Everything: chat, coding, reasoning, tool-calling/routing |
+| **Qwen3 Coder 30B A3B Instruct Instruct** (Q4_K_M GGUF) | Your PC, via `llama-server` | Everything: chat, coding, reasoning, tool-calling/routing |
 
 That's it - one model, no fallback chain, no task-based switching, no
 on-device weights on the phone. `src/config/localModels.js` keeps a single
@@ -44,10 +45,10 @@ src/
                               degraded fallback used only when the model-based
                               classifier (intentClassifier.js) can't be reached.
   services/
-    backend/backendClient.js    Talks to the PC backend: sendMessage() (chat completions),
-                              runTerminalCommand() (PC terminal), runOcrExtraction()
-                              (OCR). Handles LAN vs. Remote (tunnel) connection modes
-                              and the shared-secret auth token.
+    backend/backendClient.js    Talks to the Alibaba Cloud VM backend: sendMessage()
+                              (chat completions), runTerminalCommand() (VM terminal),
+                              runOcrExtraction() (OCR). Handles the VM's fixed IP
+                              connection and the model API key.
     intentClassifier.js         Model-based router: classifies a message into
                               github / browsing / general.
     toolOrchestrator.js          Flat ReAct-style tool-calling loop: GitHub, filesystem,
@@ -125,11 +126,11 @@ src/
                               ImageViewerModal.
   theme/                        tokens.js (light+dark palettes) + useTheme.js.
 
-server/                        PC backend (Node/Express) - see server/README.md.
+server/                        Alibaba Cloud VM backend (Node/Express) - see server/README.md.
   index.js                       Spawns/monitors llama-server, proxies
                               /v1/chat/completions, health check + internet-
                               reachability self-check, rate limiting, auth.
-  terminal.js                    /terminal/run - real cmd.exe execution.
+  terminal.js                    /terminal/run - real bash/Python execution.
   ocr.js + scripts/ocr_extract.py  /ocr/extract - free, open-source OCR
                               (Tesseract via pytesseract, PyMuPDF for PDF page
                               rendering) in a Python subprocess.
@@ -160,9 +161,10 @@ cd server
 npm install
 # edit config.js: MODEL_PATH, LLAMA_SERVER_BIN, ZAO_AUTH_TOKEN
 ```
-Double-click `start.bat` (or run it from a shell) each time before using
-the app - it starts the Node server + `llama-server`, and optionally a
-Cloudflare Quick Tunnel for Remote mode.
+Run `./start.sh` (or set it up as a systemd service - see that file's own
+header) each time before using the app - it starts the Node server, which
+in turn spawns `llama-server`. The VM is 24/7, so once running there's
+nothing else to keep restarting.
 
 **Phone app**:
 ```bash
@@ -170,9 +172,9 @@ npm install
 npx expo start          # dev server, scan QR with Expo Go for quick iteration
 npx expo prebuild --platform android --clean   # generate native android/ project
 ```
-Then in **Settings > Backend Connection**, enter the PC's LAN URL (or the
-tunnel URL for Remote mode) and the same auth token set in
-`server/config.js`.
+Then in **Settings > Server Connection**, enter the VM's IP (Test & Save),
+and the same value set for `ZAO_AUTH_TOKEN` in `server/config.js` as the
+Model API key (its own, separate Test & Save).
 
 ## Tool access (GitHub, filesystem, terminal)
 
@@ -191,12 +193,12 @@ and shows a running checklist as it works.
   check on demand; the same project-wide check also runs automatically
   right before a terminal command that starts/builds a project
   (`projectRunGate.js`), blocking the run if anything fails.
-- **Terminal** - the PC backend (`terminal_pc_run_command`, the only
-  terminal ZAO has - see `terminalRouter.js`) auto-detects cmd.exe,
-  PowerShell, Git Bash, or a raw Python interpreter per command, so
-  `zip`/`unzip`/`tar` just work as plain
-  commands with no special-casing needed - in addition to the JS-level
-  zip handling already in `zipHandler.js` (for reading an uploaded zip
+- **Terminal** - the Alibaba Cloud VM backend (`terminal_pc_run_command`,
+  the only terminal ZAO has - see `terminalRouter.js`) auto-detects bash
+  or a raw Python interpreter per command, so `zip`/`unzip`/`tar` just
+  work as plain commands with no special-casing needed - in addition to
+  the JS-level zip handling already in `zipHandler.js` (for reading an
+  uploaded zip
   attachment) and `filesystemTool.js` (`fs_zip`/`fs_extract_zip`, for the
   model creating/extracting archives as part of a task).
 

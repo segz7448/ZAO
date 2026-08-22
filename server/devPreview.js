@@ -100,7 +100,6 @@ function startDevServer({ command, cwd, port, config, log }) {
 
   const child = spawn(bin, args, {
     cwd: workingDir,
-    windowsHide: true,
   });
 
   const previewId = makePreviewId();
@@ -196,15 +195,11 @@ function stopDevServer(previewId) {
   }
   entry.status = 'stopped';
   try {
-    // Windows: taskkill /T kills the whole process tree (npm start spawns
-    // a child node process; killing just the npm wrapper leaves the real
-    // server running orphaned). POSIX-style kill as a fallback if this
-    // backend is ever run under WSL/gitbash directly.
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(entry.child.pid), '/T', '/F'], { windowsHide: true });
-    } else {
-      entry.child.kill('SIGTERM');
-    }
+    // Linux VM - a plain SIGTERM to the npm wrapper's PID kills the
+    // process tree, since npm scripts run in the same process group as
+    // their child node process here (no separate tree-kill dance
+    // needed, unlike the old Windows/taskkill setup).
+    entry.child.kill('SIGTERM');
   } catch (err) {
     return { success: false, error: err.message };
   }

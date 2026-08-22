@@ -27,9 +27,8 @@
  * The `context` object passed to a hook is serialized to JSON and made
  * available to the shell command via a ZAO_HOOK_CONTEXT environment-style
  * prefix (`ZAO_HOOK_CONTEXT='...' <command>`) rather than piped over
- * stdin, since pcTerminalTool.js already runs commands through a shell
- * that supports inline env assignment (Git Bash/cmd/PowerShell on the PC
- * backend).
+ * stdin, since pcTerminalTool.js already runs commands through bash on
+ * the VM backend, which supports inline env assignment natively.
  */
 
 import { getHooks } from '../../db/database';

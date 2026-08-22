@@ -8,7 +8,7 @@ a map of what got wired up and where).
 
 | Type | What it means | Does ZAO use it? |
 |---|---|---|
-| Dense transformer | One network, every parameter active every token | **Yes** - the model itself: Qwen2.5-Coder-3B, served by the PC backend |
+| Dense transformer | One network, every parameter active every token | **Yes** - the model itself: Qwen3-Coder-30B-A3B-Instruct, served by the PC backend |
 | Mixture-of-Experts (MoE) | Many sub-networks, only some active per token | **No** - single 3B dense model, no expert routing; not planned |
 | Multi-brain / ensemble | Separate roles (or models) for separate jobs | **Yes** - one model, many system-prompt "roles" (see `BRAIN_ROLES` in `backendBrain.js`) |
 | Hybrid symbolic-neural | A rules engine wrapped around neural judgment calls | **Yes** - `src/services/planning/` (deterministic graph/DB state machine) + narrow model calls inside it |

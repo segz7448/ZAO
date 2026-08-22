@@ -277,7 +277,7 @@ async function verifyResolved(originalMessage, route, stepResult) {
       { role: 'user', content: `Original request: ${originalMessage}\n\nAction taken (${route}): ${(stepResult.data?.content || '').slice(0, 500)}` },
     ];
 
-    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN25_CODER_3B, {
+    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
       maxTokens: 60,
       temperature: 0,
     });

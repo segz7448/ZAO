@@ -26,7 +26,7 @@ const ANALOGICAL_SYSTEM_PROMPT = `Reason analogically: map this situation onto a
 
 async function runInferenceCall(history, systemPrompt) {
   const augmented = withSystemPrompt(history, systemPrompt);
-  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN25_CODER_3B, {
+  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
     maxTokens: 1024,
     temperature: 0.6,
   });
