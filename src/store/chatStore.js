@@ -560,7 +560,7 @@ export const useChatStore = create((set, get) => ({
     }));
   },
 
-  async sendMessage(userText, attachment = null, { webSearchEnabled = false, browserAgentActive = false } = {}) {
+  async sendMessage(userText, attachment = null, { webSearchEnabled = false, githubToolsEnabled = false, browserAgentActive = false } = {}) {
     const trimmed = (userText || '').trim();
     if (!trimmed && !attachment) return;
 
@@ -722,6 +722,7 @@ export const useChatStore = create((set, get) => ({
       browserAccessEnabled: !!prefs.browser_access_enabled,
       browserAgentActive: !!browserAgentActive,
       webSearchEnabled: !!webSearchEnabled,
+      githubToolsEnabled: !!githubToolsEnabled,
       lastMessageText: messageContent,
       // The connected BrowserAgentStream to the PC's Playwright agent
       // (src/services/browserAgent/browserAgentStream.js), set via

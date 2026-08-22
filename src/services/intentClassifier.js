@@ -62,9 +62,12 @@ export async function classifyIntent(messageText, options = {}) {
   const text = (messageText || '').trim();
   if (!text) return 'general';
 
-  const { browserAgentActive = false } = options;
-  const userContent = browserAgentActive
-    ? `[Context: the person currently has a live browser agent session open on their PC and is watching it.]\n\n${text}`
+  const { browserAgentActive = false, githubToolsEnabled = false } = options;
+  const contextLines = [];
+  if (browserAgentActive) contextLines.push('the person currently has a live browser agent session open on their PC and is watching it');
+  if (githubToolsEnabled) contextLines.push('the person has explicitly turned on GitHub tools for this message via the composer\u2019s GitHub toggle - a message mentioning their repo, code, or GitHub almost certainly means they want a real GitHub action carried out, not a generic explanation of how to check GitHub manually');
+  const userContent = contextLines.length
+    ? `[Context: ${contextLines.join('; ')}.]\n\n${text}`
     : text;
 
   const history = [

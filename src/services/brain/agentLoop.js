@@ -160,7 +160,7 @@ export async function runAgentLoop(params, handlers, { isCancelled = () => false
       : `${lastMessageText}\n\n[Already done this turn: ${priorResultsSummary.join('; ')}]`;
 
     // ---- ACT ----
-    const { route, reason } = await decideRoute(effectiveMessage, attemptedRoutes, { browserAgentActive: params.browserAgentActive });
+    const { route, reason } = await decideRoute(effectiveMessage, attemptedRoutes, { browserAgentActive: params.browserAgentActive, githubToolsEnabled: params.githubToolsEnabled });
     attemptedRoutes.push(route);
     onLoopStep?.({ route, reason, iteration });
 
@@ -210,6 +210,8 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
   switch (route) {
     case BRAIN_ROUTES.HIERARCHICAL_PLAN:
       return handlers.runHierarchicalPlan(effectiveMessage, params);
+    case BRAIN_ROUTES.DEEP_RESEARCH:
+      return handlers.runDeepResearch(effectiveMessage, params);
     case BRAIN_ROUTES.QUICK_LOOKUP:
       return handlers.runQuickLookup(effectiveMessage, params);
     case BRAIN_ROUTES.BROWSING:
@@ -223,6 +225,7 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
 function summarizeForNextIteration(route, stepResult) {
   const label = {
     [BRAIN_ROUTES.HIERARCHICAL_PLAN]: 'ran a multi-step plan',
+    [BRAIN_ROUTES.DEEP_RESEARCH]: 'ran a multi-source research pass',
     [BRAIN_ROUTES.QUICK_LOOKUP]: 'looked up current info',
     [BRAIN_ROUTES.BROWSING]: 'browsed the web',
   }[route] || 'took an action';

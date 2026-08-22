@@ -22,6 +22,7 @@ import { shouldDecompose } from '../planning/planTypes';
 /** Every route frontendBrain.decideRoute() can hand back to orchestrator.js. */
 export const BRAIN_ROUTES = Object.freeze({
   HIERARCHICAL_PLAN: 'hierarchical_plan', // -> backendBrain.runHierarchicalPlan (HYBRID_SYMBOLIC_NEURAL)
+  DEEP_RESEARCH: 'deep_research',         // -> multi-search research report, no browser agent
   QUICK_LOOKUP: 'quick_lookup',           // -> a single flat tool call (web_search / time_get_current) - NOT the visual browser agent
   BROWSING: 'browsing',                   // -> the live PC browser agent
   CHAT: 'chat',                           // -> plain CONVERSATIONALIST completion
@@ -85,18 +86,95 @@ export const BRAIN_ROUTES = Object.freeze({
  * clear phrasings) rather than trying to replace classifyIntent()
  * entirely, so it only takes over the easy, unambiguous cases.
  */
-const QUICK_LOOKUP_PATTERN = /\b(what(?:'s|s| is) (?:today'?s?|the current) date|what day is it|what time is it|current time|today'?s (?:date|weather)|weather (?:today|right now|in \w+)|current weather|latest news|today'?s news|news today)\b/i;
+const QUICK_LOOKUP_PATTERN = /\b(what(?:'s|s| is) (?:today'?s?|the current) date|what day is it|what time is it|current time|today'?s (?:date|weather)|weather (?:today|right now|in \w+)|current weather|latest news|today'?s news|news today|stock price|share price|(?:exchange|conversion) rate|how much is \d|current price of|score of the|final score|who won the (?:game|match)|is .+ still (?:alive|around|in business|the ceo|the president|active|available)|does .+ still exist)\b/i;
 
 function isQuickLookupQuery(messageText) {
   return QUICK_LOOKUP_PATTERN.test((messageText || '').trim());
 }
 
+/**
+ * Same free/local convention as isQuickLookupQuery, for the opposite
+ * end of the spectrum - an explicit ask for a proper researched report
+ * (ChatGPT/Claude's "Deep Research" mode), not a one-fact lookup. Kept
+ * to clear trigger phrasings so an ordinary "what's the weather" never
+ * accidentally balloons into a multi-search report.
+ */
+const DEEP_RESEARCH_PATTERN = /\b(deep research|research report|comprehensive report|write (?:me )?a report on|do (?:a |some )?(?:deep dive|research) on|research .+ (?:for me|thoroughly)|in[- ]depth (?:research|analysis|report) on)\b/i;
+
+function isDeepResearchQuery(messageText) {
+  return DEEP_RESEARCH_PATTERN.test((messageText || '').trim());
+}
+
+/**
+ * Loose match for "this message is plausibly about GitHub/the repo" -
+ * used only when options.githubToolsEnabled is true (the person
+ * explicitly turned the composer's GitHub toggle on for this message).
+ * Intentionally broad: better to over-catch here, since a false match
+ * just means this hands the message to the real 'github' pipeline
+ * (HIERARCHICAL_PLAN, which still reasons about what to actually do)
+ * instead of leaving it to classifyIntent()'s own guess - a false MISS
+ * is the real cost, since that's the exact failure mode reported: the
+ * model answering "I don't have GitHub access, go check github.com
+ * yourself" for a message that plainly wanted a real GitHub action.
+ */
+const GITHUB_INTENT_PATTERN = /\b(github|repo|repository|commit|branch|pull request|\bpr\b|push|clone|merge|issue|release|my (?:code|project|files?))\b/i;
+
+function isGithubFlavoredQuery(messageText) {
+  return GITHUB_INTENT_PATTERN.test((messageText || '').trim());
+}
+
+/**
+ * Deliberately narrow set of exact conversational openers/closers -
+ * greetings, thanks, small talk - matched as the WHOLE message (with
+ * light punctuation tolerance), not a substring. "hi" fast-paths; "hi,
+ * can you also check my repo" does not, since it's no longer
+ * unambiguous. See decideRoute()'s fast-path comment for why narrow
+ * beats clever here.
+ */
+const PLAIN_CHAT_FAST_PATH = /^(hi|hello|hey|hiya|yo|sup|good (?:morning|afternoon|evening|night)|thanks|thank you|thx|ty|cool|nice|ok|okay|got it|sounds good|lol|lmao|haha|how are you\??|how'?s it going\??|what'?s up\??|who are you\??|what can you do\??)[.!?]*$/i;
+
 export async function decideRoute(messageText, priorAttempts = [], options = {}) {
+  const { githubToolsEnabled = false } = options;
+
+  if (githubToolsEnabled && isGithubFlavoredQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.HIERARCHICAL_PLAN)) {
+    // The person explicitly turned GitHub tools on for this message -
+    // don't leave it to classifyIntent()'s guess (see
+    // isGithubFlavoredQuery's own comment for the exact failure mode
+    // this closes). shouldDecompose still runs so a genuinely large
+    // goal still gets the right decomposition treatment underneath.
+    const decomposition = shouldDecompose(messageText);
+    return {
+      route: BRAIN_ROUTES.HIERARCHICAL_PLAN,
+      intent: 'github',
+      decompose: decomposition.decompose,
+      reason: 'GitHub tools explicitly enabled for this message and it mentions the repo/GitHub - routing with confidence rather than guessing.',
+    };
+  }
+
+  if (isDeepResearchQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.DEEP_RESEARCH)) {
+    return { route: BRAIN_ROUTES.DEEP_RESEARCH, intent: 'browsing', decompose: false, reason: 'Explicit request for a researched report - running multiple searches, not a single lookup.' };
+  }
+
   if (isQuickLookupQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.QUICK_LOOKUP)) {
     return { route: BRAIN_ROUTES.QUICK_LOOKUP, intent: 'browsing', decompose: false, reason: 'Simple current-info lookup (date/time/weather/news) - a quick tool call, not the full browser agent.' };
   }
 
-  const intent = await classifyIntent(messageText, { browserAgentActive: options.browserAgentActive });
+  // FAST PATH: skip the classifier model call entirely for messages that
+  // are unmistakably plain conversation - no realistic reading of these
+  // needs a tool, a file written, or live data, so paying for a whole
+  // extra model round-trip just to confirm "yes, this is chat" is pure
+  // added latency with nothing gained. This is deliberately narrow
+  // (short, exact conversational openers/closers) rather than any
+  // length- or keyword-based guess - a wrong guess here means silently
+  // skipping a github/browsing action the person actually wanted, so
+  // this only fires for phrasings that couldn't reasonably mean
+  // anything else. Everything else still goes through classifyIntent
+  // exactly as before.
+  if (PLAIN_CHAT_FAST_PATH.test((messageText || '').trim()) && !priorAttempts.length) {
+    return { route: BRAIN_ROUTES.CHAT, intent: 'general', decompose: false, reason: 'Plain conversational message - skipped the classifier call.' };
+  }
+
+  const intent = await classifyIntent(messageText, { browserAgentActive: options.browserAgentActive, githubToolsEnabled });
 
   if (intent === 'browsing') {
     if (priorAttempts.includes(BRAIN_ROUTES.BROWSING)) {

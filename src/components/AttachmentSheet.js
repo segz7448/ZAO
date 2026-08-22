@@ -64,6 +64,9 @@ export default function AttachmentSheet({
   onFiles,
   webSearchEnabled,
   onToggleWebSearch,
+  githubEnabled,
+  onToggleGithub,
+  githubConfigured = true,
 }) {
   const theme = useTheme();
 
@@ -109,6 +112,15 @@ export default function AttachmentSheet({
           subtitle="Search the web when useful"
           value={webSearchEnabled}
           onValueChange={onToggleWebSearch}
+          theme={theme}
+        />
+
+        <ToggleRow
+          icon={<Ionicons name="logo-github" size={18} color={theme.textSecondary} />}
+          label="GitHub"
+          subtitle={githubConfigured ? 'Use your GitHub repos when useful' : 'Add your GitHub token in Settings first'}
+          value={githubEnabled}
+          onValueChange={onToggleGithub}
           theme={theme}
         />
       </View>

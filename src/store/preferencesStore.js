@@ -15,6 +15,8 @@ import { PERMISSION_MODES } from '../services/execution/permissionModes';
 const DEFAULT_PREFS = {
   theme_preference: 'auto',
   browser_access_enabled: false,
+  web_search_enabled: false,
+  github_tools_enabled: false,
   github_username: null,
   filesystem_saf_uri: null,
   memory_enabled: true,
@@ -71,6 +73,44 @@ export const usePreferencesStore = create((set, get) => ({
     const prev = get().preferences;
     set({ preferences: { ...prev, browser_access_enabled: enabled } }); // optimistic
     const result = await updatePreferences({ browser_access_enabled: enabled });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+  },
+
+  /**
+   * "Add to chat" sheet's Web search toggle (src/components/
+   * AttachmentSheet.js). Persisted to SQLite, same as
+   * setBrowserAccessEnabled above - survives app restarts, only changes
+   * on an explicit tap, never auto-reverts on its own (see the
+   * web_search_enabled migration comment in database.js for why this
+   * used to silently reset and doesn't anymore).
+   */
+  async setWebSearchEnabled(enabled) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, web_search_enabled: enabled } }); // optimistic
+    const result = await updatePreferences({ web_search_enabled: enabled });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+  },
+
+  /**
+   * "Add to chat" sheet's GitHub toggle. When on, frontendBrain.js's
+   * decideRoute() treats a GitHub/repo-flavored message as a confident
+   * 'github' route rather than leaving it to the classifier's guess -
+   * see GITHUB_INTENT_PATTERN in frontendBrain.js. Requires the
+   * person's own GitHub username + token to already be set up
+   * (Settings > GitHub) - this toggle controls ROUTING confidence, not
+   * whether the credentials exist; an unconfigured account still gets a
+   * clear "add your GitHub token in Settings" answer rather than a
+   * silent failure. Persisted the same way as every other toggle here -
+   * survives app restarts, only an explicit tap changes it.
+   */
+  async setGithubToolsEnabled(enabled) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, github_tools_enabled: enabled } }); // optimistic
+    const result = await updatePreferences({ github_tools_enabled: enabled });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }

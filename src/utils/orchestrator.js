@@ -60,6 +60,7 @@ import { runReasoningChat, STRATEGY_FOR_ROUTE } from '../services/reasoning/reas
 import { getGroundingNote, enforceRealTime } from '../services/reasoning/chatGroundingBackstop';
 import * as timeTool from '../services/time/timeTool';
 import * as webSearchTool from '../services/search/webSearchTool';
+import * as webFetchTool from '../services/search/webFetchTool';
 import * as backendClient from '../services/backend/backendClient';
 
 /**
@@ -140,6 +141,7 @@ export async function sendMessageOrchestrated({
   browserAccessEnabled = false,
   browserAgentActive = false,
   webSearchEnabled = false,
+  githubToolsEnabled = false,
   agentSession = null,
   onBrowserStep = null,
   githubUsername = null,
@@ -167,6 +169,7 @@ export async function sendMessageOrchestrated({
       browserAccessEnabled,
       browserAgentActive,
       webSearchEnabled,
+      githubToolsEnabled,
       agentSession,
       onBrowserStep,
       githubUsername,
@@ -180,6 +183,7 @@ export async function sendMessageOrchestrated({
 
     const handlers = {
       runHierarchicalPlan: runHierarchicalPlanHandler,
+      runDeepResearch: runDeepResearchHandler,
       runQuickLookup: runQuickLookupHandler,
       runBrowsing: runBrowsingHandler,
       runChat: runChatHandler,
@@ -214,7 +218,25 @@ export async function sendMessageOrchestrated({
 // reply instead of only a plain-text summary.
 // ========================================================================
 async function runHierarchicalPlanHandler(effectiveMessage, params) {
-  const { conversationId, onPlanProgress, onPlanStep, standingContext } = params;
+  const { conversationId, onPlanProgress, onPlanStep, standingContext, githubToolsEnabled, githubUsername } = params;
+
+  // The person explicitly turned the GitHub toggle on for this message
+  // (frontendBrain.js's forced-routing already got us here with
+  // confidence) but hasn't actually added their GitHub username/token in
+  // Settings yet - surface that plainly now, rather than letting a plan
+  // start, reach an actual GitHub tool call several steps in, and fail
+  // there with a less clear error.
+  if (githubToolsEnabled && !githubUsername && /\b(github|repo|repository|commit|branch|push|pull request|\bpr\b|clone|merge|issue|release)\b/i.test(effectiveMessage)) {
+    return {
+      success: false,
+      data: null,
+      error: {
+        type: 'GITHUB_NOT_CONFIGURED',
+        message: 'GitHub tools are on, but no GitHub account is connected yet. Add your GitHub username and a personal access token in Settings > GitHub, then try again.',
+      },
+    };
+  }
+
   const planResult = await runHierarchicalPlan(withStandingContextPreface(effectiveMessage, standingContext), {
     conversationId,
     githubToken: null, // resolved inside resourcePlanner.js/the tools themselves via stored settings, not passed from here
@@ -269,6 +291,111 @@ async function runHierarchicalPlanHandler(effectiveMessage, params) {
 // mounted), that's a genuine capability gap - handled below as a
 // clear, honest response instead of a silent chat fallback.
 // ========================================================================
+// ========================================================================
+// DEEP RESEARCH - the multi-search, cited-report mode (ChatGPT/Claude's
+// "Deep Research" equivalent). Distinct from QUICK_LOOKUP (one fact, one
+// search) and from BROWSING (interacting with a live page) - this runs
+// several searches from different angles, optionally reads a couple of
+// the best pages in full, and writes an actual structured report with
+// sources. Still no visual browser session at any point.
+// ========================================================================
+async function generateResearchAngles(topic, modelKey) {
+  const history = [
+    {
+      role: 'system',
+      content: 'Break the research topic into 4-5 distinct, specific search queries that together would cover it well - different angles (background, current state, key players/numbers, recent developments, common debates/counterpoints), not near-duplicates of each other. Respond with ONLY a JSON array of strings, no markdown fences, no commentary. Example: ["query one", "query two", "query three"]',
+    },
+    { role: 'user', content: topic },
+  ];
+  const result = await backendClient.sendMessage(history, modelKey, { maxTokens: 200, temperature: 0.4 });
+  if (!result.success || !result.data?.content) return [topic]; // fall back to just the raw topic as one search
+  try {
+    const cleaned = result.data.content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed.slice(0, 5).map(String);
+  } catch { /* fall through to raw-topic fallback below */ }
+  return [topic];
+}
+
+async function runDeepResearchHandler(effectiveMessage, params) {
+  const { history, onToken, onPlanProgress } = params;
+  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.QWEN3_CODER_30B_A3B;
+
+  onPlanProgress?.({ stage: 'planning_searches', message: 'Breaking this into research angles\u2026' });
+  const angles = await generateResearchAngles(effectiveMessage, modelKey);
+
+  const allResults = [];
+  for (const angle of angles) {
+    onPlanProgress?.({ stage: 'searching', message: `Searching: ${angle}` });
+    const r = await webSearchTool.search(angle, 5);
+    if (r.success && r.data?.results) {
+      allResults.push({ angle, results: r.data.results });
+    }
+  }
+
+  if (allResults.length === 0) {
+    return {
+      success: false,
+      data: null,
+      error: { type: 'DEEP_RESEARCH_ERROR', message: 'None of the research searches returned results - check the backend\u2019s internet connectivity.' },
+    };
+  }
+
+  // Read the top 2-3 most-referenced/highest-value pages in full for
+  // depth beyond a snippet, same instinct as web_fetch's own doc: a
+  // snippet often isn't enough, a full page usually is. Kept small (not
+  // one fetch per result) so this stays fast relative to a full
+  // hierarchical plan.
+  const topUrls = [...new Set(allResults.flatMap((a) => a.results.slice(0, 1).map((r) => r.url)))].slice(0, 3);
+  const fetchedPages = [];
+  for (const url of topUrls) {
+    onPlanProgress?.({ stage: 'reading', message: `Reading: ${url}` });
+    const fetched = await webFetchTool.fetchUrl(url).catch(() => null);
+    if (fetched?.success && fetched.data?.text) {
+      fetchedPages.push({ url, content: fetched.data.text.slice(0, 4000) });
+    }
+  }
+
+  const searchDigest = allResults
+    .map(({ angle, results }) => `Angle: ${angle}\n${results.slice(0, 5).map((r, i) => `${i + 1}. ${r.title} - ${r.snippet} (${r.url})`).join('\n')}`)
+    .join('\n\n');
+  const fullPageDigest = fetchedPages.map((p) => `--- Full page: ${p.url} ---\n${p.content}`).join('\n\n');
+
+  onPlanProgress?.({ stage: 'writing', message: 'Writing the report\u2026' });
+
+  const synthesisHistory = [
+    {
+      role: 'system',
+      content: `Write a clear, well-organized research report answering the person's request, using ONLY the material below (current as of right now). Use headers to structure it, lead with the most important findings, note where sources disagree, and end with a "Sources" list of the URLs actually used. Don't pad it - be thorough but not repetitive.\n\nSearch results by angle:\n${searchDigest}${fullPageDigest ? `\n\nFull page content:\n${fullPageDigest}` : ''}`,
+    },
+    ...history,
+  ];
+
+  const completion = await backendClient.sendMessage(synthesisHistory, modelKey, { temperature: 0.3 });
+  if (!completion.success || !completion.data?.content) {
+    return {
+      success: false,
+      data: null,
+      error: { type: 'DEEP_RESEARCH_ERROR', message: completion.error?.message || 'Could not synthesize the research report.' },
+    };
+  }
+
+  onToken?.(completion.data.content);
+  logUsageEvent('deep_research', effectiveMessage.slice(0, 80), { anglesSearched: angles.length, pagesRead: fetchedPages.length }).catch(() => {});
+
+  return {
+    success: true,
+    data: {
+      content: completion.data.content,
+      family: ACTIVE_MODEL.key,
+      provider: 'local-backend',
+      modelId: ACTIVE_MODEL.label,
+      reasoningType: STRATEGY_FOR_ROUTE.BROWSING,
+    },
+    error: null,
+  };
+}
+
 // ========================================================================
 // QUICK LOOKUP - the light path frontendBrain.js's QUICK_LOOKUP route
 // takes for plain date/time/weather/news questions, so these don't pull
@@ -333,13 +460,24 @@ async function runQuickLookupHandler(effectiveMessage, params) {
     };
   }
 
-  onToken?.(completion.data.content);
+  // Citations: same idea as ChatGPT/Claude showing sources under a
+  // researched answer, kept lightweight here - just the top results
+  // actually used, not a full inline-citation system.
+  const sourceLines = (searchResult.data?.results || [])
+    .slice(0, 3)
+    .map((r) => `- ${r.title}: ${r.url}`)
+    .join('\n');
+  const contentWithSources = sourceLines
+    ? `${completion.data.content}\n\nSources:\n${sourceLines}`
+    : completion.data.content;
+
+  onToken?.(contentWithSources);
   logUsageEvent('quick_lookup', effectiveMessage.slice(0, 80), null).catch(() => {});
 
   return {
     success: true,
     data: {
-      content: completion.data.content,
+      content: contentWithSources,
       family: ACTIVE_MODEL.key,
       provider: 'local-backend',
       modelId: ACTIVE_MODEL.label,

@@ -97,6 +97,8 @@ export async function initDatabase() {
         manual_limit_behavior TEXT DEFAULT 'ask',
         theme_preference TEXT DEFAULT 'auto',
         browser_access_enabled INTEGER DEFAULT 0,
+        web_search_enabled INTEGER DEFAULT 0,
+        github_tools_enabled INTEGER DEFAULT 0,
         github_username TEXT,
         filesystem_saf_uri TEXT,
         memory_enabled INTEGER DEFAULT 1,
@@ -640,6 +642,27 @@ export async function initDatabase() {
     // boolean in getPreferences() below.
     try {
       await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN browser_access_enabled INTEGER DEFAULT 0;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
+    // Migration: web_search_enabled / github_tools_enabled - the "Add to
+    // chat" sheet's Web search and GitHub toggles (src/components/
+    // AttachmentSheet.js). Both used to be plain in-memory useState in
+    // ChatScreen.js, which meant they silently reset to off every time
+    // the app restarted, no matter what the person last set them to -
+    // same bug this exact comment block already fixed once for
+    // browser_access_enabled. Persisted here the same way: INTEGER 0/1,
+    // coerced to a JS boolean in getPreferences() below, only changed by
+    // an explicit tap (see preferencesStore.js's setWebSearchEnabled /
+    // setGithubToolsEnabled - never auto-reverted).
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN web_search_enabled INTEGER DEFAULT 0;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN github_tools_enabled INTEGER DEFAULT 0;`);
     } catch (migrationErr) {
       // Expected on any install that already has this column - not an error.
     }
@@ -1630,6 +1653,8 @@ export async function getRecentUsageEvents(limit = 20) {
 const DEFAULT_PREFS_ROW = {
   theme_preference: 'auto',
   browser_access_enabled: false,
+  web_search_enabled: false,
+  github_tools_enabled: false,
   github_username: null,
   filesystem_saf_uri: null,
   memory_enabled: true,
@@ -1658,7 +1683,7 @@ export async function getPreferences() {
     // (store, ChatScreen, orchestrator, memoryEngine) can just check
     // `preferences.memory_enabled` without re-deriving truthiness each time.
     const data = row
-      ? { ...row, browser_access_enabled: !!row.browser_access_enabled, memory_enabled: !!row.memory_enabled }
+      ? { ...row, browser_access_enabled: !!row.browser_access_enabled, memory_enabled: !!row.memory_enabled, web_search_enabled: !!row.web_search_enabled, github_tools_enabled: !!row.github_tools_enabled }
       : DEFAULT_PREFS_ROW;
     return {
       success: true,
@@ -1682,10 +1707,10 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_vm_url', 'backend_auth_token', 'preferred_timezone', 'browser_router_url']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'web_search_enabled', 'github_tools_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_vm_url', 'backend_auth_token', 'preferred_timezone', 'browser_router_url']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
-        const value = (key === 'browser_access_enabled' || key === 'memory_enabled') ? (patch[key] ? 1 : 0) : patch[key];
+        const value = (key === 'browser_access_enabled' || key === 'memory_enabled' || key === 'web_search_enabled' || key === 'github_tools_enabled') ? (patch[key] ? 1 : 0) : patch[key];
         fields.push(`${key} = ?`);
         values.push(value);
       }

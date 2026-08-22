@@ -406,13 +406,19 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
     regenerateMessage, setFeedback,
     approvePendingToolCall, dismissPendingConfirmation,
   } = useChatStore();
-  const { preferences, loadPreferences, setBrowserAccessEnabled } = usePreferencesStore();
+  const { preferences, loadPreferences, setBrowserAccessEnabled, setWebSearchEnabled, setGithubToolsEnabled, apiKeyStatus } = usePreferencesStore();
 
   const [inputText, setInputText] = useState('');
   const [attachmentVisible, setAttachmentVisible] = useState(false);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [pendingAttachment, setPendingAttachment] = useState(null); // { uri, name, mimeType, size }
   const listRef = useRef(null);
+
+  // Persisted (see database.js's web_search_enabled/github_tools_enabled
+  // migration) - these used to be local useState and silently reset to
+  // off on every app restart regardless of what the person last set.
+  const webSearchEnabled = !!preferences.web_search_enabled;
+  const githubToolsEnabled = !!preferences.github_tools_enabled;
+  const githubConfigured = !!preferences.github_username && !!apiKeyStatus?.github?.configured;
 
   // Long-press message action menu - user messages only now (Copy/Edit,
   // see MessageActionMenu.js). Assistant replies use the always-visible
@@ -519,7 +525,7 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
     const attachment = pendingAttachment;
     setInputText('');
     setPendingAttachment(null);
-    await sendMessage(text, attachment, { webSearchEnabled, browserAgentActive });
+    await sendMessage(text, attachment, { webSearchEnabled, githubToolsEnabled, browserAgentActive });
   };
 
   const handleCamera = async () => {
@@ -821,6 +827,9 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
         onFiles={handleFiles}
         webSearchEnabled={webSearchEnabled}
         onToggleWebSearch={setWebSearchEnabled}
+        githubEnabled={githubToolsEnabled}
+        onToggleGithub={setGithubToolsEnabled}
+        githubConfigured={githubConfigured}
       />
 
       {/* Long-press context menu - user messages only now (Copy/Edit).
