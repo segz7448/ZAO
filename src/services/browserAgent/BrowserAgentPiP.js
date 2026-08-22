@@ -44,7 +44,7 @@ const SCREEN = Dimensions.get('window');
 const PIP_WIDTH = Math.round(SCREEN.width * 0.4);
 const PIP_HEIGHT = Math.round(PIP_WIDTH * (4 / 3)); // 3:4 - compact, not the full streamed-page shape
 const EDGE_MARGIN = 12;
-const PIP_ZOOM = 0.5; // the floating PiP window is small - zoomed out so the whole page fits in frame, independent of full-screen's own zoom (see App.js's browserFullScreenZoom, which defaults to 100% since a full screen has room for detail)
+const PIP_ZOOM = 1; // set to 100% per request - trades "whole page visible" for "sharper/legible at this size"; the PiP frame itself is still compact (PIP_WIDTH/PIP_HEIGHT above), so at 100% it shows a cropped, full-detail view of the page rather than a zoomed-out whole-page thumbnail. Independent of full-screen's own zoom (see App.js's browserFullScreenZoom).
 const FULL_SCREEN_ZOOM_FALLBACK = 1; // only used if a caller doesn't pass fullScreenZoom at all - App.js always does in practice
 
 const BrowserAgentPiP = React.forwardRef(function BrowserAgentPiP(props, ref) {

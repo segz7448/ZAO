@@ -210,6 +210,8 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
   switch (route) {
     case BRAIN_ROUTES.HIERARCHICAL_PLAN:
       return handlers.runHierarchicalPlan(effectiveMessage, params);
+    case BRAIN_ROUTES.QUICK_LOOKUP:
+      return handlers.runQuickLookup(effectiveMessage, params);
     case BRAIN_ROUTES.BROWSING:
       return handlers.runBrowsing(effectiveMessage, params);
     case BRAIN_ROUTES.CHAT:
@@ -221,6 +223,7 @@ async function runOneRoute(route, effectiveMessage, params, handlers) {
 function summarizeForNextIteration(route, stepResult) {
   const label = {
     [BRAIN_ROUTES.HIERARCHICAL_PLAN]: 'ran a multi-step plan',
+    [BRAIN_ROUTES.QUICK_LOOKUP]: 'looked up current info',
     [BRAIN_ROUTES.BROWSING]: 'browsed the web',
   }[route] || 'took an action';
 

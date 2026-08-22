@@ -22,6 +22,7 @@ import { shouldDecompose } from '../planning/planTypes';
 /** Every route frontendBrain.decideRoute() can hand back to orchestrator.js. */
 export const BRAIN_ROUTES = Object.freeze({
   HIERARCHICAL_PLAN: 'hierarchical_plan', // -> backendBrain.runHierarchicalPlan (HYBRID_SYMBOLIC_NEURAL)
+  QUICK_LOOKUP: 'quick_lookup',           // -> a single flat tool call (web_search / time_get_current) - NOT the visual browser agent
   BROWSING: 'browsing',                   // -> the live PC browser agent
   CHAT: 'chat',                           // -> plain CONVERSATIONALIST completion
 });
@@ -64,7 +65,37 @@ export const BRAIN_ROUTES = Object.freeze({
  *   HIERARCHICAL_PLAN pipeline on a guess.
  * @returns {Promise<{ route: string, intent: 'github'|'browsing'|'general', decompose: boolean, reason: string }>}
  */
+/**
+ * Free, local, no-model-call check for the specific class of "current
+ * info" question that a single web_search or time_get_current tool call
+ * fully answers - a plain date/time/weather/news lookup, nothing that
+ * needs a real page interacted with (clicking, logging in, filling a
+ * form, reading a specific site the person named). classifyIntent()'s
+ * own prompt correctly tells the model these ARE "browsing" (they need
+ * live data, not the model's stale training), but historically
+ * BRAIN_ROUTES.BROWSING meant one specific, heavy thing - opening the
+ * live Playwright browser agent (see runBrowsingHandler in
+ * orchestrator.js) - for every one of them, even "what's today's date."
+ * This heuristic catches the common, genuinely simple cases and routes
+ * them to QUICK_LOOKUP instead, which runs a single flat tool call
+ * (web_search / time_get_current, see runQuickLookupHandler) with no
+ * visual browser session at all. Anything this pattern doesn't match
+ * still falls through to the model classifier and, if genuinely
+ * "browsing", the full agent - this is intentionally narrow (a few
+ * clear phrasings) rather than trying to replace classifyIntent()
+ * entirely, so it only takes over the easy, unambiguous cases.
+ */
+const QUICK_LOOKUP_PATTERN = /\b(what(?:'s|s| is) (?:today'?s?|the current) date|what day is it|what time is it|current time|today'?s (?:date|weather)|weather (?:today|right now|in \w+)|current weather|latest news|today'?s news|news today)\b/i;
+
+function isQuickLookupQuery(messageText) {
+  return QUICK_LOOKUP_PATTERN.test((messageText || '').trim());
+}
+
 export async function decideRoute(messageText, priorAttempts = [], options = {}) {
+  if (isQuickLookupQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.QUICK_LOOKUP)) {
+    return { route: BRAIN_ROUTES.QUICK_LOOKUP, intent: 'browsing', decompose: false, reason: 'Simple current-info lookup (date/time/weather/news) - a quick tool call, not the full browser agent.' };
+  }
+
   const intent = await classifyIntent(messageText, { browserAgentActive: options.browserAgentActive });
 
   if (intent === 'browsing') {

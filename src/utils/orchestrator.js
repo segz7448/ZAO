@@ -51,6 +51,7 @@ import { logUsageEvent } from '../db/database';
 import {
   getModelKeyForTask,
   ACTIVE_MODEL,
+  MODEL_KEYS,
 } from '../config/localModels';
 import { usePreferencesStore } from '../store/preferencesStore';
 import { runAgentLoop } from '../services/brain/agentLoop';
@@ -58,6 +59,8 @@ import { runHierarchicalPlan } from '../services/brain/backendBrain';
 import { runReasoningChat, STRATEGY_FOR_ROUTE } from '../services/reasoning/reasoningEngine';
 import { getGroundingNote, enforceRealTime } from '../services/reasoning/chatGroundingBackstop';
 import * as timeTool from '../services/time/timeTool';
+import * as webSearchTool from '../services/search/webSearchTool';
+import * as backendClient from '../services/backend/backendClient';
 
 /**
  * Renders standingContext (system-role blocks from
@@ -177,6 +180,7 @@ export async function sendMessageOrchestrated({
 
     const handlers = {
       runHierarchicalPlan: runHierarchicalPlanHandler,
+      runQuickLookup: runQuickLookupHandler,
       runBrowsing: runBrowsingHandler,
       runChat: runChatHandler,
     };
@@ -265,6 +269,86 @@ async function runHierarchicalPlanHandler(effectiveMessage, params) {
 // mounted), that's a genuine capability gap - handled below as a
 // clear, honest response instead of a silent chat fallback.
 // ========================================================================
+// ========================================================================
+// QUICK LOOKUP - the light path frontendBrain.js's QUICK_LOOKUP route
+// takes for plain date/time/weather/news questions, so these don't pull
+// up the full live Playwright browser agent (runBrowsingHandler below)
+// just to answer something like "what's today's date". Two cases:
+//   - date/time: resolved entirely on-device via timeTool.js (same data
+//     source as the time_get_current tool) - no backend call, instant.
+//   - weather/news (or anything the date/time check doesn't match): one
+//     web_search call, then one plain non-streaming completion asking
+//     the model to answer using just those results. Still real,
+//     current, sourced information - just without opening a visual
+//     browser session to get it.
+// ========================================================================
+const DATE_TIME_ONLY_RE = /\b(date|day|time)\b/i;
+
+async function runQuickLookupHandler(effectiveMessage, params) {
+  const { history, onToken } = params;
+
+  if (DATE_TIME_ONLY_RE.test(effectiveMessage) && !/\bweather\b/i.test(effectiveMessage)) {
+    const timeResult = timeTool.getCurrentTime(null);
+    if (timeResult.success) {
+      const content = `It's currently ${timeResult.data.formatted} (${timeResult.data.zoneName}).`;
+      onToken?.(content);
+      return {
+        success: true,
+        data: { content, family: ACTIVE_MODEL.key, provider: 'on-device', modelId: 'device clock', reasoningType: STRATEGY_FOR_ROUTE.BROWSING },
+        error: null,
+      };
+    }
+    // Falls through to web_search below if timeTool itself couldn't
+    // resolve anything (extremely unlikely for a plain "what's the
+    // date" with no timezone named), rather than returning nothing.
+  }
+
+  const searchResult = await webSearchTool.search(effectiveMessage, 5);
+  if (!searchResult.success) {
+    return {
+      success: false,
+      data: null,
+      error: { type: 'QUICK_LOOKUP_ERROR', message: searchResult.error?.message || 'Web search failed.' },
+    };
+  }
+
+  const resultsSummary = (searchResult.data?.results || [])
+    .slice(0, 5)
+    .map((r, i) => `${i + 1}. ${r.title} - ${r.snippet} (${r.url})`)
+    .join('\n');
+
+  const synthesisHistory = [
+    { role: 'system', content: 'Answer the person\u2019s question directly and concisely using ONLY the search results below - they\u2019re current as of right now, more current than anything you already know. Don\u2019t mention "search results" or list sources unless asked; just answer naturally, the way you would if you simply knew the answer.\n\nSearch results:\n' + resultsSummary },
+    ...history,
+  ];
+
+  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.QWEN3_CODER_30B_A3B;
+  const completion = await backendClient.sendMessage(synthesisHistory, modelKey, { temperature: 0.3 });
+
+  if (!completion.success || !completion.data?.content) {
+    return {
+      success: false,
+      data: null,
+      error: { type: 'QUICK_LOOKUP_ERROR', message: completion.error?.message || 'Could not synthesize an answer from search results.' },
+    };
+  }
+
+  onToken?.(completion.data.content);
+  logUsageEvent('quick_lookup', effectiveMessage.slice(0, 80), null).catch(() => {});
+
+  return {
+    success: true,
+    data: {
+      content: completion.data.content,
+      family: ACTIVE_MODEL.key,
+      provider: 'local-backend',
+      modelId: ACTIVE_MODEL.label,
+      reasoningType: STRATEGY_FOR_ROUTE.BROWSING,
+    },
+    error: null,
+  };
+}
+
 async function runBrowsingHandler(effectiveMessage, params) {
   const { agentSession, browserAccessEnabled, onBrowserStep, standingContext } = params;
 
