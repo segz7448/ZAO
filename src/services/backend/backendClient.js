@@ -586,6 +586,35 @@ export async function stopDevServer(previewId) {
 }
 
 /**
+ * Lists every dev preview server currently tracked on the PC via the
+ * backend's /preview/list route - the "what's actually still running"
+ * check for a previewId lost from context (same rationale as
+ * listPcProcesses() above for background processes).
+ * @returns {Promise<{success, data: {servers: Array<{previewId, command, cwd, url, status, startedAt}>}|null, error}>}
+ */
+export async function listDevPreviewServers() {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
+  }
+  try {
+    const response = await withTimeout(fetch(`${baseUrl}/preview/list`, { headers: authHeaders(token) }), HEALTH_TIMEOUT_MS, 'Dev preview list fetch timed out.');
+    if (!response.ok) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Failed to list dev preview servers (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend.` : err?.message || 'Failed to list dev preview servers.' },
+    };
+  }
+}
+
+/**
  * Starts a command as a tracked BACKGROUND process on the PC (via the
  * backend's /process/start route) and returns immediately with an id -
  * unlike runTerminalCommand, this never waits for the command to exit.
@@ -745,6 +774,38 @@ export async function stopPcProcess(processId, options = {}) {
       success: false,
       data: null,
       error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend to stop the process.` : err?.message || 'Failed to stop process.' },
+    };
+  }
+}
+
+/**
+ * Lists every background process currently tracked on the PC (running or
+ * finished-but-not-yet-cleaned-up) via the backend's /process/list route.
+ * The "what's actually still running" check for when a process id from
+ * earlier in the conversation got lost (context truncation, a fresh
+ * conversation, app restart) - without this there was no way to
+ * rediscover a process started with startPcProcess() except by already
+ * knowing its id.
+ * @returns {Promise<{success, data: {processes: Array<{id, status, exitCode, signal, startedAt, finishedAt, pid, command, label}>}|null, error}>}
+ */
+export async function listPcProcesses() {
+  const { mode, baseUrl, token } = getActiveConnection();
+  if (!baseUrl) {
+    return { success: false, data: null, error: { type: ERROR_TYPES.NOT_CONFIGURED, message: `No VM address is set.` } };
+  }
+  try {
+    const response = await withTimeout(fetch(`${baseUrl}/process/list`, { headers: authHeaders(token) }), HEALTH_TIMEOUT_MS, 'Process list fetch timed out.');
+    if (!response.ok) {
+      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Failed to list processes (${response.status}).` } };
+    }
+    const result = await response.json();
+    return { success: true, data: result, error: null };
+  } catch (err) {
+    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+    return {
+      success: false,
+      data: null,
+      error: { type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN, message: isNetworkError ? `Can't reach the ZAO backend.` : err?.message || 'Failed to list processes.' },
     };
   }
 }

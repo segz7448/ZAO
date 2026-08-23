@@ -866,6 +866,14 @@ const TERMINAL_TOOL_SCHEMAS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_process_list',
+      description: "Lists every background process the PC backend currently knows about (running, exited, killed, or errored), with each one's id, status, and the command it ran. Use this to rediscover processes started with pc_process_start when you no longer have their id - e.g. earlier in a long conversation, after a new conversation started, or after the app restarted - instead of assuming nothing is running. Especially worth checking before starting a new dev server or long build, so you don't leave an old one running unnoticed.",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ];
 
 // Dev server + visual preview - closes a gap terminal_pc_run_command
@@ -920,6 +928,14 @@ const DEV_PREVIEW_TOOL_SCHEMAS = [
         properties: { previewId: { type: 'string' } },
         required: ['previewId'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dev_server_list',
+      description: "Lists every dev preview server the PC backend currently knows about, with each one's previewId, command, detected url, and status. Use this to rediscover a server started with dev_server_start when you no longer have its previewId, or to check whether a dev server is already running (and can be reused or should be stopped) before starting another one on the same port.",
+      parameters: { type: 'object', properties: {} },
     },
   },
 ];
@@ -1925,6 +1941,10 @@ export const TOOL_REGISTRY = {
     run: (args) => pcProcessTool.stopProcess(args.processId, { signal: args.signal || undefined }),
     label: (args) => `Stopped process ${args.processId}`,
   },
+  pc_process_list: {
+    run: () => pcProcessTool.listProcesses(),
+    label: () => 'Listed background processes on PC',
+  },
   dev_server_start: {
     run: (args) => devPreviewTool.startServer(args.command, { workingDirectory: args.cwd || null, port: args.port || null }),
     label: (args) => `Started dev server: ${args.command}`,
@@ -1936,6 +1956,10 @@ export const TOOL_REGISTRY = {
   dev_server_stop: {
     run: (args) => devPreviewTool.stopServer(args.previewId),
     label: (args) => `Stopped dev server ${args.previewId}`,
+  },
+  dev_server_list: {
+    run: () => devPreviewTool.listServers(),
+    label: () => 'Listed dev preview servers on PC',
   },
   pc_list_directory: {
     run: (args) => pcFilePullTool.listDirectory(args.path || ''),

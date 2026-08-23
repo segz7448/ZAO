@@ -28,7 +28,7 @@
  * terminal command.
  */
 
-import { startDevServer as backendStartDevServer, screenshotDevPreview as backendScreenshotDevPreview, stopDevServer as backendStopDevServer } from '../backend/backendClient';
+import { startDevServer as backendStartDevServer, screenshotDevPreview as backendScreenshotDevPreview, stopDevServer as backendStopDevServer, listDevPreviewServers as backendListDevPreviewServers } from '../backend/backendClient';
 import { checkCommandSafety } from './commandSafety';
 import { checkBeforeProjectRun } from '../execution/projectRunGate';
 import { writeBinaryFileFromBase64 } from '../filesystem/filesystemTool';
@@ -133,5 +133,19 @@ export async function stopServer(previewId) {
   if (!result.success) {
     return { success: false, data: null, error: result.error };
   }
+  return { success: true, data: result.data, error: null };
+}
+
+/**
+ * Lists every dev preview server the PC backend currently knows about.
+ * The rediscovery path for when a previewId from earlier in the
+ * conversation isn't available anymore - without this, a server started
+ * with startServer() was only reachable by already knowing its id, and
+ * would otherwise sit running (and bound to a port) indefinitely.
+ * @returns {Promise<{success, data: {servers: Array<{previewId, command, cwd, url, status, startedAt}>}|null, error}>}
+ */
+export async function listServers() {
+  const result = await backendListDevPreviewServers();
+  if (!result.success) return { success: false, data: null, error: result.error };
   return { success: true, data: result.data, error: null };
 }

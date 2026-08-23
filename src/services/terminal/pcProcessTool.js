@@ -31,7 +31,7 @@
  * allowNetwork here the way there is for terminal_pc_run_command.
  */
 
-import { startPcProcess, getPcProcessStatus, getPcProcessLogs, stopPcProcess } from '../backend/backendClient';
+import { startPcProcess, getPcProcessStatus, getPcProcessLogs, stopPcProcess, listPcProcesses } from '../backend/backendClient';
 import { checkCommandSafety } from './commandSafety';
 import { checkBeforeProjectRun } from '../execution/projectRunGate';
 import { addBackgroundProcess, updateBackgroundProcessStatus } from '../../db/database';
@@ -118,5 +118,19 @@ export async function stopProcess(processId, options = {}) {
   if (result.data?.stopped) {
     await updateBackgroundProcessStatus(processId, 'killed', null);
   }
+  return { success: true, data: result.data, error: null };
+}
+
+/**
+ * Lists every background process the PC backend currently knows about
+ * (running or finished-but-not-yet-cleaned-up). The rediscovery path for
+ * when a processId from earlier in the conversation isn't available
+ * anymore - without this, a process started with startProcess() was only
+ * reachable by already knowing its id.
+ * @returns {Promise<{success, data: {processes: Array<{id, status, exitCode, signal, startedAt, finishedAt, pid, command, label}>}|null, error}>}
+ */
+export async function listProcesses() {
+  const result = await listPcProcesses();
+  if (!result.success) return { success: false, data: null, error: result.error };
   return { success: true, data: result.data, error: null };
 }
