@@ -187,7 +187,7 @@ function FilesystemAccessSection({ preferences, theme }) {
   return (
     <View style={styles.keyRow}>
       <View style={styles.keyRowHeader}>
-        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Device folder access</Text>
+        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>Download folder</Text>
         <View style={[styles.statusPill, { backgroundColor: granted ? '#DCFCE7' : theme.surfaceAlt }]}>
           <Text style={[styles.statusPillText, { color: granted ? '#166534' : theme.textSecondary }]}>
             {granted ? 'Granted' : 'Not granted'}
@@ -196,8 +196,8 @@ function FilesystemAccessSection({ preferences, theme }) {
       </View>
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 4 }]}>
         {granted
-          ? 'ZAO can create, move, rename, delete, zip, and extract files inside the folder you granted. Grant a different folder anytime below.'
-          : 'Android requires granting access to a specific folder before ZAO can manage files on your device (create, move, rename, delete, zip, extract). This is a one-time system permission - pick a folder like Download to give ZAO room to work in.'}
+          ? 'Files ZAO builds on the backend land here when you download them from chat. Grant a different folder anytime below.'
+          : 'Android requires granting access to a specific folder before ZAO can save anything to your device. This is a one-time system permission - pick a folder like Download. ZAO builds and stores everything on the backend; this folder is only where finished files go when you tap to download them.'}
       </Text>
       <TouchableOpacity
         style={[styles.keyEditBtn, { marginTop: 12 }]}

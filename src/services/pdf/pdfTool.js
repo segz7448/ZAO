@@ -26,17 +26,18 @@
  * than pretending create/merge/split covers it - OCR would be its own,
  * separate effort once a vision-capable model is available again.
  *
- * Output files are written through the Filesystem tool
- * (src/services/filesystem/filesystemTool.js) rather than duplicating
- * SAF file-writing logic here - this module only builds the PDF bytes.
+ * Output files are written through pcFilesystemTool.js (PC backend,
+ * PC_BRIDGE_ROOT) rather than duplicating file-writing logic here - this
+ * module only builds the PDF bytes. This is a change from the tool's
+ * original on-device SAF output: see the pcfiles/fs-file split in
+ * toolOrchestrator.js. Pulling a finished PDF onto the phone (into the
+ * SAF folder granted in Settings) happens separately, via pc_pull_file.
  */
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import * as FileSystem from 'expo-file-system/legacy';
-import { getOrCreateFileUriForTools, getExistingFileUriForTools } from '../filesystem/filesystemTool';
+import { writeBinaryFile } from '../terminal/pcFilesystemTool';
+import { readPcFile } from '../backend/backendClient';
 import { bytesToBase64, base64ToBytes } from '../shared/base64Utils';
-
-const { StorageAccessFramework } = FileSystem;
 
 const PAGE_SIZES = {
   a4: [595.28, 841.89],
@@ -53,7 +54,7 @@ const PAGE_SIZES = {
  * writes content, the plugin generates files."
  *
  * @param {Array<{heading?: string, text?: string}>} sections - ordered content blocks
- * @param {string} outputPath - path relative to the granted filesystem folder, e.g. "reports/pitch.pdf"
+ * @param {string} outputPath - path relative to PC_BRIDGE_ROOT on the PC backend, e.g. "reports/pitch.pdf"
  * @param {object} options - { pageSize: 'a4'|'letter', title }
  */
 export async function createPdf(sections, outputPath, options = {}) {
@@ -137,8 +138,8 @@ export async function createPdf(sections, outputPath, options = {}) {
 }
 
 /**
- * Merges multiple existing PDFs (paths relative to the granted
- * filesystem folder) into one, in the given order.
+ * Merges multiple existing PDFs (paths relative to PC_BRIDGE_ROOT on the
+ * PC backend) into one, in the given order.
  */
 export async function mergePdfs(inputPaths, outputPath) {
   try {
@@ -168,7 +169,7 @@ export async function mergePdfs(inputPaths, outputPath) {
  * (if ranges is omitted) or one file per given page range.
  *
  * @param {string} inputPath
- * @param {string} outputFolderPath - folder (relative to the granted directory) to write split files into
+ * @param {string} outputFolderPath - folder (relative to PC_BRIDGE_ROOT) to write split files into
  * @param {Array<{start: number, end: number, name: string}>} [ranges] - 1-indexed, inclusive page ranges with an output filename each. If omitted, splits into one PDF per page.
  */
 export async function splitPdf(inputPath, outputFolderPath, ranges = null) {
@@ -213,28 +214,26 @@ export async function splitPdf(inputPath, outputFolderPath, ranges = null) {
   }
 }
 
-// --- Internal byte read/write helpers, bridging into the Filesystem
-// tool's SAF access rather than duplicating it ---
+// --- Internal byte read/write helpers, bridging into the PC backend
+// (pcFilesystemTool.js / server/pcFiles.js) rather than duplicating that
+// HTTP round-trip here ---
 
 async function readPdfBytes(relativePath) {
-  const resolved = await getExistingFileUriForTools(relativePath);
-  if (!resolved.success) return { success: false, data: null, error: resolved.error };
+  const result = await readPcFile(relativePath);
+  if (!result.success) return { success: false, data: null, error: result.error };
 
   try {
-    const base64 = await FileSystem.readAsStringAsync(resolved.data.uri, { encoding: FileSystem.EncodingType.Base64 });
-    return { success: true, data: base64ToBytes(base64), error: null };
+    return { success: true, data: base64ToBytes(result.data.contentB64), error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not read ${relativePath}.` } };
   }
 }
 
 async function writePdfBytes(bytes, relativePath) {
-  const resolved = await getOrCreateFileUriForTools(relativePath, 'application/pdf');
-  if (!resolved.success) return { success: false, data: null, error: resolved.error };
-
   try {
     const base64 = bytesToBase64(bytes);
-    await FileSystem.writeAsStringAsync(resolved.data.uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    const writeResult = await writeBinaryFile(relativePath, base64, { overwrite: true });
+    if (!writeResult.success) return { success: false, data: null, error: writeResult.error };
     return { success: true, data: null, error: null };
   } catch (err) {
     return { success: false, data: null, error: { message: err?.message || `Could not write ${relativePath}.` } };

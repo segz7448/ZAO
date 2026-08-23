@@ -24,11 +24,15 @@
  *   - shadow offsets must never be negative
  *   - layout must be set before slides are added
  *   - bullets use bullet:true, never a literal "•" character
+ *
+ * OUTPUT DESTINATION: writes through pcFilesystemTool.js (PC backend,
+ * PC_BRIDGE_ROOT), not the phone's on-device SAF folder - see the
+ * pcfiles/fs-file split in toolOrchestrator.js. Pulling the finished
+ * .pptx onto the phone happens separately, via pc_pull_file.
  */
 
 import PptxGenJS from 'pptxgenjs';
-import { getOrCreateFileUriForTools } from '../filesystem/filesystemTool';
-import * as FileSystem from 'expo-file-system/legacy';
+import { writeBinaryFile } from '../terminal/pcFilesystemTool';
 
 const LAYOUTS = {
   standard: 'LAYOUT_4x3', // 10" x 7.5"
@@ -55,7 +59,7 @@ function sanitizeHex(hex, fallback = '000000') {
  * @param {Array<object>} slides - each slide is one of:
  *   { type: 'title', title: string, subtitle?: string }
  *   { type: 'content', title: string, bullets?: string[], text?: string, notes?: string }
- * @param {string} outputPath - relative to the granted filesystem folder, e.g. "pitch.pptx"
+ * @param {string} outputPath - relative to PC_BRIDGE_ROOT on the PC backend, e.g. "pitch.pptx"
  * @param {object} options - { layout: 'standard'|'widescreen'|'wide' (default widescreen), accentColor: hex without '#' }
  */
 export async function createPptx(slides, outputPath, options = {}) {
@@ -129,13 +133,8 @@ export async function createPptx(slides, outputPath, options = {}) {
     // expo-file-system without needing Node's Buffer or a browser Blob.
     const base64 = await pres.write({ outputType: 'base64' });
 
-    const resolved = await getOrCreateFileUriForTools(
-      outputPath,
-      'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-    );
-    if (!resolved.success) return { success: false, data: null, error: resolved.error };
-
-    await FileSystem.writeAsStringAsync(resolved.data.uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    const writeResult = await writeBinaryFile(outputPath, base64, { overwrite: true });
+    if (!writeResult.success) return { success: false, data: null, error: writeResult.error };
 
     return { success: true, data: { path: outputPath, slideCount: slides.length }, error: null };
   } catch (err) {

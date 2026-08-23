@@ -25,11 +25,15 @@
  * SCOPE: single or multiple sheets, header row + data rows, optional
  * formulas. No charts, pivot tables, or cell styling/conditional
  * formatting - a meaningfully larger effort than this pass covers.
+ *
+ * OUTPUT DESTINATION: writes through pcFilesystemTool.js (PC backend,
+ * PC_BRIDGE_ROOT), not the phone's on-device SAF folder - see the
+ * pcfiles/fs-file split in toolOrchestrator.js. Pulling the finished
+ * file onto the phone happens separately, via pc_pull_file.
  */
 
 import * as XLSX from 'xlsx';
-import { getOrCreateFileUriForTools } from '../filesystem/filesystemTool';
-import * as FileSystem from 'expo-file-system/legacy';
+import { writeBinaryFile, createFile } from '../terminal/pcFilesystemTool';
 
 /**
  * Creates a new .xlsx workbook from one or more sheets of tabular data.
@@ -37,7 +41,7 @@ import * as FileSystem from 'expo-file-system/legacy';
  * @param {Array<{name: string, headers: string[], rows: Array<Array<string|number>>}>} sheets
  *   Each cell in `rows` can be a plain value, or a string starting with
  *   "=" to write it as a live formula instead of a literal value.
- * @param {string} outputPath - relative to the granted filesystem folder, e.g. "budget.xlsx"
+ * @param {string} outputPath - relative to PC_BRIDGE_ROOT on the PC backend, e.g. "budget.xlsx"
  */
 export async function createXlsx(sheets, outputPath) {
   try {
@@ -74,13 +78,8 @@ export async function createXlsx(sheets, outputPath) {
     // content, without needing Node's Buffer or a real browser Blob.
     const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
 
-    const resolved = await getOrCreateFileUriForTools(
-      outputPath,
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
-    if (!resolved.success) return { success: false, data: null, error: resolved.error };
-
-    await FileSystem.writeAsStringAsync(resolved.data.uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    const writeResult = await writeBinaryFile(outputPath, base64, { overwrite: true });
+    if (!writeResult.success) return { success: false, data: null, error: writeResult.error };
 
     return { success: true, data: { path: outputPath, sheetCount: sheets.length }, error: null };
   } catch (err) {
@@ -102,10 +101,8 @@ export async function createCsv(headers, rows, outputPath) {
     const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
     const csvString = XLSX.utils.sheet_to_csv(worksheet);
 
-    const resolved = await getOrCreateFileUriForTools(outputPath, 'text/csv');
-    if (!resolved.success) return { success: false, data: null, error: resolved.error };
-
-    await FileSystem.writeAsStringAsync(resolved.data.uri, csvString, { encoding: FileSystem.EncodingType.UTF8 });
+    const writeResult = await createFile(outputPath, csvString, { overwrite: true });
+    if (!writeResult.success) return { success: false, data: null, error: writeResult.error };
 
     return { success: true, data: { path: outputPath, rowCount: rows.length }, error: null };
   } catch (err) {

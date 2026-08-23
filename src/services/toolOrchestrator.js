@@ -42,7 +42,6 @@
 import * as modelClient from './backend/backendClient';
 import { MODEL_KEYS } from '../config/localModels';
 import * as githubTool from './github/githubTool';
-import * as filesystemTool from './filesystem/filesystemTool';
 import * as pdfTool from './pdf/pdfTool';
 import * as docxTool from './office/docxTool';
 import * as xlsxTool from './office/xlsxTool';
@@ -288,231 +287,15 @@ const GITHUB_TOOL_SCHEMAS = [
   },
 ];
 
-const FILESYSTEM_TOOL_SCHEMAS = [
-  {
-    type: 'function',
-    function: {
-      name: 'fs_create_file',
-      description: 'Creates a new text file with given content on the device, at a path relative to the folder the person granted access to. Creates any missing parent folders automatically.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'e.g. myproject/src/App.js' },
-          content: { type: 'string' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_create_folder',
-      description: 'Creates a folder (and any missing parent folders) on the device.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_delete',
-      description: "Deletes a file or folder on the device. Deleting a FOLDER automatically snapshots every file under it first (a 'folder checkpoint') and returns a folderCheckpointId in the result - pass that id to fs_rewind_folder_checkpoint later to restore the whole folder exactly as it was, in one call.",
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_rewind_folder_checkpoint',
-      description: "Restores an entire folder from a folder checkpoint - undoes a folder delete (or an in-progress rebuild/replace of a folder) by recreating every file exactly as it was at that checkpoint. This is the 'delete the folder and go back to the last checkpoint' operation: pass the folderCheckpointId returned by the fs_delete call that removed it (or from fs_list_folder_checkpoints if it's from an earlier turn). Overwrites anything currently at those paths, so use the newest relevant checkpoint unless told otherwise.",
-      parameters: {
-        type: 'object',
-        properties: { folderCheckpointId: { type: 'string' } },
-        required: ['folderCheckpointId'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_list_folder_checkpoints',
-      description: 'Lists recent folder checkpoints (batch snapshots taken automatically before a folder delete), newest first - each with its id, root path, file count, and when it was taken. Use this to find the right folderCheckpointId to pass to fs_rewind_folder_checkpoint when it was not returned earlier in this conversation.',
-      parameters: {
-        type: 'object',
-        properties: { limit: { type: 'number', description: 'Max results, default 20.' } },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_rename',
-      description: 'Renames a file or folder in place.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Current path' },
-          newName: { type: 'string', description: 'New name only, not a full path' },
-        },
-        required: ['path', 'newName'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_move',
-      description: 'Moves a file into a different folder on the device. Set copy: true to duplicate instead of moving.',
-      parameters: {
-        type: 'object',
-        properties: {
-          sourcePath: { type: 'string' },
-          destinationFolder: { type: 'string' },
-          copy: { type: 'boolean', description: 'Copy instead of move. Defaults to false.' },
-        },
-        required: ['sourcePath', 'destinationFolder'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_zip',
-      description: 'Recursively zips a folder on the device into a single .zip file.',
-      parameters: {
-        type: 'object',
-        properties: {
-          folderPath: { type: 'string', description: 'Folder to zip' },
-          zipOutputPath: { type: 'string', description: 'Where to write the resulting .zip, e.g. myproject.zip' },
-        },
-        required: ['folderPath', 'zipOutputPath'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_extract_zip',
-      description: 'Extracts a .zip file on the device into a destination folder, recreating its internal structure.',
-      parameters: {
-        type: 'object',
-        properties: {
-          zipPath: { type: 'string' },
-          destinationFolder: { type: 'string' },
-        },
-        required: ['zipPath', 'destinationFolder'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_list_folder',
-      description: 'Lists the files and folders inside a given folder on the device. Use this to check what already exists before creating/moving/deleting things.',
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'Leave empty for the root of the granted folder' } },
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_read_file',
-      description: "Reads a text file's content on the device, with line numbers - like Claude Code's Read tool. Use this before fs_edit_file so oldString is copied from the file's real current content, not guessed. Optionally restrict to a line range for a large file.",
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          startLine: { type: 'integer', description: '1-indexed, inclusive. Omit to start from the top.' },
-          endLine: { type: 'integer', description: '1-indexed, inclusive. Omit to read to the end.' },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_grep',
-      description: "Searches file CONTENTS for a regex pattern across every text file under a folder on the device (recursive) - like Claude Code's Grep. Returns matching file paths, line numbers, and the matching line text.",
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Regex pattern, no delimiters, e.g. "TODO|FIXME"' },
-          path: { type: 'string', description: 'Folder to search under. Leave empty to search the whole granted folder.' },
-          caseSensitive: { type: 'boolean', description: 'Defaults to false' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_glob',
-      description: "Finds files by NAME pattern (not content) under a folder on the device - like Claude Code's Glob. Supports *, **, and ? wildcards, e.g. \"**/*.test.js\" or \"src/*.json\".",
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Glob pattern, e.g. "**/*.js"' },
-          path: { type: 'string', description: 'Folder to search under. Leave empty to search the whole granted folder.' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_edit_file',
-      description: "Makes a precise, targeted change to one existing text file on the device by replacing an exact snippet with new text - like Claude Code's Edit tool. Safer than rewriting a whole file with fs_create_file: oldString must match the file's current content exactly and uniquely (include enough surrounding context, e.g. a full line or two, to pin it down), or this returns an error instead of guessing. Always fs_read_file the file first so oldString is copied from real current content.",
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          oldString: { type: 'string', description: 'Exact existing text to find - must be unique in the file unless replaceAll is set' },
-          newString: { type: 'string', description: 'Text to replace it with' },
-          replaceAll: { type: 'boolean', description: 'Replace every occurrence instead of requiring exactly one. Defaults to false.' },
-        },
-        required: ['path', 'oldString', 'newString'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_check_syntax',
-      description: "Runs a real JS/JSX/TS/TSX/JSON parser against a file already on disk and reports syntax errors with line/column - like Claude Code's own syntax verification. fs_create_file and fs_edit_file already run this automatically before every write and refuse to save broken code, so you don't need to call this right after your own successful edit - use it to double-check a file you didn't just write.",
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string' } },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'fs_check_project_syntax',
-      description: "Recursively syntax/JSX-checks every JS/JSX/TS/TSX/JSON file under a folder (skipping node_modules/.git/android/ios/build/dist/.expo) and lists every file that fails, with line/column. Call this before telling the person a project is ready, or before starting/building it. This same check also runs automatically as a gate right in front of terminal_pc_run_command whenever the command actually starts or builds a project (npm start, expo start, npm run build, etc.) - that automatic gate blocks the run and hands back the exact errors instead of letting a broken project launch, so you'll typically only need to call this tool directly when you want to check proactively, e.g. before saying a task is done.",
-      parameters: {
-        type: 'object',
-        properties: { path: { type: 'string', description: 'Folder to check, relative to the granted root. Leave empty to check everything.' } },
-        required: [],
-      },
-    },
-  },
-];
+// DISCONNECTED (2026): fs_* on-device SAF tools used to live here, letting
+// the model create/edit/delete/move/zip files directly in the phone's
+// granted folder. Per the pcfiles/fs-file split, the model no longer gets
+// ANY direct file/folder mutation capability on the phone - PC_FILESYSTEM_TOOL_SCHEMAS
+// (pc_*, below) is now the only file/folder create/edit/delete/rename surface
+// exposed to the model, all of it landing on the PC backend. The phone's SAF
+// grant (src/services/filesystem/filesystemTool.js) is kept only as a download
+// destination - see that file's header - not as a tool the model calls.
+const FILESYSTEM_TOOL_SCHEMAS = [];
 
 const PDF_TOOL_SCHEMAS = [
   {
@@ -534,7 +317,7 @@ const PDF_TOOL_SCHEMAS = [
               },
             },
           },
-          outputPath: { type: 'string', description: 'Where to save the PDF, relative to the granted folder, e.g. reports/pitch.pdf' },
+          outputPath: { type: 'string', description: 'Where to save the PDF on the PC backend, relative to PC_BRIDGE_ROOT, e.g. reports/pitch.pdf' },
           title: { type: 'string', description: 'PDF document title metadata' },
           pageSize: { type: 'string', enum: ['a4', 'letter'], description: 'Defaults to a4' },
         },
@@ -1380,7 +1163,7 @@ const PHONE_UTILITY_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'phone_share_file',
-      description: "Opens Android's native share sheet for an existing file on the phone (relative to the SAF folder granted in Settings > Filesystem) - lets the person send it straight to WhatsApp, Drive, email, etc. Use fs_create_file/pc_fs_create_file plus pc_pull_file first if the file doesn't already exist on the phone.",
+      description: "Opens Android's native share sheet for an existing file on the phone (relative to the download folder granted in Settings > Filesystem) - lets the person send it straight to WhatsApp, Drive, email, etc. Use pc_fs_create_file plus pc_pull_file first if the file doesn't already exist on the phone.",
       parameters: {
         type: 'object',
         properties: { path: { type: 'string', description: 'Relative to the granted phone folder.' } },
@@ -1499,11 +1282,11 @@ const DATA_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'data_analyze_file',
-      description: 'Runs real data analysis (pandas, on the PC backend) against an existing .csv/.tsv/.xlsx/.xls file already in the granted folder - use this instead of fs_read_file for tabular data larger than a quick glance, or whenever you need actual statistics/filtering/grouping rather than just eyeballing raw rows. NOT for creating spreadsheets (use xlsx_create for that) and NOT arbitrary code execution.',
+      description: 'Runs real data analysis (pandas, on the PC backend) against an existing .csv/.tsv/.xlsx/.xls file already on the PC backend - use this instead of pc_read_file for tabular data larger than a quick glance, or whenever you need actual statistics/filtering/grouping rather than just eyeballing raw rows. NOT for creating spreadsheets (use xlsx_create for that) and NOT arbitrary code execution.',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Path to the .csv/.tsv/.xlsx/.xls file, relative to the granted folder' },
+          path: { type: 'string', description: 'Path to the .csv/.tsv/.xlsx/.xls file, relative to PC_BRIDGE_ROOT' },
           operation: { type: 'string', enum: ['describe', 'head', 'filter', 'groupby'], description: "'describe' = summary statistics for every column (good first call on an unfamiliar file). 'head' = first N rows. 'filter' = rows matching one column condition. 'groupby' = aggregate (e.g. sum/mean) grouped by one or more columns." },
           sheet: { type: 'string', description: 'Sheet name for .xlsx/.xls files - defaults to the first sheet if omitted' },
           n: { type: 'integer', description: "Row cap for 'head'/'filter'/'groupby' results - defaults to 50, capped at 200" },
@@ -1763,70 +1546,9 @@ export const TOOL_REGISTRY = {
     run: (args) => githubTool.triggerWorkflowDispatch(args.owner, args.repo, args.workflowFile, { ref: args.ref, inputs: args.inputs }),
     label: (args) => `Triggered workflow ${args.workflowFile}`,
   },
-  fs_create_file: {
-    run: (args) => filesystemTool.createFile(args.path, args.content),
-    label: (args) => `Created ${args.path}`,
-  },
-  fs_create_folder: {
-    run: (args) => filesystemTool.createFolder(args.path),
-    label: (args) => `Created folder ${args.path}`,
-  },
-  fs_delete: {
-    run: (args) => filesystemTool.deleteEntry(args.path),
-    label: (args) => `Deleted ${args.path}`,
-  },
-  fs_rewind_folder_checkpoint: {
-    run: (args) => filesystemTool.rewindFolderCheckpoint(args.folderCheckpointId),
-    label: () => 'Restored folder from checkpoint',
-  },
-  fs_list_folder_checkpoints: {
-    run: (args) => filesystemTool.listFolderCheckpoints(args.limit || 20).then((data) => ({ success: true, data, error: null })),
-    label: () => 'Listed folder checkpoints',
-  },
-  fs_rename: {
-    run: (args) => filesystemTool.renameEntry(args.path, args.newName),
-    label: (args) => `Renamed ${args.path} to ${args.newName}`,
-  },
-  fs_move: {
-    run: (args) => filesystemTool.moveEntry(args.sourcePath, args.destinationFolder, { keepOriginal: !!args.copy }),
-    label: (args) => `${args.copy ? 'Copied' : 'Moved'} ${args.sourcePath} to ${args.destinationFolder}`,
-  },
-  fs_zip: {
-    run: (args) => filesystemTool.zipFolder(args.folderPath, args.zipOutputPath),
-    label: (args) => `Zipped ${args.folderPath} to ${args.zipOutputPath}`,
-  },
-  fs_extract_zip: {
-    run: (args) => filesystemTool.extractZip(args.zipPath, args.destinationFolder),
-    label: (args) => `Extracted ${args.zipPath} to ${args.destinationFolder}`,
-  },
-  fs_list_folder: {
-    run: (args) => filesystemTool.listFolder(args.path || ''),
-    label: (args) => `Checked contents of ${args.path || '(root)'}`,
-  },
-  fs_read_file: {
-    run: (args) => filesystemTool.readFile(args.path, { startLine: args.startLine, endLine: args.endLine }),
-    label: (args) => `Read ${args.path}`,
-  },
-  fs_grep: {
-    run: (args) => filesystemTool.grep(args.pattern, { path: args.path || '', caseSensitive: !!args.caseSensitive }),
-    label: (args) => `Searched for "${args.pattern}"${args.path ? ` in ${args.path}` : ''}`,
-  },
-  fs_glob: {
-    run: (args) => filesystemTool.globFiles(args.pattern, { path: args.path || '' }),
-    label: (args) => `Found files matching ${args.pattern}`,
-  },
-  fs_edit_file: {
-    run: (args) => filesystemTool.editFile(args.path, args.oldString, args.newString, { replaceAll: !!args.replaceAll }),
-    label: (args) => `Edited ${args.path}`,
-  },
-  fs_check_syntax: {
-    run: (args) => filesystemTool.checkFileSyntax(args.path),
-    label: (args) => `Syntax-checked ${args.path}`,
-  },
-  fs_check_project_syntax: {
-    run: (args) => filesystemTool.checkProjectSyntax(args.path || ''),
-    label: (args) => `Syntax-checked project${args.path ? ` (${args.path})` : ''}`,
-  },
+  // fs_* (on-device SAF create/edit/delete/rename/zip/list/read/grep/glob)
+  // intentionally removed from the registry - see FILESYSTEM_TOOL_SCHEMAS
+  // above. pc_* below is now the only file/folder mutation surface.
   web_search: {
     run: (args) => webSearchTool.search(args.query, args.maxResults || 5),
     label: (args) => `Searched the web: "${args.query}"`,
@@ -2341,7 +2063,7 @@ export async function runToolTask(userRequest, context = {}, onStep = null) {
 
   const systemPrompt = `You are ZAO's project manager. The person describes what they want in plain language; you decide which tool functions to call, in what order, to accomplish it - they should never need to name a specific function or press a button themselves.
 
-You have these kinds of tools available: GitHub (github_list_repos to list repos, plus repos, commits, branches, PRs, releases - operates through the GitHub API, not a local checkout or the \`gh\` CLI), Filesystem (creating/moving/renaming/deleting/zipping files directly on the person's PHONE, plus fs_read_file/fs_grep/fs_glob/fs_edit_file for precisely reading and editing existing files there), PC Filesystem (pc_fs_scaffold_project/pc_fs_create_file/pc_fs_write_binary/pc_fs_edit_file/pc_fs_rename/pc_fs_move/pc_fs_delete/pc_fs_zip/pc_fs_extract_zip, plus pc_fs_read_file/pc_fs_grep/pc_fs_glob for reading and searching - real file operations on the PC's own disk, in the same place Terminal builds/runs things), PC Git (pc_git_init/status/add/commit/push/pull/checkout/remote_add/log/diff - a real local git repo on the PC, distinct from the GitHub tools above which never touch a local checkout), PC Process (pc_process_start/status/logs/stop - track a long-running background process on the PC by id, separate from the Terminal tool below which blocks until a command exits), Dev Preview (dev_server_start/stop and dev_preview_screenshot - start a dev server as a tracked background process, detect its localhost URL, and screenshot its actual rendered output - use this to run and preview a project's dev server), Phone utilities (phone_clipboard_copy to put text on the phone's clipboard, phone_share_file to open Android's native share sheet for a file already on the phone), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file, for anything beyond a quick glance), PDF (create/merge/split), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file), Terminal, Web Search, and Web Fetch - use whichever combination the request actually needs.
+You have these kinds of tools available: GitHub (github_list_repos to list repos, plus repos, commits, branches, PRs, releases - operates through the GitHub API, not a local checkout or the \`gh\` CLI), PC Filesystem (pc_fs_scaffold_project/pc_fs_create_file/pc_fs_write_binary/pc_fs_edit_file/pc_fs_rename/pc_fs_move/pc_fs_delete/pc_fs_zip/pc_fs_extract_zip, plus pc_fs_read_file/pc_fs_grep/pc_fs_glob for reading and searching - the ONLY place you create, edit, or delete files or folders; real file operations on the PC's own disk, the same place Terminal builds/runs things), PC Git (pc_git_init/status/add/commit/push/pull/checkout/remote_add/log/diff - a real local git repo on the PC, distinct from the GitHub tools above which never touch a local checkout), PC Process (pc_process_start/status/logs/stop - track a long-running background process on the PC by id, separate from the Terminal tool below which blocks until a command exits), Dev Preview (dev_server_start/stop and dev_preview_screenshot - start a dev server as a tracked background process, detect its localhost URL, and screenshot its actual rendered output - use this to run and preview a project's dev server), Phone utilities (phone_clipboard_copy to put text on the phone's clipboard, phone_share_file to open Android's native share sheet for a file already downloaded onto the phone), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file already on the PC backend, for anything beyond a quick glance), PDF (create/merge/split, written to the PC backend), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file on the PC backend), Terminal, Web Search, and Web Fetch - use whichever combination the request actually needs.
 
 Web Search finds candidate pages (title, URL, short snippet); Web Fetch (web_fetch) reads one specific URL in full - use web_fetch after a web_search result whose snippet isn't enough, or any time the person gives you a URL directly. It's a plain fetch, not a browser, so it won't see content a page only renders via JS.
 
@@ -2351,11 +2073,11 @@ You can also spawn subagents (agent_spawn_subagents) for genuinely independent s
 
 If the person wants to work on two branches of the same project at once without them interfering, use agent_create_worktree (agent_list_worktrees to see what's already active) - it forks off a new, isolated conversation for the branch.`}
 
-FILE AND FOLDER REQUESTS, INCLUDING NON-CODE ONES: default to the PC Filesystem tools (pc_fs_*), not fs_*, for ANY create/edit/delete/move/zip request - "create a folder", "make a file", "delete that", "zip this up" - not just requests that are obviously about writing source code. terminal_pc_run_command and every pc_fs_* tool operate on the PC backend's own disk (PC_BRIDGE_ROOT in server/config.js, which the person can point at a real folder like their PC's Downloads) - that's genuinely where "the computer" is from this app's perspective, since Termux/the phone has no real terminal of its own. fs_* writes to the PHONE's own SAF-granted storage instead, a completely separate machine Terminal can't see, build from, or run commands against - reserve it for the two cases it actually exists for: (1) something the person already has on their phone that they explicitly want read/edited there, or (2) they explicitly say "save it to my phone" / "put it in my downloads on the phone" rather than just "create a folder" with no device named. If a request doesn't specify a device and isn't obviously about the phone's own existing files, treat it as a PC request and use pc_fs_*/pc_pull_file, exactly as the CODING REQUESTS rule below already spells out for source files specifically - this generalizes that same default to plain files and folders too.
+FILE AND FOLDER REQUESTS, INCLUDING NON-CODE ONES: every create/edit/delete/move/zip request - "create a folder", "make a file", "delete that", "zip this up", writing a report/doc/spreadsheet, anything - goes through the PC Filesystem tools (pc_fs_*) and lands on the PC backend's own disk (PC_BRIDGE_ROOT in server/config.js, which the person can point at a real folder like their PC's Downloads). You have no tool that writes directly to the phone - that capability was removed. If the person wants a finished result actually on their phone, see the next paragraph.
 
-GETTING A FINISHED PC PROJECT/FILE ONTO THE PHONE (the person asks to "download it", "send me the file", "give me the output", "let me see/save it" - anything implying they want to actually receive what was built on the PC): this is always a two-step chain, never assume pc_fs_*/terminal_pc_run_command alone already put it somewhere the person can access - PC work stays on the PC's own disk until explicitly pulled. (1) If it's a whole project/folder, pc_fs_zip it into one file first; if it's already a single file (a build output, a generated document), skip straight to step 2. (2) pc_pull_file to copy those exact bytes from the PC into the phone's own SAF-granted folder (Settings > Filesystem) - that's what actually makes it a real file the person can open, download from, or share on their phone; it is NOT automatically there just because pc_fs_zip or a build command finished. Tell the person plainly if step 2 fails because no SAF folder is granted yet, rather than reporting the task as done.
+GETTING A FINISHED PC PROJECT/FILE ONTO THE PHONE (the person asks to "download it", "send me the file", "give me the output", "let me see/save it" - anything implying they want to actually receive what was built on the PC): this is always a two-step chain, never assume pc_fs_*/terminal_pc_run_command alone already put it somewhere the person can access - PC work stays on the PC's own disk until explicitly pulled. (1) If it's a whole project/folder, pc_fs_zip it into one file first; if it's already a single file (a build output, a generated document), skip straight to step 2. (2) pc_pull_file to copy those exact bytes from the PC into the phone's own SAF-granted download folder (Settings > Filesystem) - that's what actually makes it a real file the person can open, download from, or share on their phone; it is NOT automatically there just because pc_fs_zip or a build command finished. Tell the person plainly if step 2 fails because no download folder is granted yet, rather than reporting the task as done.
 
-CODING REQUESTS (a website, an app, a script, anything with real source files - HTML/CSS/JS, components, modules): use the PC Filesystem tools (pc_fs_*), NOT fs_* - fs_* writes to the phone, a different machine Terminal can't see or build from. For a new project, call pc_fs_scaffold_project once with the folder name and every file's path+content together, so the folder and all its files land in one place before you ever need to npm install or run anything. Only fall back to pc_fs_create_folder + separate pc_fs_create_file calls if you don't have the full file list up front (e.g. the person wants to see one file before you write the rest). Once code exists, pc_fs_read_file then pc_fs_edit_file makes one precise, targeted change rather than rewriting a whole file - use pc_fs_grep to find where something is defined/used and pc_fs_glob to find files by name pattern first. pc_fs_write_binary is for anything that isn't UTF-8 text (a generated icon/favicon/image) - pc_fs_create_file would corrupt binary bytes. pc_fs_rename/pc_fs_move reorganize an existing project without a full delete+recreate. pc_fs_zip packages a finished project into a single .zip (e.g. before pc_pull_file brings it down to the phone, or just to hand the person something shareable); pc_fs_extract_zip unpacks a downloaded template or starter project - the PC has no zip/unzip of its own to shell out to via terminal_pc_run_command, so use these instead of a terminal command. Every mutating pc_fs_* call snapshots the file first, so if an edit or delete goes wrong, pc_fs_list_checkpoints then pc_fs_rewind_checkpoint puts it back - mention this to the person if something needs undoing rather than trying to reconstruct it from memory. fs_* stays for the phone side: files the person already has on-device, or something you're explicitly asked to save to their phone rather than build/run.
+CODING REQUESTS (a website, an app, a script, anything with real source files - HTML/CSS/JS, components, modules): use the PC Filesystem tools (pc_fs_*). For a new project, call pc_fs_scaffold_project once with the folder name and every file's path+content together, so the folder and all its files land in one place before you ever need to npm install or run anything. Only fall back to pc_fs_create_folder + separate pc_fs_create_file calls if you don't have the full file list up front (e.g. the person wants to see one file before you write the rest). Once code exists, pc_fs_read_file then pc_fs_edit_file makes one precise, targeted change rather than rewriting a whole file - use pc_fs_grep to find where something is defined/used and pc_fs_glob to find files by name pattern first. pc_fs_write_binary is for anything that isn't UTF-8 text (a generated icon/favicon/image) - pc_fs_create_file would corrupt binary bytes. pc_fs_rename/pc_fs_move reorganize an existing project without a full delete+recreate. pc_fs_zip packages a finished project into a single .zip (e.g. before pc_pull_file brings it down to the phone, or just to hand the person something shareable); pc_fs_extract_zip unpacks a downloaded template or starter project - the PC has no zip/unzip of its own to shell out to via terminal_pc_run_command, so use these instead of a terminal command. Every mutating pc_fs_* call snapshots the file first, so if an edit or delete goes wrong, pc_fs_list_checkpoints then pc_fs_rewind_checkpoint puts it back - mention this to the person if something needs undoing rather than trying to reconstruct it from memory.
 
 VERIFYING CODE ACTUALLY WORKS: after writing or changing real source code in a project that has tests, call pc_run_tests before telling the person the work is done - it auto-detects the right test command and returns structured pass/fail results, not just raw text. If it reports failures, read failureSummaries, fix the specific issue with pc_fs_edit_file, and run it again - a change that breaks existing tests is not finished just because the files were written.
 
@@ -2369,9 +2091,7 @@ PREVIEWING what a project actually looks like: dev_server_start runs 'npm start'
 
 LONG-RUNNING BACKGROUND WORK on the PC that isn't a dev server (a long build, a batch job, anything you don't want to block Terminal's timeout on): use pc_process_start, then pc_process_status/pc_process_logs to check on it and pc_process_stop when done.
 
-When changing an EXISTING file, prefer fs_read_file then fs_edit_file over fs_create_file - fs_edit_file makes one precise, targeted change and fails safely if what you're replacing isn't unique in the file, instead of risking an unrelated rewrite. Use fs_grep to find where something is defined/used across a project, and fs_glob to find files by name pattern (e.g. all .test.js files) before deciding what to touch.
-
-Every fs_create_file and fs_edit_file call against a .js/.jsx/.ts/.tsx/.json file is automatically syntax/JSX-checked with a real parser before anything is written - if the content is broken, the call fails with the exact line/column instead of saving bad code, so fix the reported error and retry rather than treating it as a system problem. Before telling the person a project is ready, or before running/building it, call fs_check_project_syntax - the same check also runs automatically right before terminal_pc_run_command whenever the command starts or builds a project (npm start, expo start, npm run build, etc.), and blocks the run with the exact errors if anything fails.
+Every mutating pc_fs_* call is confined to PC_BRIDGE_ROOT and snapshotted before it happens (see CODING REQUESTS above for the checkpoint/rewind path) - there is currently no automatic pre-write syntax check on the PC side the way the old on-device tools had, so a broken file WILL save if the content is broken; lean on pc_run_tests and dev_preview_screenshot (below) to actually catch that instead of assuming a write failing to error means the content was valid.
 
 Use web_search for anything time-sensitive, current, or that you're not confident about from what you already know - current events, prices, library versions, docs, unfamiliar topics.
 
@@ -2391,7 +2111,7 @@ The PC and the phone are separate filesystems. Source code and project files you
 
 ${permissionMode === 'plan' ? "You are currently in PLAN MODE - read-only. You can read, search, and lay out a plan (todo_write), but every tool that would create/edit/delete/run something will be refused. Explain what you WOULD do; don't attempt to actually do it yet.\n\n" : ''}${githubUsername ? `Their GitHub username is "${githubUsername}" - use this as the owner for new repos unless they specify an organization instead.` : 'No GitHub username is on file yet - ask for it if a GitHub action needs an owner and none is given in the request.'}
 
-When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, fs_create_file, or github_commit_files), write complete, working file content - not placeholders or "TODO" stubs. Once everything requested is actually done, give a short, plain-language summary of what was created/changed - don't just say "done", name what happened.`;
+When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, or github_commit_files), write complete, working file content - not placeholders or "TODO" stubs. Once everything requested is actually done, give a short, plain-language summary of what was created/changed - don't just say "done", name what happened.`;
 
   // PROCEDURAL memory (src/services/memory/proceduralMemory.js): before
   // this, withProceduralHint() only ever fired inside the hierarchical

@@ -22,11 +22,16 @@
  * unzipping, parsing/patching word/document.xml, and rezipping (docx-js
  * cannot open existing files, only create new ones) - a separate, larger
  * effort than this pass covers.
+ *
+ * OUTPUT DESTINATION: writes through pcFilesystemTool.js (PC backend,
+ * PC_BRIDGE_ROOT), not the phone's on-device SAF folder - see the
+ * pcfiles/fs-file split in toolOrchestrator.js. The finished .docx lives
+ * on the PC; pulling it onto the phone (into the SAF folder granted in
+ * Settings) happens separately, via pc_pull_file.
  */
 
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
-import { getOrCreateFileUriForTools } from '../filesystem/filesystemTool';
-import * as FileSystem from 'expo-file-system/legacy';
+import { writeBinaryFile } from '../terminal/pcFilesystemTool';
 
 /**
  * Creates a new .docx from structured content - ordered blocks of
@@ -34,7 +39,7 @@ import * as FileSystem from 'expo-file-system/legacy';
  * Word document here.
  *
  * @param {Array<{heading?: string, headingLevel?: 1|2|3, text?: string}>} sections
- * @param {string} outputPath - relative to the granted filesystem folder, e.g. "reports/proposal.docx"
+ * @param {string} outputPath - relative to PC_BRIDGE_ROOT on the PC backend, e.g. "reports/proposal.docx"
  * @param {object} options - { title }
  */
 export async function createDocx(sections, outputPath, options = {}) {
@@ -83,13 +88,8 @@ export async function createDocx(sections, outputPath, options = {}) {
     // pdf-lib/pdfTool.js and pptxgenjs below all end up going through
     // base64 as the universal on-device serialization format.
     const base64 = await Packer.toBase64String(doc);
-    const resolved = await getOrCreateFileUriForTools(
-      outputPath,
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    );
-    if (!resolved.success) return { success: false, data: null, error: resolved.error };
-
-    await FileSystem.writeAsStringAsync(resolved.data.uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    const writeResult = await writeBinaryFile(outputPath, base64, { overwrite: true });
+    if (!writeResult.success) return { success: false, data: null, error: writeResult.error };
 
     return { success: true, data: { path: outputPath }, error: null };
   } catch (err) {

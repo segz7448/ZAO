@@ -1,12 +1,36 @@
 /**
- * ZAO - Filesystem Tool
+ * ZAO - Filesystem Tool (phone-side, SAF)
  *
- * Real device-wide file operations (create, move, rename, delete, zip,
- * extract) under /storage/emulated/0/ - not just the app's own private
- * sandbox. This is a plugin behind the chat interface: the person never
- * sees a "file manager" screen for this - the local coder model decides when a
- * request needs it and calls these functions directly (see
- * src/services/toolOrchestrator.js).
+ * NARROWED SCOPE (2026, the pcfiles/fs-file split): this used to be the
+ * model's general-purpose device file manager (create/edit/delete/move/
+ * zip/grep/etc., all exposed as fs_* tools). That's gone - the model now
+ * has exactly one place to create, edit, or delete files: the PC backend,
+ * via pcFilesystemTool.js (pc_* tools, server/pcFiles.js). This module is
+ * no longer wired into toolOrchestrator.js at all - nothing here runs
+ * because the model decided to; it only runs in response to a direct,
+ * user-initiated action.
+ *
+ * What's left, and why each piece still exists:
+ *  - requestAccess()/hasAccess(): the one-time Android SAF grant, now
+ *    reframed as picking a DOWNLOAD DESTINATION - the folder finished
+ *    work lands in when the person taps to download it - not a folder
+ *    the model can browse/edit at will. Settings > Filesystem still
+ *    surfaces this grant with that framing.
+ *  - writeBinaryFileFromBase64()/getOrCreateFileUriForTools(): used by
+ *    pc_pull_file (src/services/terminal/pcFilePullTool.js) to save a
+ *    file pulled from the PC backend into the granted folder - i.e. the
+ *    actual "download" step behind an artifact's download action.
+ *  - getExistingFileUriForTools(): used by phoneUtilityTool.shareFile()
+ *    to hand an already-downloaded file to Android's native share sheet.
+ *  - rewindToCheckpoint()/rewindFolderCheckpoint() and the on-device
+ *    checkpoint machinery below: kept for backward compatibility with
+ *    any checkpoints recorded before this split, but nothing new writes
+ *    one anymore (all mutation now happens on the PC backend, which has
+ *    its own separate checkpoint system - see pcFilesystemTool.js's
+ *    listCheckpoints/rewindCheckpoint). This on-device path is
+ *    effectively dead code going forward and is a reasonable candidate
+ *    to delete outright in a later pass, once nothing depends on old
+ *    on-device checkpoints anymore.
  *
  * WHY STORAGE ACCESS FRAMEWORK (SAF), NOT PLAIN FILE PATHS: modern
  * Android (10+) blocks apps from reading/writing arbitrary paths under
@@ -71,12 +95,15 @@ async function getGrantedDirUri() {
 }
 
 /**
- * Triggers Android's system folder picker so the person can grant access
- * to a real device folder (e.g. the whole Download folder, or a specific
- * project folder). Only needs to be called once - the returned URI is
- * persisted automatically. Must be called from a user-initiated action
- * (a button tap), not silently from a background tool call - Android
- * requires the picker to originate from direct user interaction.
+ * Triggers Android's system folder picker so the person can grant a
+ * DOWNLOAD DESTINATION - the folder finished files land in when the
+ * person taps to download an artifact from chat (e.g. the whole Download
+ * folder, or a specific project folder). This is no longer a folder the
+ * model creates/edits/deletes files in directly - see this file's header.
+ * Only needs to be called once - the returned URI is persisted
+ * automatically. Must be called from a user-initiated action (a button
+ * tap), not silently from a background tool call - Android requires the
+ * picker to originate from direct user interaction.
  */
 export async function requestAccess() {
   try {
