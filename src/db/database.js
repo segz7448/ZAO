@@ -990,6 +990,18 @@ export async function initDatabase() {
     } catch (migrationErr) {
       // Expected on any install that already has this column - not an error.
     }
+    // openrouter_api_key: the person's own OpenRouter API key (from
+    // https://openrouter.ai/keys), sent as `X-OpenRouter-Key` on every VM
+    // request - this is what the VM uses to call OpenRouter for chat
+    // completions (currently `stealth/ox-alpha`), now that the model has
+    // moved off Alibaba Model Studio. Separate from backend_auth_token
+    // above, which still just gates access to the VM itself. See
+    // server/config.js's header comment for the full picture.
+    try {
+      await db.execAsync(`ALTER TABLE user_preferences ADD COLUMN openrouter_api_key TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
 
     // Migration: plan_id added to messages so an assistant reply that was
     // produced by the hierarchical planning system (src/services/brain/
@@ -1054,6 +1066,26 @@ export async function initDatabase() {
     // swallow-on-already-exists pattern as every migration above.
     try {
       await db.execAsync(`ALTER TABLE messages ADD COLUMN pending_confirmation TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
+    // Migration: artifacts column added to messages so a reply where a
+    // file got CREATED - directly in chat, or from a plan the person
+    // approved and ran (PlanScreen.js's "Start plan" -> planStore.js's
+    // startPlan()) - can carry that as structured data ChatScreen.js
+    // renders as a downloadable file card (FileArtifactCard.js), the way
+    // Claude.ai renders an artifact for something it just built. JSON
+    // text like [{"path":"myproject/report.pdf","toolName":"pdf_create"}]
+    // - every path is relative to PC_BRIDGE_ROOT on the PC backend (see
+    // the pcfiles/fs-file split in toolOrchestrator.js), NOT anywhere on
+    // the phone yet - tapping the card's download action is what
+    // actually pulls those bytes onto the phone (pc_pull_file's own
+    // mechanism, see pcFilePullTool.js) into the folder granted in
+    // Settings > Filesystem. NULL for every ordinary reply. Same
+    // swallow-on-already-exists pattern as every migration above.
+    try {
+      await db.execAsync(`ALTER TABLE messages ADD COLUMN artifacts TEXT;`);
     } catch (migrationErr) {
       // Expected on any install that already has this column - not an error.
     }
@@ -1265,6 +1297,7 @@ export async function addMessage(message) {
       reasoning_trace = null,
       clock_data = null,
       pending_confirmation = null,
+      artifacts = null,
     } = message;
     const now = Date.now();
     // reasoning_trace can arrive as an object (chainOfThought.js's plain
@@ -1280,12 +1313,18 @@ export async function addMessage(message) {
     const pending_confirmation_json = pending_confirmation != null
       ? (typeof pending_confirmation === 'string' ? pending_confirmation : JSON.stringify(pending_confirmation))
       : null;
+    // artifacts arrives as a plain array (see the artifacts migration
+    // comment above) - same JSON-text convention as every other
+    // structured column on this table.
+    const artifacts_json = artifacts != null
+      ? (typeof artifacts === 'string' ? artifacts : JSON.stringify(artifacts))
+      : null;
 
     await db.runAsync(
       `INSERT INTO messages
-        (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path, plan_id, reasoning_type, reasoning_trace, clock_data, pending_confirmation)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, conversation_id, role, content, provider, model, model_family, token_count, now, is_error ? 1 : 0, local_image_path, plan_id, reasoning_type, reasoning_trace_json, clock_data, pending_confirmation_json]
+        (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path, plan_id, reasoning_type, reasoning_trace, clock_data, pending_confirmation, artifacts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, conversation_id, role, content, provider, model, model_family, token_count, now, is_error ? 1 : 0, local_image_path, plan_id, reasoning_type, reasoning_trace_json, clock_data, pending_confirmation_json, artifacts_json]
     );
 
     await db.runAsync(
@@ -1665,6 +1704,7 @@ const DEFAULT_PREFS_ROW = {
   backend_remote_url: null, // legacy, unused
   backend_vm_url: null,
   backend_auth_token: null,
+  openrouter_api_key: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
@@ -1707,7 +1747,7 @@ export async function updatePreferences(patch) {
 
     const fields = [];
     const values = [];
-    for (const key of ['theme_preference', 'browser_access_enabled', 'web_search_enabled', 'github_tools_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_vm_url', 'backend_auth_token', 'preferred_timezone', 'browser_router_url']) {
+    for (const key of ['theme_preference', 'browser_access_enabled', 'web_search_enabled', 'github_tools_enabled', 'github_username', 'filesystem_saf_uri', 'memory_enabled', 'project_instructions', 'auto_memory_notes', 'permission_mode', 'otel_export_endpoint', 'backend_vm_url', 'backend_auth_token', 'openrouter_api_key', 'preferred_timezone', 'browser_router_url']) {
       if (patch[key] !== undefined) {
         // SQLite has no native boolean column type - store true/false as 1/0.
         const value = (key === 'browser_access_enabled' || key === 'memory_enabled' || key === 'web_search_enabled' || key === 'github_tools_enabled') ? (patch[key] ? 1 : 0) : patch[key];
@@ -2523,6 +2563,77 @@ export async function getStepActions(stepId) {
     return { success: true, data: rows || [], error: null };
   } catch (err) {
     console.error('[DB] getStepActions failed:', err);
+    return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: [] };
+  }
+}
+
+// Tool names whose successful output represents a real file landing on
+// the PC backend - the same set toolOrchestrator.js's eventTypeForTool
+// tags 'file_created' for pc_fs_*/pdf_*/office tools (pc_pull_file
+// excluded on purpose - that tool is itself the download step, not
+// something to re-offer a download for).
+const FILE_CREATING_TOOL_NAMES = new Set([
+  'pc_fs_create_file', 'pc_fs_write_binary', 'pc_fs_zip', 'pc_fs_scaffold_project',
+  'pdf_create', 'pdf_merge', 'pdf_split',
+  'docx_create', 'pptx_create', 'xlsx_create', 'csv_create',
+]);
+
+/**
+ * Pulls every file a completed plan run actually created, straight out
+ * of plan_step_actions' real tool-call record (tier 4 of the trace model,
+ * see that table's own comment) - not by threading new state through
+ * planExecutor.js's step loop. Reads output_json for every 'done'
+ * tool_call row across the given plan ids whose tool_name is in
+ * FILE_CREATING_TOOL_NAMES, and pulls the resulting path(s) out of each
+ * tool's own result shape (a single `path`, or pc_fs_scaffold_project's
+ * `written` array).
+ *
+ * Used by planStore.js's startPlan() right after a run finishes, to
+ * build the `artifacts` list attached to the chat message it posts back
+ * into the plan's conversation - see the messages.artifacts migration
+ * comment in this file for the shape.
+ *
+ * @param {string[]} planIds - a decomposed goal's leaf Execution plan ids (or a single plan's id)
+ * @returns {Promise<{success: boolean, data: Array<{path: string, toolName: string}>, error: string|null}>}
+ */
+export async function getFileCreationArtifactsForPlans(planIds) {
+  try {
+    const db = await getDb();
+    if (!db) return { success: false, error: 'DB_OPEN_FAILED', data: [] };
+    if (!planIds || planIds.length === 0) return { success: true, data: [], error: null };
+
+    const placeholders = planIds.map(() => '?').join(',');
+    const rows = await db.getAllAsync(
+      `SELECT tool_name, output_json FROM plan_step_actions
+       WHERE plan_id IN (${placeholders}) AND entry_type = 'tool_call' AND status = 'done'
+       ORDER BY action_order ASC`,
+      planIds
+    );
+
+    const artifacts = [];
+    const seenPaths = new Set();
+    for (const row of rows || []) {
+      if (!FILE_CREATING_TOOL_NAMES.has(row.tool_name)) continue;
+      let output;
+      try {
+        output = JSON.parse(row.output_json || 'null');
+      } catch (parseErr) {
+        continue; // malformed output_json - skip rather than crash the whole gather
+      }
+      const data = output?.data;
+      if (!data) continue;
+
+      const paths = Array.isArray(data.written) ? data.written : (data.path ? [data.path] : []);
+      for (const path of paths) {
+        if (!path || seenPaths.has(path)) continue;
+        seenPaths.add(path);
+        artifacts.push({ path, toolName: row.tool_name });
+      }
+    }
+
+    return { success: true, data: artifacts, error: null };
+  } catch (err) {
+    console.error('[DB] getFileCreationArtifactsForPlans failed:', err);
     return { success: false, error: err?.message || 'UNKNOWN_ERROR', data: [] };
   }
 }

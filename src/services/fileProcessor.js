@@ -38,16 +38,18 @@ async function attemptOcr(uri, name) {
 
 /**
  * @param {object} file - { uri, name, mimeType, size }
- * @param {string} [userMessageText] - unused; there's no vision model so an
- * image can't be answered about contextually, and every other category
- * extracts its own text regardless of what the person typed alongside it.
- * Kept in the signature so callers don't need to change how they invoke this.
+ * @param {string} [userMessageText] - unused; every category extracts its
+ * own text/media regardless of what the person typed alongside it. Kept
+ * in the signature so callers don't need to change how they invoke this.
  * @returns {Promise<{
  *   success: boolean,
  *   category: string,
  *   categoryLabel: string,
  *   isImage: boolean,
+ *   isVideo: boolean,
  *   text: string | null,
+ *   base64: string | null,
+ *   mimeType: string | null,
  *   truncated: boolean,
  *   error: string | null,
  * }>}
@@ -61,7 +63,10 @@ export async function processAttachedFile(file, userMessageText = '') {
 
     switch (category) {
       case FILE_CATEGORY.IMAGE:
-        return processImage(uri, name);
+        return processImage(uri, name, mimeType);
+
+      case FILE_CATEGORY.VIDEO:
+        return processVideo(uri, name, mimeType);
 
       case FILE_CATEGORY.PDF: {
         const result = await extractPdfText(uri);
@@ -76,8 +81,9 @@ export async function processAttachedFile(file, userMessageText = '') {
           if (ocrText) {
             return {
               success: true,
-              category, categoryLabel, isImage: false,
+              category, categoryLabel, isImage: false, isVideo: false,
               text: result.success ? `${result.text}\n\n${ocrText}` : ocrText,
+              base64: null, mimeType: null,
               truncated: false,
               error: null,
             };
@@ -86,8 +92,9 @@ export async function processAttachedFile(file, userMessageText = '') {
 
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.text : null,
+          base64: null, mimeType: null,
           truncated: false,
           error: result.error || result.warning,
         };
@@ -97,8 +104,9 @@ export async function processAttachedFile(file, userMessageText = '') {
         const result = await extractDocxText(uri);
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.text : null,
+          base64: null, mimeType: null,
           truncated: false,
           error: result.error,
         };
@@ -108,8 +116,9 @@ export async function processAttachedFile(file, userMessageText = '') {
         const result = await extractPptxText(uri);
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.text : null,
+          base64: null, mimeType: null,
           truncated: false,
           error: result.error,
         };
@@ -119,8 +128,9 @@ export async function processAttachedFile(file, userMessageText = '') {
         const result = await extractZipContents(uri);
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.summary : null,
+          base64: null, mimeType: null,
           truncated: result.truncated,
           error: result.error,
         };
@@ -130,8 +140,9 @@ export async function processAttachedFile(file, userMessageText = '') {
         const result = await extractCsv(uri);
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.text : null,
+          base64: null, mimeType: null,
           truncated: result.truncated,
           error: result.error,
         };
@@ -141,8 +152,9 @@ export async function processAttachedFile(file, userMessageText = '') {
         const result = await extractPlainText(uri);
         return {
           success: result.success,
-          category, categoryLabel, isImage: false,
+          category, categoryLabel, isImage: false, isVideo: false,
           text: result.success ? result.text : null,
+          base64: null, mimeType: null,
           truncated: result.truncated,
           error: result.error,
         };
@@ -154,9 +166,11 @@ export async function processAttachedFile(file, userMessageText = '') {
           category: FILE_CATEGORY.UNKNOWN,
           categoryLabel: 'File',
           isImage: false,
+          isVideo: false,
           text: null,
+          base64: null, mimeType: null,
           truncated: false,
-          error: `ZAO doesn't know how to read "${name}" yet. Supported: PDF, Word (.docx), ZIP, CSV, and text/code files.`,
+          error: `ZAO doesn't know how to read "${name}" yet. Supported: images, video, PDF, Word (.docx), ZIP, CSV, and text/code files.`,
         };
     }
   } catch (err) {
@@ -166,31 +180,99 @@ export async function processAttachedFile(file, userMessageText = '') {
       category: FILE_CATEGORY.UNKNOWN,
       categoryLabel: 'File',
       isImage: false,
+      isVideo: false,
       text: null,
+      base64: null, mimeType: null,
       truncated: false,
       error: 'Something went wrong processing this file. Please try again.',
     };
   }
 }
 
+// Base64 inflates raw bytes by ~33%, and this all rides in one JSON body
+// (server/config.js's MAX_JSON_BODY_MB, currently 80MB) alongside the rest
+// of the chat history - 20MB raw keeps a single video attachment
+// comfortably inside that even with history attached, without needing
+// chunked upload. If someone hits this, the fix is "trim the clip or
+// lower the resolution," not raising this further - OpenRouter's own
+// request-size ceiling is the real wall behind this one.
+const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
+
 /**
- * Image handling: there's no vision model in ZAO (Gemini removed along
- * with every other cloud provider), so the model can't "see" the image
- * itself - only text that OCR (server-side, on the PC backend - see
- * server/ocr.js) can pull out of it. The image still attaches and
- * displays fine as a chat bubble regardless (see ChatScreen.js /
- * chatStore.js's copyAttachmentLocally) - OCR is strictly best-effort on
- * top of that: a screenshot of a document or a photo of a whiteboard gets
- * its text extracted, a photo of a sunset just attaches with no text,
- * same as before.
+ * Video handling: Ox Alpha (via OpenRouter) has real video understanding,
+ * so - unlike every other attachment type here - there's no text
+ * extraction step at all. The whole file is base64-encoded and sent
+ * straight to the model as a `video_url` content part (see
+ * chatStore.js's buildMultimodalContent()), which is the same shape
+ * OpenRouter documents for video input. No OCR (server/ocr.js is
+ * image/PDF only, not frame-sampling), no thumbnail generation - the chat
+ * bubble shows a plain "[video attached]" note rather than an inline
+ * preview (MessageBubble.js was never taught to render video).
  */
-async function processImage(uri, name) {
+async function processVideo(uri, name, mimeType) {
+  const categoryLabel = getCategoryLabel(FILE_CATEGORY.VIDEO);
+  try {
+    const info = await FileSystem.getInfoAsync(uri, { size: true });
+    if (info.exists && info.size > MAX_VIDEO_BYTES) {
+      const mb = (info.size / (1024 * 1024)).toFixed(1);
+      const maxMb = (MAX_VIDEO_BYTES / (1024 * 1024)).toFixed(0);
+      return {
+        success: false,
+        category: FILE_CATEGORY.VIDEO, categoryLabel, isImage: false, isVideo: true,
+        text: null, base64: null, mimeType: null,
+        truncated: false,
+        error: `This video is ${mb}MB - ZAO can currently send videos up to ${maxMb}MB. Try a shorter clip or a lower resolution.`,
+      };
+    }
+    const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+    return {
+      success: true,
+      category: FILE_CATEGORY.VIDEO, categoryLabel, isImage: false, isVideo: true,
+      text: null,
+      base64,
+      mimeType: mimeType || 'video/mp4',
+      truncated: false,
+      error: null,
+    };
+  } catch (err) {
+    console.error('[FileProcessor] processVideo failed:', err);
+    return {
+      success: false,
+      category: FILE_CATEGORY.VIDEO, categoryLabel, isImage: false, isVideo: true,
+      text: null, base64: null, mimeType: null,
+      truncated: false,
+      error: 'Could not read this video file. Please try again.',
+    };
+  }
+}
+
+/**
+ * Image handling: Ox Alpha (via OpenRouter) has real vision, so the model
+ * actually sees the image now - fileProcessor returns the base64 bytes
+ * alongside the extracted OCR text (server-side, free/open-source
+ * Tesseract - see server/ocr.js), and chatStore.js's
+ * buildMultimodalContent() attaches the image itself as an `image_url`
+ * content part on the outbound message. OCR is kept running too, not
+ * replaced - it's a cheap, reliable supplement for pulling exact text out
+ * of a screenshot or document photo (useful for search/precision even
+ * when vision alone would "read" it approximately), and it costs nothing
+ * extra since it already ran server-side before the vision change.
+ */
+async function processImage(uri, name, mimeType) {
   const categoryLabel = getCategoryLabel(FILE_CATEGORY.IMAGE);
-  const ocrText = await attemptOcr(uri, name);
+  const [ocrText, base64] = await Promise.all([
+    attemptOcr(uri, name),
+    FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 }).catch((err) => {
+      console.error('[FileProcessor] Reading image base64 failed:', err);
+      return null;
+    }),
+  ]);
   return {
     success: true,
-    category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true,
+    category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true, isVideo: false,
     text: ocrText,
+    base64,
+    mimeType: mimeType || 'image/jpeg',
     truncated: false,
     error: null,
   };

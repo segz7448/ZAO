@@ -16,7 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { usePreferencesStore } from '../store/preferencesStore';
 import { useThemeStore } from '../store/themeStore';
 import { useTheme } from '../theme/useTheme';
-import { checkBackendHealth, testBackendConnection } from '../services/backend/backendClient';
+import { checkBackendHealth, testBackendConnection, testOpenRouterKey } from '../services/backend/backendClient';
 import {
   getUsageCounts,
   getRecentUsageEvents,
@@ -215,17 +215,23 @@ function FilesystemAccessSection({ preferences, theme }) {
 /**
  * Server connection section - the backend runs on a dedicated, 24/7
  * Alibaba Cloud VM (see /server in the repo root) instead of on-device
- * or on a person's PC. Two independent Test & Save flows, same pattern
- * as GithubCredentialsSection above:
+ * or on a person's PC. Three independent Test & Save flows now, same
+ * pattern as GithubCredentialsSection above:
  *   - VmConnectionSection: the VM's IP (or IP:port), e.g.
  *     http://123.45.67.89:8000 - Test just confirms the server is
  *     reachable (no API key needed for that half of the check).
- *   - ModelApiKeySection: the qwen3-coder-30b-a3b-instruct API key, sent
- *     as `Authorization: Bearer <token>` on every request - must match
- *     AUTH_TOKEN in the VM's server/config.js. Test requires the VM IP
- *     to already be saved, since it has to actually call the VM to
- *     confirm the key is valid (server/index.js's /health route reports
- *     this back as `authValid`).
+ *   - ModelApiKeySection: the VM's own shared secret, sent as
+ *     `Authorization: Bearer <token>` on every request - must match
+ *     AUTH_TOKEN in the VM's server/config.js. This gates the VM itself,
+ *     not the model - kept named "Model API key" in the UI since that's
+ *     what people are used to, but see OpenRouterApiKeySection below for
+ *     the key that actually reaches the model now.
+ *   - OpenRouterApiKeySection: the person's own OpenRouter key (from
+ *     https://openrouter.ai/keys) - this is what the VM uses to call
+ *     OpenRouter for chat completions (currently `stealth/ox-alpha`),
+ *     now that the model has moved off Alibaba Model Studio. Sent as
+ *     `X-OpenRouter-Key` on every VM request, validated against
+ *     OpenRouter itself via the VM's /openrouter/key-status route.
  * Also covers the Terminal tool, which runs through this same
  * connection (bash/Python on the VM via /terminal/run) - the only
  * terminal ZAO has. There is no on-device fallback terminal.
@@ -393,7 +399,7 @@ function ModelApiKeySection({ preferences, theme }) {
       </View>
 
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
-        The qwen3-coder-30b-a3b-instruct API key - must match AUTH_TOKEN in the VM's server/config.js.
+        This gates the VM itself - must match AUTH_TOKEN in the VM's server/config.js. It is NOT the model key; see OpenRouter API key below for that.
       </Text>
       <TextInput
         style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
@@ -430,6 +436,114 @@ function ModelApiKeySection({ preferences, theme }) {
   );
 }
 
+/**
+ * The person's own OpenRouter API key (from https://openrouter.ai/keys) -
+ * this is the key that actually reaches the model now (see this file's
+ * header comment on VmConnectionSection above). Test & Save asks the VM to
+ * check the key against OpenRouter directly (server/index.js's
+ * /openrouter/key-status), the same "verify through the VM, don't call
+ * the provider straight from the phone" shape ModelApiKeySection already
+ * used - keeps the VM as the single place that ever talks to the model
+ * provider, and reuses the existing VM-reachability requirement instead
+ * of adding a second, parallel "can the phone reach the internet" check.
+ */
+function OpenRouterApiKeySection({ preferences, theme }) {
+  const setOpenrouterApiKey = usePreferencesStore((s) => s.setOpenrouterApiKey);
+  const savedKey = preferences?.openrouter_api_key || '';
+  const vmUrl = preferences?.backend_vm_url || '';
+  const vmToken = preferences?.backend_auth_token || '';
+  const [keyValue, setKeyValue] = useState(savedKey);
+  const [testing, setTesting] = useState(false);
+  const [status, setStatus] = useState({ valid: null, limit: null, limitRemaining: null });
+  const [checked, setChecked] = useState(false);
+
+  useEffect(() => {
+    setKeyValue(savedKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey]);
+
+  const isDirty = keyValue.trim() !== savedKey;
+
+  const handleTestAndSave = async () => {
+    const key = keyValue.trim();
+    if (!key) return;
+    if (!vmUrl) {
+      Alert.alert('Set the VM IP first', 'Test & Save the Alibaba Cloud VM address above before testing the OpenRouter key.');
+      return;
+    }
+    setTesting(true);
+    const result = await testOpenRouterKey({ url: vmUrl, vmToken, openrouterKey: key });
+    setStatus(result);
+    setChecked(true);
+    if (result.valid) {
+      await setOpenrouterApiKey(key);
+      const creditsNote = typeof result.limitRemaining === 'number' ? ` · ${result.limitRemaining} credits remaining` : '';
+      Alert.alert('Connected', `OpenRouter key verified${creditsNote}.`);
+    } else if (result.valid === false) {
+      Alert.alert('Invalid key', result.error || "OpenRouter rejected this key. Double-check it at openrouter.ai/keys.");
+    } else {
+      Alert.alert('Check failed', result.error || "Couldn't reach the VM to verify this key.");
+    }
+    setTesting(false);
+  };
+
+  const pillColor = status.valid ? '#DCFCE7' : status.valid === false ? '#FEE2E2' : '#FEF3C7';
+  const pillTextColor = status.valid ? '#166534' : status.valid === false ? '#991B1B' : '#92400E';
+  const pillLabel = !checked ? 'Not checked' : status.valid ? 'Verified' : status.valid === false ? 'Invalid' : 'Unknown';
+
+  return (
+    <View style={styles.keyRow}>
+      <View style={styles.keyRowHeader}>
+        <Text style={[styles.keyLabel, { color: theme.textPrimary }]}>OpenRouter API key</Text>
+        {savedKey ? (
+          <View style={[styles.statusPill, { backgroundColor: pillColor }]}>
+            <Text style={[styles.statusPillText, { color: pillTextColor }]}>{pillLabel}</Text>
+          </View>
+        ) : (
+          <View style={[styles.statusPill, { backgroundColor: theme.surfaceAlt }]}>
+            <Text style={[styles.statusPillText, { color: theme.textSecondary }]}>Not set</Text>
+          </View>
+        )}
+      </View>
+
+      <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 8 }]}>
+        Your own key from openrouter.ai/keys. This is what the VM uses to reach {ACTIVE_MODEL.label} - chat, coding, vision, and video understanding all run through it.
+      </Text>
+      <TextInput
+        style={[styles.keyInput, { borderColor: theme.borderStrong, color: theme.textPrimary, marginTop: 8 }]}
+        placeholder="sk-or-v1-..."
+        placeholderTextColor={theme.textTertiary}
+        value={keyValue}
+        onChangeText={setKeyValue}
+        autoCapitalize="none"
+        autoCorrect={false}
+        secureTextEntry
+      />
+
+      <View style={styles.keyRowButtons}>
+        <TouchableOpacity
+          style={[
+            styles.keyPrimaryBtn,
+            { backgroundColor: theme.accent },
+            (!keyValue.trim() || testing) && { backgroundColor: theme.borderStrong },
+          ]}
+          onPress={handleTestAndSave}
+          disabled={!keyValue.trim() || testing}
+        >
+          {testing
+            ? <ActivityIndicator size="small" color={theme.textInverse} />
+            : <Text style={[styles.keyPrimaryBtnText, { color: theme.textInverse }]}>Test & Save</Text>}
+        </TouchableOpacity>
+      </View>
+      {isDirty && (
+        <Text style={[styles.helperText, { color: theme.textTertiary, marginTop: 6, fontSize: 12 }]}>
+          Unsaved - tap Test & Save to apply.
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function BackendConnectionSection({ preferences, theme }) {
   const [status, setStatus] = useState({ connected: false, ready: false, model: null });
   const [checking, setChecking] = useState(true);
@@ -451,6 +565,8 @@ function BackendConnectionSection({ preferences, theme }) {
       <VmConnectionSection preferences={preferences} theme={theme} />
       <View style={{ height: 12 }} />
       <ModelApiKeySection preferences={preferences} theme={theme} />
+      <View style={{ height: 12 }} />
+      <OpenRouterApiKeySection preferences={preferences} theme={theme} />
       <Text style={[styles.helperText, { color: theme.textSecondary, marginTop: 12 }]}>
         {status.ready
           ? `Chat, coding, reasoning, and the Terminal tool are all running on ${status.model || ACTIVE_MODEL.label} and bash/Python on the VM.`

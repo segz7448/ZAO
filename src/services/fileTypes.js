@@ -9,6 +9,7 @@
 
 export const FILE_CATEGORY = {
   IMAGE: 'image',           // sent directly to vision-capable models
+  VIDEO: 'video',           // sent directly to Ox Alpha's video-understanding input
   PDF: 'pdf',               // extracted server-side via edge function
   DOCX: 'docx',             // extracted server-side via edge function
   PPTX: 'pptx',             // extracted on-device via jszip + XML text stripping (officeExtractors.js)
@@ -19,6 +20,7 @@ export const FILE_CATEGORY = {
 };
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp'];
+const VIDEO_EXTENSIONS = ['mp4', 'mov', 'webm', 'm4v', '3gp', 'avi', 'mkv'];
 const TEXT_EXTENSIONS = [
   'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'xml', 'html', 'css',
   'js', 'jsx', 'ts', 'tsx', 'py', 'java', 'kt', 'c', 'cpp', 'h', 'cs',
@@ -36,6 +38,9 @@ export function categorizeFile(fileName, mimeType = '') {
 
   if (IMAGE_EXTENSIONS.includes(ext) || mimeType.startsWith('image/')) {
     return FILE_CATEGORY.IMAGE;
+  }
+  if (VIDEO_EXTENSIONS.includes(ext) || mimeType.startsWith('video/')) {
+    return FILE_CATEGORY.VIDEO;
   }
   if (ext === 'pdf' || mimeType === 'application/pdf') {
     return FILE_CATEGORY.PDF;
@@ -65,6 +70,7 @@ export function categorizeFile(fileName, mimeType = '') {
 export function getCategoryLabel(category) {
   const labels = {
     [FILE_CATEGORY.IMAGE]: 'Image',
+    [FILE_CATEGORY.VIDEO]: 'Video',
     [FILE_CATEGORY.PDF]: 'PDF',
     [FILE_CATEGORY.DOCX]: 'Word document',
     [FILE_CATEGORY.PPTX]: 'PowerPoint presentation',

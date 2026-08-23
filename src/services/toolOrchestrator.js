@@ -792,7 +792,7 @@ const PC_FILESYSTEM_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'pc_fs_create_file',
-      description: "Creates (or, with overwrite:true, replaces) one text file with given content on the PC, relative to the configured project root. Creates any missing parent folders automatically. For a new multi-file project, prefer pc_fs_scaffold_project; use this for adding or replacing a single file in an existing project.",
+      description: "Creates (or, with overwrite:true, replaces) one text file with given content on the PC, relative to the configured project root. Creates any missing parent folders automatically. For .js/.jsx/.ts/.tsx/.json content, this is syntax-checked with a real parser BEFORE anything is sent to the PC - broken content fails closed with the exact line/column instead of being saved. For a new multi-file project, prefer pc_fs_scaffold_project; use this for adding or replacing a single file in an existing project.",
       parameters: {
         type: 'object',
         properties: {
@@ -808,7 +808,7 @@ const PC_FILESYSTEM_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'pc_fs_edit_file',
-      description: "Makes a precise, targeted change to one existing text file on the PC by replacing an exact snippet with new text - like fs_edit_file, but for the PC filesystem. oldString must match the file's current content exactly and uniquely (include enough surrounding context to pin it down), or this returns an error instead of guessing. Read the file first (pc_list_directory to find it, terminal_pc_run_command with a quick `type`/`cat` to view it) so oldString is copied from the real current content.",
+      description: "Makes a precise, targeted change to one existing text file on the PC by replacing an exact snippet with new text. oldString must match the file's current content exactly and uniquely (include enough surrounding context to pin it down), or this returns an error instead of guessing. Read the file first (pc_list_directory to find it, terminal_pc_run_command with a quick `type`/`cat` to view it) so oldString is copied from the real current content. For .js/.jsx/.ts/.tsx/.json files, the RESULTING content is syntax-checked with a real parser before anything is sent to the PC - a change that would break the file fails closed with the exact line/column instead of being saved.",
       parameters: {
         type: 'object',
         properties: {
@@ -1001,6 +1001,30 @@ const PC_FILESYSTEM_TOOL_SCHEMAS = [
           destinationFolderPath: { type: 'string', description: 'Use "" for the project root itself.' },
         },
         required: ['zipPath', 'destinationFolderPath'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_check_syntax',
+      description: "Runs a real JS/JSX/TS/TSX/JSON parser against a file already on the PC and reports syntax errors with line/column. pc_fs_create_file and pc_fs_edit_file already run this automatically before every write and refuse to save broken code, so you don't need to call this right after your own successful write - use it to double-check a file that arrived some other way (e.g. pc_fs_extract_zip).",
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pc_fs_check_project_syntax',
+      description: "Recursively syntax/JSX-checks every JS/JSX/TS/TSX/JSON file under a folder on the PC and lists every file that fails, with line/column. Call this before telling the person a project is ready, or before starting/building it - though this same check also runs automatically as a gate right in front of terminal_pc_run_command whenever the command actually starts or builds a project (npm start, expo start, npm run build, etc.), blocking the run and handing back the exact errors instead of letting a broken project launch - so you'll typically only need to call this directly when checking proactively, e.g. before saying a task is done, or after pc_fs_extract_zip.",
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Folder to check, relative to PC_BRIDGE_ROOT. Leave empty to check everything.' } },
+        required: [],
       },
     },
   },
@@ -1775,6 +1799,14 @@ export const TOOL_REGISTRY = {
     run: (args) => pcFilesystemTool.extractZip(args.zipPath, args.destinationFolderPath),
     label: (args) => `Extracted ${args.zipPath} to ${args.destinationFolderPath || '/'} on PC`,
   },
+  pc_fs_check_syntax: {
+    run: (args) => pcFilesystemTool.checkFileSyntax(args.path),
+    label: (args) => `Syntax-checked ${args.path} on PC`,
+  },
+  pc_fs_check_project_syntax: {
+    run: (args) => pcFilesystemTool.checkProjectSyntax(args.path || ''),
+    label: (args) => `Syntax-checked PC project${args.path ? ` (${args.path})` : ''}`,
+  },
   pc_git_init: {
     run: (args) => pcGitTool.init(args.path),
     label: (args) => `Initialized git repo at ${args.path} on PC`,
@@ -1952,6 +1984,8 @@ function eventTypeForTool(functionName) {
     pc_fs_write_binary: 'file_created',
     pc_fs_zip: 'file_created',
     pc_fs_extract_zip: 'file_created',
+    pc_fs_check_syntax: 'file_browsed',
+    pc_fs_check_project_syntax: 'file_browsed',
     pc_fs_grep: 'file_browsed',
     pc_fs_glob: 'file_browsed',
     pc_fs_list_checkpoints: 'file_browsed',
@@ -2091,7 +2125,7 @@ PREVIEWING what a project actually looks like: dev_server_start runs 'npm start'
 
 LONG-RUNNING BACKGROUND WORK on the PC that isn't a dev server (a long build, a batch job, anything you don't want to block Terminal's timeout on): use pc_process_start, then pc_process_status/pc_process_logs to check on it and pc_process_stop when done.
 
-Every mutating pc_fs_* call is confined to PC_BRIDGE_ROOT and snapshotted before it happens (see CODING REQUESTS above for the checkpoint/rewind path) - there is currently no automatic pre-write syntax check on the PC side the way the old on-device tools had, so a broken file WILL save if the content is broken; lean on pc_run_tests and dev_preview_screenshot (below) to actually catch that instead of assuming a write failing to error means the content was valid.
+Every pc_fs_create_file and pc_fs_edit_file call against a .js/.jsx/.ts/.tsx/.json file is automatically syntax/JSX-checked (a real parser, in-process, before the content is ever sent to the PC) - if the content is broken, the call fails with the exact line/column instead of saving bad code, so fix the reported error and retry rather than treating it as a system problem. Every mutating pc_fs_* call is also confined to PC_BRIDGE_ROOT and snapshotted before it happens (see CODING REQUESTS above for the checkpoint/rewind path). A passing syntax check only means the file parses, not that it works - still lean on pc_run_tests and dev_preview_screenshot (below) to catch real bugs.
 
 Use web_search for anything time-sensitive, current, or that you're not confident about from what you already know - current events, prices, library versions, docs, unfamiliar topics.
 

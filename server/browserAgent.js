@@ -415,7 +415,7 @@ class AgentSession {
   /**
    * Runs one task to completion (or until finish/needsHuman/step cap).
    * @param {string} taskText
-   * @param {function} sendToModel - async (history) => { success, content, error } - the caller supplies this so this file doesn't need to know about backendClient/Model Studio directly (see server/index.js's wiring)
+   * @param {function} sendToModel - async (history) => { success, content, error } - the caller supplies this so this file doesn't need to know about backendClient/OpenRouter directly (see server/index.js's wiring)
    * @param {function} onStep - optional callback({ step, action }) for live progress/action-log UI
    */
   async runTask(taskText, sendToModel, onStep = null) {

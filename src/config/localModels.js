@@ -1,34 +1,41 @@
 /**
  * ZAO - Model Configuration
  *
- * Single model, everything: chat, coding, reasoning, math, and the
- * tool-calling router all go through Qwen3-Coder-30B-A3B-Instruct, served
- * by the Alibaba Cloud VM backend (see /server and
+ * Single model, everything: chat, coding, reasoning, math, vision, video
+ * understanding, and the tool-calling router all go through Ox Alpha
+ * (`stealth/ox-alpha`), a free-preview stealth model served via
+ * OpenRouter and relayed by the Alibaba Cloud VM backend (see /server and
  * src/services/backend/backendClient.js) - reachable at a single fixed
- * IP, see Settings > Server Connection.
+ * IP, see Settings > Server Connection. The VM itself hasn't moved; only
+ * which provider it forwards chat completions to has (see
+ * server/config.js's header comment for the full history).
  *
  * No fallback chain, no task-based model switching, no on-device weights -
- * the model runs entirely on the VM backend. There's exactly one
- * "model key" left (QWEN3_CODER_30B_A3B) purely so toolOrchestrator.js and
- * memoryEngine.js - which both call
+ * the model call happens on OpenRouter, reached through the VM. There's
+ * exactly one "model key" left (OX_ALPHA) purely so toolOrchestrator.js
+ * and memoryEngine.js - which both call
  * backendClient.sendMessage(history, modelKey, options) - didn't need
  * their call sites rewritten. (The browser agent's model calls are
  * separate - see server/browserAgent.js - since they run entirely on the
- * VM and call the model server directly rather than through this phone-side
- * client.) The key is otherwise inert; the backend only
- * ever runs the one model it was started with (whatever MODEL_PATH in
- * server/config.js points to - this label is cosmetic/display-only and
- * won't change what actually runs).
+ * VM and call OpenRouter directly rather than through this phone-side
+ * client.) The key is otherwise inert; the backend only ever runs
+ * whichever model ZAO_MODEL_NAME in server/config.js points to - this
+ * label is cosmetic/display-only and won't change what actually runs.
+ *
+ * Ox Alpha is an anonymous stealth-preview model as of writing (1M
+ * context, text/image/video input, tool calling, free during preview) -
+ * see server/config.js's header comment for the caveats (not guaranteed
+ * to stay free or stay available under this name).
  */
 
 export const MODEL_KEYS = {
-  QWEN3_CODER_30B_A3B: 'qwen3_coder_30b_a3b',
+  OX_ALPHA: 'ox_alpha',
 };
 
 export const ACTIVE_MODEL = {
-  key: MODEL_KEYS.QWEN3_CODER_30B_A3B,
-  label: 'Qwen3 Coder 30B A3B Instruct',
-  description: 'Chat, coding, reasoning, and tool-calling - served from your Alibaba Cloud VM',
+  key: MODEL_KEYS.OX_ALPHA,
+  label: 'Ox Alpha',
+  description: 'Chat, coding, reasoning, vision, and video understanding - served via OpenRouter through your Alibaba Cloud VM',
 };
 
 /**
@@ -149,5 +156,5 @@ export function classifyTask(messageText = '') {
 
 export function getModelKeyForTask() {
   // Kept for call-site compatibility (orchestrator.js) - always the one model.
-  return MODEL_KEYS.QWEN3_CODER_30B_A3B;
+  return MODEL_KEYS.OX_ALPHA;
 }

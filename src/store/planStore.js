@@ -32,6 +32,8 @@ import {
   updatePlanStatus,
   updatePlanStep,
   deletePlan as dbDeletePlan,
+  getFileCreationArtifactsForPlans,
+  addMessage,
 } from '../db/database';
 import { classifyStep } from '../services/planning/riskClassifier';
 import { PLAN_STATUS } from '../services/planning/planTypes';
@@ -44,6 +46,7 @@ import {
   dismissCheckpointAndResume as executorDismissCheckpoint,
 } from '../services/planning/planExecutor';
 import { runApprovedPlan } from '../services/brain/backendBrain';
+import { useChatStore } from './chatStore';
 
 export const usePlanStore = create((set, get) => ({
   // The plan currently shown/active in PlanScreen.js - null when nothing's
@@ -189,6 +192,18 @@ export const usePlanStore = create((set, get) => ({
     });
     await get().refreshActivePlan();
     set({ isLoading: false });
+
+    // Any file(s) this run actually created get posted back into the
+    // plan's own conversation as an assistant message carrying
+    // `artifacts` - ChatScreen.js renders that as a downloadable
+    // FileArtifactCard, same idea as Claude.ai surfacing a finished
+    // artifact. Deliberately reads this back out of plan_step_actions'
+    // own real tool-call record (see getFileCreationArtifactsForPlans's
+    // header) rather than threading new state through planExecutor.js -
+    // so this fires regardless of how the run ended (completed, or
+    // stopped partway with some steps still having created real files).
+    await postArtifactsMessageIfAny(planId, leafIds);
+
     return result;
   },
 
@@ -548,4 +563,52 @@ async function collectExecutionLeafIds(planId) {
   }
   walk(treeResult.data);
   return leaves;
+}
+
+/**
+ * Gathers whatever real files startPlan()'s run actually created (via
+ * getFileCreationArtifactsForPlans - see that function's header) and, if
+ * any exist, posts a new assistant message carrying them into the plan's
+ * own conversation - the message ChatScreen.js renders a FileArtifactCard
+ * under. Reads the top-level planId (not the leaf ids) for
+ * conversation_id, since that's the one createPlanFromSteps/the
+ * hierarchical planner's entry point actually stamps with the
+ * conversation the request came from; a plan somehow missing one (e.g. a
+ * subplan run in isolation, outside its parent tree) just skips the
+ * chat post silently - the created files and their paths are still safe
+ * in plan_step_actions either way, nothing is lost.
+ *
+ * Also pushes the message into chatStore.js's live `messages` array,
+ * best-effort, when the person happens to still have that exact
+ * conversation open - without this, the card would only appear the next
+ * time they reopened the conversation from history.
+ */
+async function postArtifactsMessageIfAny(planId, leafIds) {
+  const artifactsResult = await getFileCreationArtifactsForPlans(leafIds);
+  if (!artifactsResult.success || artifactsResult.data.length === 0) return;
+
+  const planResult = await getPlan(planId);
+  const conversationId = planResult.success ? planResult.data?.conversation_id : null;
+  if (!conversationId) return;
+
+  const artifacts = artifactsResult.data;
+  const fileWord = artifacts.length === 1 ? 'file' : 'files';
+  const names = artifacts.map((a) => a.path.split('/').pop());
+  const content = artifacts.length <= 3
+    ? `Created ${artifacts.length} ${fileWord}: ${names.join(', ')}. Tap below to download.`
+    : `Created ${artifacts.length} ${fileWord}, including ${names.slice(0, 2).join(', ')}. Tap below to download.`;
+
+  const message = {
+    id: uuidv4(),
+    conversation_id: conversationId,
+    role: 'assistant',
+    content,
+    artifacts,
+  };
+  const saveResult = await addMessage(message);
+
+  const chatState = useChatStore.getState();
+  if (chatState.conversationId === conversationId) {
+    chatState.appendLiveMessage(saveResult.data || message);
+  }
 }

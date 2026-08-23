@@ -24,6 +24,7 @@ const DEFAULT_PREFS = {
   auto_memory_notes: null,
   backend_vm_url: null,
   backend_auth_token: null,
+  openrouter_api_key: null,
   permission_mode: 'auto',
   otel_export_endpoint: null,
   preferred_timezone: null,
@@ -162,6 +163,27 @@ export const usePreferencesStore = create((set, get) => ({
     const prev = get().preferences;
     set({ preferences: { ...prev, backend_auth_token: token } }); // optimistic
     const result = await updatePreferences({ backend_auth_token: token });
+    if (!result.success) {
+      set({ preferences: prev }); // revert on failure
+    }
+    return result;
+  },
+
+  /**
+   * The person's own OpenRouter API key (from https://openrouter.ai/keys),
+   * sent on every VM request as `X-OpenRouter-Key` (see
+   * backendClient.js's authHeaders()) - this is what the VM actually uses
+   * to call OpenRouter for chat completions now that the model has moved
+   * off Alibaba Model Studio. Separate from backend_auth_token above,
+   * which still just gates access to the VM itself. Same "plain
+   * preference, not the secure api_keys table" tradeoff as
+   * backend_auth_token - see that setter's comment; a future pass could
+   * move both to expo-secure-store alongside the GitHub token.
+   */
+  async setOpenrouterApiKey(key) {
+    const prev = get().preferences;
+    set({ preferences: { ...prev, openrouter_api_key: key } }); // optimistic
+    const result = await updatePreferences({ openrouter_api_key: key });
     if (!result.success) {
       set({ preferences: prev }); // revert on failure
     }

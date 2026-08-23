@@ -10,9 +10,9 @@
  */
 
 import { isProjectRunCommand, checkBeforeProjectRun } from '../projectRunGate';
-import { checkProjectSyntax } from '../../filesystem/filesystemTool';
+import { checkProjectSyntax } from '../../terminal/pcFilesystemTool';
 
-jest.mock('../../filesystem/filesystemTool', () => ({
+jest.mock('../../terminal/pcFilesystemTool', () => ({
   checkProjectSyntax: jest.fn(),
 }));
 

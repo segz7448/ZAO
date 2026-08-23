@@ -59,11 +59,33 @@ function getActiveConnection() {
     mode: 'vm',
     baseUrl: baseUrl ? baseUrl.replace(/\/+$/, '') : null,
     token: prefs.backend_auth_token || null,
+    // The person's own OpenRouter key, entered in Settings > Server
+    // Connection > OpenRouter API key (OpenRouterApiKeySection). Separate
+    // from `token` above, which still gates access to the VM itself -
+    // this is what the VM then uses to call OpenRouter on the model's
+    // behalf. See server/config.js's header comment for the full picture.
+    openrouterKey: prefs.openrouter_api_key || null,
   };
 }
 
+/**
+ * Every authenticated request to the VM carries both headers: `token`
+ * (Authorization: Bearer ...) is the VM's own shared secret, unchanged
+ * from before. `X-OpenRouter-Key`, when set, is the person's OpenRouter
+ * key - harmless to attach to routes that don't need it (terminal, git,
+ * filesystem, etc.), and it's what lets server/index.js's chat-completion
+ * relay (and its cached-key fallback for browser-agent/background-session
+ * calls) actually reach OpenRouter. Reads directly from the preferences
+ * store rather than taking a second parameter, so none of the ~25
+ * existing `authHeaders(token)` call sites throughout this file needed to
+ * change.
+ */
 function authHeaders(token) {
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const { openrouterKey } = getActiveConnection();
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (openrouterKey) headers['X-OpenRouter-Key'] = openrouterKey;
+  return headers;
 }
 
 function withTimeout(promise, ms, timeoutMessage) {
@@ -151,12 +173,70 @@ export async function testBackendConnection({ url, token }) {
 }
 
 /**
- * Converts ZAO's internal message shape ({role, content, images?}) plus
- * any already-OpenAI-shaped tool messages (role: 'tool', or an assistant
- * message carrying tool_calls - see toolOrchestrator.js) into plain
- * {role, content} messages. Image attachments are dropped here - the
- * single text-only model has no vision support, callers should already
- * short-circuit before reaching this (see orchestrator.js).
+ * Tests an OpenRouter key BEFORE it's saved to preferences - what Settings
+ * > Server Connection > OpenRouter API key's "Test & Save" calls. Requires
+ * the VM address to already be reachable, since the actual validation
+ * (server/index.js's /openrouter/key-status) happens by asking the VM to
+ * check the key against OpenRouter, not by calling OpenRouter directly
+ * from the phone.
+ * @returns {Promise<{valid: boolean|null, limit: number|null, limitRemaining: number|null, error: string|null}>}
+ */
+export async function testOpenRouterKey({ url, vmToken, openrouterKey }) {
+  const baseUrl = (url || '').trim().replace(/\/+$/, '');
+  const key = (openrouterKey || '').trim();
+  if (!baseUrl) {
+    return { valid: null, limit: null, limitRemaining: null, error: 'Set the VM address first.' };
+  }
+  if (!key) {
+    return { valid: null, limit: null, limitRemaining: null, error: 'No key entered.' };
+  }
+  try {
+    const response = await withTimeout(
+      fetch(`${baseUrl}/openrouter/key-status`, {
+        headers: { ...authHeadersRaw(vmToken), 'X-OpenRouter-Key': key },
+      }),
+      HEALTH_TIMEOUT_MS + 6000,
+      'OpenRouter key check timed out'
+    );
+    const json = await response.json().catch(() => null);
+    if (!json) {
+      return { valid: false, limit: null, limitRemaining: null, error: `Server responded with ${response.status}.` };
+    }
+    return {
+      valid: Boolean(json.valid),
+      limit: typeof json.limit === 'number' ? json.limit : null,
+      limitRemaining: typeof json.limitRemaining === 'number' ? json.limitRemaining : null,
+      error: json.error?.message || null,
+    };
+  } catch (err) {
+    return { valid: false, limit: null, limitRemaining: null, error: err?.message || 'Could not reach the VM.' };
+  }
+}
+
+// authHeaders() reads the OpenRouter key straight from preferences (see
+// its own comment above), which is exactly wrong for testOpenRouterKey()
+// above - that function's whole job is testing a key that ISN'T saved to
+// preferences yet. This is the same VM-auth-only header builder authHeaders()
+// used to be before the OpenRouter key was folded in.
+function authHeadersRaw(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/**
+ * Converts ZAO's internal message shape into plain {role, content}
+ * messages for the wire, passing already-OpenAI-shaped tool messages
+ * (role: 'tool', or an assistant message carrying tool_calls - see
+ * toolOrchestrator.js) through unchanged.
+ *
+ * `content` is left exactly as-is otherwise - it's usually a plain
+ * string, but chatStore.js's sendMessage() builds it as a multi-part
+ * array (`[{type:'text',...}, {type:'image_url'|'video_url',...}]`) for
+ * the current turn's message when there's an image/video attachment, now
+ * that Ox Alpha (via OpenRouter) actually has vision/video understanding
+ * - see chatStore.js's buildMultimodalContent(). `message.content || ''`
+ * only guards against a null/undefined content field; an array is
+ * truthy, so it passes through here untouched, exactly as OpenRouter's
+ * multimodal content-parts schema expects.
  */
 function toBackendMessage(message) {
   if (message.role === 'tool' || message.tool_calls) {

@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
- * ZAO Backend - Alibaba Cloud VM edition
+ * ZAO Backend - Alibaba Cloud VM edition, OpenRouter model relay
  *
  * Single-model, single-user. No local inference: this is a thin, always-on
  * Express relay that:
- *   - Exposes /v1/chat/completions and forwards it straight to Alibaba
- *     Cloud's Model Studio (DashScope) OpenAI-compatible API, which hosts
- *     qwen3-coder-30b-a3b-instruct - same request/response shape the app
- *     already expects, just relayed over HTTPS instead of proxied to a
- *     Model Studio relay (no local model process)
+ *   - Exposes /v1/chat/completions and forwards it straight to OpenRouter's
+ *     OpenAI-compatible API, currently pointed at `stealth/ox-alpha` (see
+ *     config.js's header comment for the full story) - same
+ *     request/response shape the app already expects, just relayed over
+ *     HTTPS instead of proxied to Alibaba Model Studio (no local model
+ *     process, and no Alibaba dependency left at all)
  *   - Exposes /health so the app can check the backend is up at the VM's
  *     IP - also reports whether the VM currently has internet access
  *     (internetAvailable), so the app can tell the person plainly when an
@@ -43,8 +44,10 @@
  * Run with: server/start.sh (or set it up as a systemd service - see that
  * file's own header - so it survives reboots on the 24/7 VM).
  *
- * Config is entirely in config.js - set DASHSCOPE_API_KEY there (or the
- * env var) to your Alibaba Cloud Model Studio key.
+ * Config is entirely in config.js. Unlike the old DashScope setup, the
+ * OpenRouter key mostly does NOT live here - the app sends it per request
+ * as an `X-OpenRouter-Key` header (see cachedOpenRouterKey below).
+ * OPENROUTER_API_KEY in config.js is only an operator-level fallback.
  */
 
 const express = require('express');
@@ -67,7 +70,7 @@ const { shutdownBrowser } = require('./browserAgent');
 const { registerDevPreviewRoute, shutdownAllPreviewServers } = require('./devPreview');
 
 const app = express();
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: `${config.MAX_JSON_BODY_MB}mb` }));
 
 // ---------------------------------------------------------------------------
 // CORS - the phone app is a different origin (Expo/React Native fetch from
@@ -95,6 +98,31 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ---------------------------------------------------------------------------
+// OpenRouter key caching - the app sends the person's own OpenRouter key
+// as `X-OpenRouter-Key` on every request (backendClient.js's authHeaders()
+// attaches it automatically once it's saved in Settings), which is the
+// primary path per config.js's header comment. This middleware runs after
+// the auth check above (so it only ever sees requests already proven to
+// be from the phone, not the open internet) and just remembers the most
+// recent key in memory - that's what lets server-initiated calls with no
+// live HTTP request to read a header from (sendToModel/sendToolCall below,
+// used by browserAgent.js and backgroundSessions.js) still have a key to
+// use. Resets on VM restart, same tradeoff as the rate limiter's in-memory
+// window - fine for a single-user personal backend.
+// ---------------------------------------------------------------------------
+let cachedOpenRouterKey = config.OPENROUTER_API_KEY || null;
+
+app.use((req, res, next) => {
+  const suppliedKey = req.headers['x-openrouter-key'];
+  if (suppliedKey) cachedOpenRouterKey = suppliedKey;
+  next();
+});
+
+function activeOpenRouterKey() {
+  return cachedOpenRouterKey || config.OPENROUTER_API_KEY || null;
+}
 
 // ---------------------------------------------------------------------------
 // Rate limiting - crude but real. This server is single-user by design (one
@@ -196,47 +224,54 @@ async function refreshInternetStatus() {
 // upstream 401 the first time the app tries to send a message.
 // ---------------------------------------------------------------------------
 function checkPathsOrExit() {
-  const problems = [];
-  if (!config.DASHSCOPE_API_KEY) {
-    problems.push('DASHSCOPE_API_KEY is not set - export it (or set it in config.js) to your Alibaba Cloud Model Studio API key.');
-  }
   if (config.AUTH_TOKEN === 'change-me-to-a-real-secret') {
     log('WARNING: AUTH_TOKEN is still the default placeholder. Set ZAO_AUTH_TOKEN (or edit config.js) to a real secret before exposing this over the public internet.');
   }
-  if (problems.length) {
-    log('Cannot start - fix these first:');
-    problems.forEach((p) => log('  - ' + p));
-    process.exit(1);
+  if (!config.OPENROUTER_API_KEY) {
+    // Not fatal - the app sends its own key per request as X-OpenRouter-Key
+    // (see cachedOpenRouterKey above), so the VM doesn't need one baked in
+    // to start up. This is just a heads-up for the operator.
+    log('NOTE: OPENROUTER_API_KEY is not set in config.js/env. That\'s fine - the app sends the OpenRouter key from Settings > Server Connection on every request. This env var is only a fallback for server-initiated calls (browser agent, background sessions) before the app has sent a key at least once.');
   }
 }
 
 // ---------------------------------------------------------------------------
-// Alibaba Cloud Model Studio (DashScope) relay - no local inference. This
-// VM just forwards chat completions to Alibaba's hosted
-// qwen3-coder-30b-a3b-instruct over HTTPS and streams the response straight
-// back to the phone. "Ready" simply means DASHSCOPE_API_KEY is configured -
-// there's no model-load wait since nothing loads locally anymore.
+// OpenRouter relay - no local inference. This VM just forwards chat
+// completions to OpenRouter's hosted `stealth/ox-alpha` (see config.js's
+// header comment) over HTTPS and streams the response straight back to the
+// phone. "Ready" means the VM itself is up - unlike the old DashScope setup
+// there's no single fixed key to check at startup, since the real key now
+// travels with each request (see activeOpenRouterKey() above).
 // ---------------------------------------------------------------------------
 function modelReady() {
-  return Boolean(config.DASHSCOPE_API_KEY);
+  return true;
 }
 
-/** Forwards a request to DashScope, injecting the model name and streaming the response back. */
-function proxyToDashScope(req, res, reqPath) {
-  const upstream = new URL(config.DASHSCOPE_BASE_URL + reqPath);
+/** Forwards a request to OpenRouter, injecting the model name + key and streaming the response back. */
+function proxyToOpenRouter(req, res, reqPath) {
+  const key = req.headers['x-openrouter-key'] || activeOpenRouterKey();
+  if (!key) {
+    return res.status(503).json({ error: { message: 'No OpenRouter API key available. Add yours in Settings > Server Connection > OpenRouter API key.' } });
+  }
+
+  const upstream = new URL(config.OPENROUTER_BASE_URL + reqPath);
   const bodyObj = { ...req.body, model: req.body?.model || config.MODEL_NAME };
   const body = JSON.stringify(bodyObj);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(body),
+    Authorization: `Bearer ${key}`,
+  };
+  if (config.OPENROUTER_SITE_URL) headers['HTTP-Referer'] = config.OPENROUTER_SITE_URL;
+  if (config.OPENROUTER_SITE_NAME) headers['X-Title'] = config.OPENROUTER_SITE_NAME;
 
   const options = {
     hostname: upstream.hostname,
     port: upstream.port || 443,
     path: upstream.pathname + upstream.search,
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-      Authorization: `Bearer ${config.DASHSCOPE_API_KEY}`,
-    },
+    headers,
     timeout: config.MODEL_TIMEOUT_MS,
   };
 
@@ -248,11 +283,11 @@ function proxyToDashScope(req, res, reqPath) {
     proxyRes.pipe(res);
   });
 
-  proxyReq.on('timeout', () => proxyReq.destroy(new Error('Model Studio request timed out')));
+  proxyReq.on('timeout', () => proxyReq.destroy(new Error('OpenRouter request timed out')));
   proxyReq.on('error', (err) => {
-    log('Relay to Model Studio failed:', err.message);
+    log('Relay to OpenRouter failed:', err.message);
     if (!res.headersSent) {
-      res.status(502).json({ error: { message: `Alibaba Model Studio is not responding: ${err.message}` } });
+      res.status(502).json({ error: { message: `OpenRouter is not responding: ${err.message}` } });
     }
   });
 
@@ -261,26 +296,31 @@ function proxyToDashScope(req, res, reqPath) {
 }
 
 /**
- * Sends a chat history straight to DashScope and returns the same
- * { success, content, error } shape the old backendClient.js's
- * _callModel() used - the browser agent (browserAgent.js) needs this same
- * call but isn't itself an Express request/response, so it can't reuse
- * proxyToDashScope() above directly.
+ * Sends a chat history straight to OpenRouter and returns the same
+ * { success, content, error } shape backendClient.js's non-streaming path
+ * expects - the browser agent (browserAgent.js) needs this same call but
+ * isn't itself an Express request/response, so it can't reuse
+ * proxyToOpenRouter() above directly (no live `req` to read a header from -
+ * this is exactly why activeOpenRouterKey() falls back to the cached key).
  */
 function sendToModel(history) {
   return new Promise((resolve) => {
-    if (!modelReady()) {
-      resolve({ success: false, content: null, error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
+    const key = activeOpenRouterKey();
+    if (!key) {
+      resolve({ success: false, content: null, error: { message: 'No OpenRouter API key available yet - send at least one chat message from the app first, or set OPENROUTER_API_KEY on the VM.' } });
       return;
     }
     const body = JSON.stringify({ model: config.MODEL_NAME, messages: history, max_tokens: 1024, temperature: 0.2 });
-    const upstream = new URL(config.DASHSCOPE_BASE_URL + '/chat/completions');
+    const upstream = new URL(config.OPENROUTER_BASE_URL + '/chat/completions');
+    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${key}` };
+    if (config.OPENROUTER_SITE_URL) headers['HTTP-Referer'] = config.OPENROUTER_SITE_URL;
+    if (config.OPENROUTER_SITE_NAME) headers['X-Title'] = config.OPENROUTER_SITE_NAME;
     const options = {
       hostname: upstream.hostname,
       port: upstream.port || 443,
       path: upstream.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${config.DASHSCOPE_API_KEY}` },
+      headers,
       timeout: config.MODEL_TIMEOUT_MS,
     };
     const req = https.request(options, (res) => {
@@ -300,7 +340,7 @@ function sendToModel(history) {
         }
       });
     });
-    req.on('timeout', () => req.destroy(new Error('Model Studio request timed out')));
+    req.on('timeout', () => req.destroy(new Error('OpenRouter request timed out')));
     req.on('error', (err) => resolve({ success: false, content: null, error: { message: err.message } }));
     req.write(body);
     req.end();
@@ -321,18 +361,22 @@ function sendToModel(history) {
  */
 function sendToolCall(history, tools) {
   return new Promise((resolve) => {
-    if (!modelReady()) {
-      resolve({ success: false, content: null, toolCalls: null, error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
+    const key = activeOpenRouterKey();
+    if (!key) {
+      resolve({ success: false, content: null, toolCalls: null, error: { message: 'No OpenRouter API key available yet - send at least one chat message from the app first, or set OPENROUTER_API_KEY on the VM.' } });
       return;
     }
     const body = JSON.stringify({ model: config.MODEL_NAME, messages: history, tools, max_tokens: 2048, temperature: 0.3 });
-    const upstream = new URL(config.DASHSCOPE_BASE_URL + '/chat/completions');
+    const upstream = new URL(config.OPENROUTER_BASE_URL + '/chat/completions');
+    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${key}` };
+    if (config.OPENROUTER_SITE_URL) headers['HTTP-Referer'] = config.OPENROUTER_SITE_URL;
+    if (config.OPENROUTER_SITE_NAME) headers['X-Title'] = config.OPENROUTER_SITE_NAME;
     const options = {
       hostname: upstream.hostname,
       port: upstream.port || 443,
       path: upstream.pathname,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${config.DASHSCOPE_API_KEY}` },
+      headers,
       timeout: config.MODEL_TIMEOUT_MS,
     };
     const req = https.request(options, (res) => {
@@ -352,7 +396,7 @@ function sendToolCall(history, tools) {
         }
       });
     });
-    req.on('timeout', () => req.destroy(new Error('Model Studio request timed out')));
+    req.on('timeout', () => req.destroy(new Error('OpenRouter request timed out')));
     req.on('error', (err) => resolve({ success: false, content: null, toolCalls: null, error: { message: err.message } }));
     req.write(body);
     req.end();
@@ -382,13 +426,55 @@ app.get('/health', (req, res) => {
     port: config.PORT,
     internetAvailable, // null until the first background check completes (~15s after startup)
     authValid: suppliedToken === null ? null : suppliedToken === config.AUTH_TOKEN,
+    // Whether SOME OpenRouter key is currently available for model calls -
+    // either sent on this very request (X-OpenRouter-Key) or cached from a
+    // previous one. Doesn't confirm the key is actually VALID with
+    // OpenRouter (see /openrouter/key-status for that) - just that there's
+    // something to try.
+    openRouterKeyPresent: Boolean(req.headers['x-openrouter-key'] || activeOpenRouterKey()),
   });
 });
 
-app.post('/v1/chat/completions', (req, res) => {
-  if (!modelReady()) {
-    return res.status(503).json({ error: { message: 'DASHSCOPE_API_KEY is not configured on this VM.' } });
+// Validates an OpenRouter key against OpenRouter itself (GET /key returns
+// rate-limit/credit info for a valid key, 401 for an invalid one) - what
+// Settings > Server Connection > OpenRouter API key's "Test & Save" calls,
+// same pattern as ModelApiKeySection's existing VM-auth-token check.
+app.get('/openrouter/key-status', (req, res) => {
+  const key = req.headers['x-openrouter-key'];
+  if (!key) {
+    return res.status(400).json({ valid: false, error: { message: 'No X-OpenRouter-Key header sent.' } });
   }
+  const upstream = new URL(config.OPENROUTER_BASE_URL + '/key');
+  const options = {
+    hostname: upstream.hostname,
+    port: upstream.port || 443,
+    path: upstream.pathname,
+    method: 'GET',
+    headers: { Authorization: `Bearer ${key}` },
+    timeout: 10000,
+  };
+  const upstreamReq = https.request(options, (upstreamRes) => {
+    let data = '';
+    upstreamRes.on('data', (chunk) => { data += chunk; });
+    upstreamRes.on('end', () => {
+      if (upstreamRes.statusCode === 200) {
+        try {
+          const parsed = JSON.parse(data);
+          res.json({ valid: true, limit: parsed?.data?.limit ?? null, limitRemaining: parsed?.data?.limit_remaining ?? null });
+        } catch {
+          res.json({ valid: true, limit: null, limitRemaining: null });
+        }
+      } else {
+        res.json({ valid: false, error: { message: `OpenRouter rejected this key (${upstreamRes.statusCode}).` } });
+      }
+    });
+  });
+  upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('timed out')));
+  upstreamReq.on('error', (err) => res.status(502).json({ valid: false, error: { message: err.message } }));
+  upstreamReq.end();
+});
+
+app.post('/v1/chat/completions', (req, res) => {
   // NOTE: "live tool-choice: no" here does NOT mean tools are broken or
   // unavailable - most requests never need it. The hierarchical-plan
   // pipeline (planExecutor.js) already knows which tool a step needs
@@ -402,7 +488,7 @@ app.post('/v1/chat/completions', (req, res) => {
   // activity log instead of this line.
   const liveToolCount = req.body?.tools?.length || 0;
   log(`Chat request (${(req.body?.messages || []).length} messages, live tool-choice: ${liveToolCount > 0 ? `yes, ${liveToolCount} tool(s) offered` : 'no (tool already decided upstream, if any)'})`);
-  proxyToDashScope(req, res, '/chat/completions');
+  proxyToOpenRouter(req, res, '/chat/completions');
 });
 
 registerTerminalRoute(app, config, log);
@@ -433,7 +519,8 @@ const httpServer = app.listen(config.PORT, '0.0.0.0', () => {
   log(`ZAO backend listening on http://0.0.0.0:${config.PORT} (reachable via the VM's public IP)`);
   log(`Health check: http://127.0.0.1:${config.PORT}/health`);
   log(`Browser agent stream: ws://0.0.0.0:${config.PORT}/browser-agent/stream`);
-  log(`Model: ${config.MODEL_NAME} via ${config.DASHSCOPE_BASE_URL} (Alibaba Cloud Model Studio)`);
+  log(`Model: ${config.MODEL_NAME} via ${config.OPENROUTER_BASE_URL} (OpenRouter)`);
+  log(`OpenRouter key: ${activeOpenRouterKey() ? 'configured (env fallback)' : 'not set yet - waiting for the app to send one'}`);
   refreshInternetStatus(); // fire immediately so /health has a real value ASAP, not just after the first interval tick
   setInterval(refreshInternetStatus, INTERNET_CHECK_INTERVAL_MS);
 });

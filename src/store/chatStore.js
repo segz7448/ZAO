@@ -73,6 +73,28 @@ async function assembleHistory(rawMessages, { conversationId, memoryEnabled, las
   return history;
 }
 
+/**
+ * Builds an OpenAI/OpenRouter-shaped multi-part content array for a
+ * message that has an image or video attachment - `text` first (the
+ * OCR/video note + whatever the person typed, exactly what was already
+ * going to be sent as plain content), then one media part. Data URLs
+ * (`data:<mime>;base64,<data>`) are what OpenRouter documents for both
+ * image_url and video_url content parts - see server/config.js's header
+ * comment for why the actual model call is relayed through the VM rather
+ * than hit directly from here.
+ */
+function buildMultimodalContent(text, attachmentMedia) {
+  const { base64, mimeType, isVideo } = attachmentMedia;
+  const dataUrl = `data:${mimeType || (isVideo ? 'video/mp4' : 'image/jpeg')};base64,${base64}`;
+  const parts = [{ type: 'text', text: text || '' }];
+  parts.push(
+    isVideo
+      ? { type: 'video_url', video_url: { url: dataUrl } }
+      : { type: 'image_url', image_url: { url: dataUrl } }
+  );
+  return parts;
+}
+
 const SENT_IMAGES_DIR = `${FileSystem.documentDirectory}zao-sent-images/`;
 
 /**
@@ -494,6 +516,22 @@ export const useChatStore = create((set, get) => ({
   },
 
   /**
+   * Appends an already-persisted message straight into the live
+   * `messages` array, for a message created OUTSIDE the normal
+   * send/receive flow above - specifically, planStore.js's startPlan()
+   * posting an "here's what got created" message once an approved plan
+   * finishes running, if the person still has that plan's conversation
+   * open. A no-op guard against double-appending the same row twice
+   * (e.g. a fast-firing duplicate call) is intentionally NOT here - the
+   * caller is expected to only call this once per real message, same
+   * trust level sendMessage() itself has for its own single addMessage() call.
+   */
+  appendLiveMessage(message) {
+    if (!message) return;
+    set((state) => ({ messages: [...state.messages, message] }));
+  },
+
+  /**
    * Approves the tool call attached to a message's pending_confirmation
    * (see database.js's migration comment and toolOrchestrator.js's
    * pendingConfirmation) - the ONLY path in the app that re-invokes a
@@ -632,26 +670,40 @@ export const useChatStore = create((set, get) => ({
 
     let messageContent = trimmed;
     let userImageLocalPath = null;
+    let attachmentMedia = null; // { base64, mimeType, isVideo } - see buildMultimodalContent() below
 
     if (attachment) {
       set({ isSending: true, error: null }); // show activity immediately during extraction, which can take a moment for PDFs/ZIPs
       const result = await processAttachedFile(attachment, trimmed);
 
       if (result.isImage) {
-        // There's no vision model (Gemini removed) - the image still
-        // attaches and shows as a thumbnail in the chat (per product
-        // decision: camera/gallery/file attachments stay), and the model
-        // still can't SEE it, but fileProcessor.js now runs OCR
-        // (server-side, free/open-source Tesseract - see server/ocr.js)
-        // on every attached image as a best-effort fallback. If the image
-        // contains readable text (a screenshot, a photo of a document or
-        // whiteboard), that text is what actually reaches the model here -
-        // otherwise it's the same "can't see images" note as before.
+        // Ox Alpha (via OpenRouter) has real vision, so the model actually
+        // sees this image now (see buildMultimodalContent() below, which
+        // attaches result.base64 as an image_url content part on the
+        // outbound message only - not persisted to the DB). fileProcessor
+        // still runs OCR alongside vision (server-side, free/open-source
+        // Tesseract - see server/ocr.js) as a cheap supplement for exact
+        // text extraction, not a replacement for it.
         userImageLocalPath = await copyAttachmentLocally(attachment);
+        if (result.base64) {
+          attachmentMedia = { base64: result.base64, mimeType: result.mimeType, isVideo: false };
+        }
         const imageNote = result.text
-          ? `[The user attached an image. There's no vision model so it can't be visually viewed, but OCR found the following text in it:]\n\n${result.text}`
-          : "[The user attached an image, but it can't be viewed - there's no vision model available, and OCR found no readable text in it. If relevant, let them know you can't see images.]";
+          ? `[The user attached an image, shown above and sent to you directly - OCR also found this text in it:]\n\n${result.text}`
+          : '[The user attached an image, shown above and sent to you directly.]';
         messageContent = messageContent ? `${imageNote}\n\n${messageContent}` : imageNote;
+      } else if (result.isVideo) {
+        if (!result.success) {
+          set({ isSending: false, error: result.error });
+          return;
+        }
+        // No thumbnail/inline preview yet (MessageBubble.js only renders
+        // local_image_path as an image) - the video is still sent to the
+        // model in full via buildMultimodalContent() below, just without a
+        // chat-bubble preview of it.
+        attachmentMedia = { base64: result.base64, mimeType: result.mimeType, isVideo: true };
+        const videoNote = '[The user attached a video, sent to you directly for you to watch and understand.]';
+        messageContent = messageContent ? `${videoNote}\n\n${messageContent}` : videoNote;
       } else if (result.success) {
         const contextBlock = formatFileContextBlock(attachment.name, result);
         messageContent = messageContent
@@ -716,6 +768,24 @@ export const useChatStore = create((set, get) => ({
       memoryEnabled: prefs.memory_enabled !== false,
       lastUserText: messageContent,
     });
+
+    // Swaps the just-assembled last message's plain-string content for a
+    // multimodal content-parts array when this turn has an image/video
+    // attachment - ONLY on this ephemeral outbound copy, never on
+    // userMessage itself (already saved to the DB above as plain text) or
+    // on anything memory/history subsystems touch. Keeping the DB/memory
+    // copy as plain text (with the OCR/video note folded in, same as
+    // before) means retrievalMemory.js, workingMemory.js, memoryEngine.js,
+    // and every other consumer that assumes string .content keeps working
+    // completely unchanged - only backendClient.sendMessage(), which
+    // forwards history messages to OpenRouter as-is, ever sees the array.
+    if (attachmentMedia?.base64 && history.length) {
+      const last = history[history.length - 1];
+      history[history.length - 1] = {
+        ...last,
+        content: buildMultimodalContent(last.content, attachmentMedia),
+      };
+    }
 
     const result = await sendMessageOrchestrated({
       history,

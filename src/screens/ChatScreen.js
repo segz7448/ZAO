@@ -26,6 +26,7 @@ import MessageActions from '../components/MessageActions';
 import Toast from '../components/Toast';
 import ImageViewerModal from '../components/ImageViewerModal';
 import ClockWidget from '../components/ClockWidget';
+import FileArtifactCard from '../components/FileArtifactCard';
 import { ACTIVE_MODEL } from '../config/localModels';
 import { useTheme } from '../theme/useTheme';
 import { REASONING_STRATEGY_LABELS, REASONING_STRATEGY_GLYPHS } from '../services/reasoning/reasoningTypes';
@@ -63,6 +64,17 @@ function parsePendingConfirmation(raw) {
   if (!raw) return null;
   try {
     return JSON.parse(raw);
+  } catch (err) {
+    return null;
+  }
+}
+
+/** Safely turns messages.artifacts (stored as JSON text - see src/db/database.js's migration comment) back into an array of {path, toolName}, never throwing on malformed/legacy data. */
+function parseArtifacts(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length ? parsed : null;
   } catch (err) {
     return null;
   }
@@ -203,7 +215,7 @@ function PendingToolConfirmCard({ pendingConfirmation, onApprove, onDismiss, the
   );
 }
 
-function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps, onOpenPlan, onApproveCommand, onDismissCommand }) {
+function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps, onOpenPlan, onApproveCommand, onDismissCommand, onToast }) {
   const isUser = message.role === 'user';
   const textColor = isUser ? theme.bubbleUserText : theme.bubbleAssistantText;
   const bubbleRef = useRef(null);
@@ -337,6 +349,25 @@ function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps
             theme={theme}
           />
         )}
+
+        {/* Set on a reply where a plan the person approved and ran
+            actually created real file(s) on the PC backend - see
+            src/db/database.js's artifacts migration comment and
+            planStore.js's postArtifactsMessageIfAny. Each row's own
+            Download tap pulls that file from the PC into the phone's
+            SAF-granted folder (Settings > Filesystem) - see
+            FileArtifactCard.js's header for why that's a separate step
+            from the file merely existing on the PC. */}
+        {!isUser && !message.is_error && !!message.artifacts && (() => {
+          const artifacts = parseArtifacts(message.artifacts);
+          return artifacts ? (
+            <FileArtifactCard
+              artifacts={artifacts}
+              theme={theme}
+              onToast={onToast}
+            />
+          ) : null;
+        })()}
 
         {/* Always-visible inline action row under assistant replies (not
             errors - regenerating/liking/reading a plain error message
@@ -551,19 +582,24 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
     setAttachmentVisible(false);
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert('Photo access needed', 'Enable photo library access in your phone settings to attach an image.');
+      Alert.alert('Photo access needed', 'Enable photo library access in your phone settings to attach an image or video.');
       return;
     }
+    // MediaTypeOptions.All (rather than just Images) - Ox Alpha has real
+    // video understanding now (see chatStore.js's buildMultimodalContent
+    // and fileProcessor.js's processVideo), so the library picker can
+    // offer videos too, not just photos.
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ImagePicker.MediaTypeOptions.All,
       quality: 0.7,
     });
     if (!result.canceled && result.assets?.[0]) {
       const asset = result.assets[0];
+      const isVideo = asset.type === 'video';
       setPendingAttachment({
         uri: asset.uri,
-        name: asset.fileName || `image_${Date.now()}.jpg`,
-        mimeType: asset.mimeType || 'image/jpeg',
+        name: asset.fileName || `${isVideo ? 'video' : 'image'}_${Date.now()}.${isVideo ? 'mp4' : 'jpg'}`,
+        mimeType: asset.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg'),
         size: asset.fileSize,
       });
     }
@@ -620,6 +656,7 @@ export default function ChatScreen({ onOpenSidebar, onOpenPlan, onOpenBrowserAge
             onOpenPlan={onOpenPlan}
             onApproveCommand={approvePendingToolCall}
             onDismissCommand={dismissPendingConfirmation}
+            onToast={(text) => toastRef.current?.show(text)}
             actionsProps={{
               onCopyToast: (text) => toastRef.current?.show(text),
               onLike: handleLikeMessage,

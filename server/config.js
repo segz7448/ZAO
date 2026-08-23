@@ -1,39 +1,70 @@
 /**
- * ZAO Backend config - Alibaba Cloud VM edition.
+ * ZAO Backend config - Alibaba Cloud VM edition, OpenRouter model relay.
  *
  * This backend runs on a dedicated, always-on Alibaba Cloud VM instead of
  * on-device or on a person's PC. The phone app talks to it over a single
  * fixed IP - see server/start.sh and the Settings screen's Server
- * Connection section.
+ * Connection section. The VM itself hasn't changed - it's still the
+ * always-on relay, still hosts the Terminal/Filesystem/Office/OCR tools
+ * against its own Linux filesystem.
  *
- * MODEL: no local inference. This VM is a thin, always-on relay - it
- * forwards /v1/chat/completions straight to Alibaba Cloud's Model Studio
- * (DashScope) OpenAI-compatible API, which actually hosts
- * qwen3-coder-30b-a3b-instruct. There is no local model process,
- * no GGUF weights, and no local GPU/CPU inference on this VM anymore.
+ * MODEL: no local inference, and no more Alibaba Model Studio either.
+ * This VM is a thin relay that forwards /v1/chat/completions straight to
+ * OpenRouter's OpenAI-compatible API, which is currently pointed at the
+ * `stealth/ox-alpha` stealth-preview model (1M context, text + image +
+ * video input, tool calling). There is no local model process, no GGUF
+ * weights, and no local GPU/CPU inference on this VM.
+ *
+ * KEY HANDLING IS DIFFERENT FROM THE OLD DASHSCOPE SETUP: DASHSCOPE_API_KEY
+ * used to live ONLY here, in this file/env, set once by whoever runs the
+ * VM. OPENROUTER_API_KEY below is kept as an operator-level fallback for
+ * the same reason, but the primary path now is per-request: the app sends
+ * the person's own OpenRouter key as an `X-OpenRouter-Key` header on every
+ * request (entered in Settings > Server Connection > OpenRouter API key -
+ * see SettingsScreen.js's OpenRouterApiKeySection), same UX pattern as the
+ * existing GitHub token field. server/index.js reads that header per
+ * request and caches the most recent one for the server-initiated calls
+ * (browserAgent.js, backgroundSessions.js) that don't have a live HTTP
+ * request to read a header from.
+ *
+ * Ox Alpha is a free-preview stealth model as of writing - it is served
+ * anonymously, isn't guaranteed to stay free or stay available, and
+ * OpenRouter can swap in a different model any time behind the same
+ * `stealth/ox-alpha` slug during the preview window. If it disappears,
+ * swap ZAO_MODEL_NAME below for something durable (e.g. a named model
+ * that also does vision/tools) - nothing else in this file needs to
+ * change.
  */
 
 module.exports = {
   // The ZAO app's public-facing port on this VM.
   PORT: Number(process.env.PORT || 8000),
 
-  // Alibaba Cloud Model Studio (DashScope) OpenAI-compatible endpoint -
-  // this VM's dedicated workspace host (ap-southeast-1 MaaS), not the
-  // generic dashscope-intl.aliyuncs.com one.
-  DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL || 'https://ws-huaqujanfkq8v50o.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  // OpenRouter's single OpenAI-compatible endpoint for every model it
+  // routes to - this never changes even when the model itself does.
+  OPENROUTER_BASE_URL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
 
-  // Model Studio API key (from the Alibaba Cloud console - Model Studio >
-  // API-KEY). This is DIFFERENT from AUTH_TOKEN below: this key is what
-  // this VM sends to Alibaba; AUTH_TOKEN is what the phone sends to this
-  // VM. Required - there's no local fallback if this is missing.
-  DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY || '',
+  // Operator-level fallback OpenRouter key, used only for server-initiated
+  // calls (browser agent, background sessions) before the app has sent
+  // its own key at least once this process lifetime, and as a convenience
+  // for testing this VM directly. NOT the primary key path - see the
+  // header comment above. Get one at https://openrouter.ai/keys.
+  OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
 
-  MODEL_NAME: process.env.ZAO_MODEL_NAME || 'qwen3-coder-30b-a3b-instruct',
+  MODEL_NAME: process.env.ZAO_MODEL_NAME || 'stealth/ox-alpha',
 
-  MODEL_LABEL: 'Qwen3 Coder 30B A3B Instruct (Alibaba Model Studio)',
+  MODEL_LABEL: 'Ox Alpha (OpenRouter, stealth preview)',
 
-  // Timeout for calls out to Model Studio.
-  MODEL_TIMEOUT_MS: Number(process.env.ZAO_MODEL_TIMEOUT_MS || 120000),
+  // Optional but recommended by OpenRouter for stealth/free-tier models -
+  // shows up in their dashboard/rankings, has no functional effect on
+  // responses. Harmless to leave blank.
+  OPENROUTER_SITE_URL: process.env.OPENROUTER_SITE_URL || '',
+  OPENROUTER_SITE_NAME: process.env.OPENROUTER_SITE_NAME || 'ZAO',
+
+  // Timeout for calls out to OpenRouter. Ox Alpha is documented as a heavy
+  // reasoner that can run slow on hard prompts, so this is deliberately
+  // more generous than the old Model Studio default.
+  MODEL_TIMEOUT_MS: Number(process.env.ZAO_MODEL_TIMEOUT_MS || 180000),
 
   // The model API key. The phone app must send this as `Authorization:
   // Bearer <token>` on every request. Change this to your own value and
@@ -122,4 +153,13 @@ module.exports = {
   // (an unzipped node_modules, a multi-GB video) from tying up the
   // connection. Default 200MB comfortably covers a release APK.
   PC_BRIDGE_MAX_FILE_BYTES: Number(process.env.ZAO_PC_BRIDGE_MAX_FILE_MB || 200) * 1024 * 1024,
+
+  // Max size of the JSON body express.json() will parse, in MB - see
+  // server/index.js. Raised from the old 25MB default so a base64-encoded
+  // image/video attachment (now sent inline to OpenRouter for Ox Alpha's
+  // vision/video input, not just OCR text) fits in one request. Base64
+  // inflates raw bytes by ~33%, so 80MB comfortably covers a ~55MB video
+  // clip - matches src/services/fileProcessor.js's MAX_VIDEO_BYTES client
+  // guard, which rejects oversized attachments before they're ever sent.
+  MAX_JSON_BODY_MB: Number(process.env.ZAO_MAX_JSON_BODY_MB || 80),
 };
