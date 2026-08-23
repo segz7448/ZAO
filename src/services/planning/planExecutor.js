@@ -46,6 +46,7 @@ import {
   getPlanResources,
   insertRecoveryAttempt,
   resolveRecoveryAttempt,
+  getRecoveryAttempts,
   recordCheckpointSuggestion,
   resolveCheckpointSuggestion,
   startStepAction,
@@ -451,7 +452,7 @@ async function runBrowserStep(step, planId, agentSession) {
 /** Best-effort guess if a step's literal `action` string doesn't exactly match a TOOL_REGISTRY key - tries the most common domain-default action so a near-miss from the model doesn't immediately fail the step. */
 export function normalizeActionGuess(step) {
   const domainDefaults = {
-    files: 'fs_create_file',
+    files: 'pc_fs_create_file',
     github: 'github_commit_files',
     terminal: 'terminal_pc_run_command',
     // "time" and "search" each map to exactly one real tool - unlike
@@ -628,7 +629,7 @@ export async function runExecutionPlan(planId, options = {}) {
     }
 
     // ---- Failure: hand off to recovery planning ----
-    const outcome = await handleStepFailure(plan, step, result, { onStep });
+    const outcome = await handleStepFailure(plan, step, result, { onStep, permissionMode });
     if (outcome === 'abort') {
       await updatePlanStatus(planId, PLAN_STATUS.FAILED, { completedAt: Date.now() });
       return { success: false, status: PLAN_STATUS.FAILED, error: { message: `Aborted: ${step.description} failed and could not be recovered.` } };
@@ -655,16 +656,49 @@ export async function runExecutionPlan(planId, options = {}) {
  * continues), 'ask_person' (caller should pause the whole plan),
  * 'abort' (caller should fail the whole plan).
  */
-async function handleStepFailure(plan, step, result, { onStep }) {
+async function handleStepFailure(plan, step, result, { onStep, permissionMode = 'default' }) {
   const planId = plan.id;
+  const isAutoMode = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
 
   if (result.noRetry) {
+    // Genuinely unrecoverable step-level failure (a planning gap, not
+    // something a retry/install can fix). Normally this needs a
+    // person's eyes - but auto mode has no one to hand it to, so fail
+    // forward the same way every other exhausted-recovery path in this
+    // module does rather than stalling at an approval screen.
+    if (isAutoMode) {
+      const hasDependents = (plan.steps || []).some((s) => {
+        if (s.id === step.id) return false;
+        if (s.depends_on_step_id === step.id) return true;
+        if (s.depends_on_step_ids) return s.depends_on_step_ids.split(',').filter(Boolean).includes(step.id);
+        return false;
+      });
+      if (hasDependents) {
+        await updatePlanStep(step.id, planId, { status: STEP_STATUS.FAILED, errorMessage: errorText(result.error) });
+        onStep?.({ ...step, status: STEP_STATUS.FAILED, error_message: errorText(result.error) });
+        return 'abort';
+      }
+      await updatePlanStep(step.id, planId, { status: STEP_STATUS.SKIPPED, errorMessage: errorText(result.error) });
+      onStep?.({ ...step, status: STEP_STATUS.SKIPPED, error_message: errorText(result.error) });
+      return 'skipped';
+    }
     await updatePlanStep(step.id, planId, { status: STEP_STATUS.AWAITING_APPROVAL, errorMessage: errorText(result.error) });
     onStep?.({ ...step, status: STEP_STATUS.AWAITING_APPROVAL, error_message: errorText(result.error) });
     return 'ask_person';
   }
 
-  const previousAttempts = []; // recoveryPlanner reads retry_count directly off the step; a fuller implementation would also fetch getRecoveryAttempts(step.id) here for richer context
+  const previousAttemptsResult = await getRecoveryAttempts(step.id);
+  // Best-effort: a lookup failure shouldn't block recovery entirely, but
+  // it MUST NOT silently fall back to an empty array here - that was the
+  // original bug (see the header comment this replaces), and it defeats
+  // MAX_AUTO_RETRIES: planRecovery() reads previousAttempts.length as the
+  // attempt count, so an empty array always looks like "first failure,"
+  // no matter how many times this exact step has already failed and
+  // recovered-and-retried. Falling back to step.retry_count instead keeps
+  // the ceiling real even when the DB read itself fails.
+  const previousAttempts = previousAttemptsResult.success
+    ? previousAttemptsResult.data
+    : Array.from({ length: step.retry_count || 0 });
   const hasDependents = (plan.steps || []).some((s) => {
     if (s.id === step.id) return false;
     if (s.depends_on_step_id === step.id) return true;
@@ -676,7 +710,7 @@ async function handleStepFailure(plan, step, result, { onStep }) {
 
   const decision = await planRecovery(
     { ...step, error_message: result.error, hasDependents },
-    { previousAttempts, isRisky: !!step.is_risky }
+    { previousAttempts, isRisky: !!step.is_risky, permissionMode }
   );
 
   const attemptNumber = (step.retry_count || 0) + 1;

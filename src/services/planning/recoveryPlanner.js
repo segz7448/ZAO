@@ -79,6 +79,34 @@ function looksLikeMissingTool(errorMessage) {
 }
 
 /**
+ * The same "genuinely missing, no amount of retrying fixes it" category
+ * as looksLikeMissingTool, but for a FILES-domain existence/precondition
+ * check rather than a terminal command - e.g. a "check if the installer
+ * exists" step whose result is simply false. This is NOT an error in the
+ * traditional sense (the check itself succeeded, it just found "no") -
+ * but plan_steps only has a success/fail shape, so a negative existence
+ * check surfaces here as a failed step. Broader wording on purpose since
+ * these messages come from ZAO's own fs tools/model phrasing, not a
+ * fixed shell error format - scoped to step.domain === 'files' so it
+ * doesn't accidentally swallow unrelated failures from other domains.
+ */
+const MISSING_RESOURCE_PATTERNS = [
+  /does not exist/i,
+  /doesn'?t exist/i,
+  /not found/i,
+  /no such file/i,
+  /missing/i,
+  /not installed/i,
+  /could not (find|locate)/i,
+];
+
+function looksLikeMissingResource(step, errorMessage) {
+  if (step.domain !== 'files') return false;
+  const text = errorMessage || '';
+  return MISSING_RESOURCE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
  * Pulls the missing binary's name out of the error text where possible,
  * so the install-command guess (INSTALL_HINTS below) and the fallback
  * alternateDescription can name the actual tool instead of a generic
@@ -92,10 +120,39 @@ function extractMissingToolName(errorMessage, step) {
   if (bashMatch) return bashMatch[1];
   const winMatch = text.match(/'([^']+)' is not recognized/i);
   if (winMatch) return winMatch[1];
+  // FILES-domain existence checks don't have a shell error to parse a
+  // name out of - the step's own description/target is the only signal
+  // ("Check if the Python installer file exists" -> "python").
+  const descriptionMatch = (step.description || '').match(/\b(python3?|node(?:\.?js)?|npm|pip3?|git|java|go|rustc?|cargo|ffmpeg|docker|ruby|perl|php|gcc|g\+\+|make|cmake)\b/i);
+  if (descriptionMatch) return descriptionMatch[1].toLowerCase();
   // Fall back to the step's own command/target if the error text didn't
   // yield a clean name - better than nothing for the install guess.
   const fallback = (step.command || step.target || '').trim().split(/\s+/)[0];
   return fallback || null;
+}
+
+/**
+ * The fixed 4-step loop this whole change exists to enforce: check ->
+ * (if missing) install with elevated/admin privileges -> set PATH
+ * persistently (not just for the current shell session, which is why
+ * "set then immediately re-check in the same process" can lie) -> echo/
+ * verify PATH actually picked it up -> only then hand back to the
+ * original step. Written OS-conditionally in the instruction text
+ * itself (rather than requiring a separately-detected OS field threaded
+ * through the plan) since the model executing this with hostAccess:true
+ * already has to run a real shell and can branch on what it finds.
+ */
+function buildAutoInstallDescription(toolName) {
+  const name = toolName || 'the required tool';
+  const knownHint = toolName && INSTALL_HINTS[toolName] ? INSTALL_HINTS[toolName] : null;
+  const installStep = knownHint
+    ? `Install it now, with hostAccess: true and administrator/elevated privileges: ${knownHint}`
+    : `Install it now, with hostAccess: true and administrator/elevated privileges, using whichever package manager matches this machine: apt-get/yum/dnf on Linux (sudo apt-get update && sudo apt-get install -y ${name}), winget or choco on Windows (winget install -e --id <package> --accept-package-agreements --accept-source-agreements, run elevated), Homebrew on macOS (brew install ${name}), or pkg on Termux (pkg install ${name} -y). Pick the one that matches the OS this step is actually running on.`;
+  return `'${name}' isn't present. Do NOT stop and ask - resolve it automatically in one pass:\n`
+    + `1. ${installStep}\n`
+    + `2. Set PATH persistently (append to the shell profile / system PATH, not just the current session's env var) so it survives into the next command's own subprocess.\n`
+    + `3. Verify: echo the PATH (or re-run '${name} --version' / 'where ${name}' / 'which ${name}') in a fresh shell call to confirm it actually resolved, not just that the install command exited 0.\n`
+    + `4. Once verified, continue on to the original step this was blocking.`;
 }
 
 /** Best-effort install command for a handful of tools ZAO's own tasks
@@ -119,15 +176,22 @@ const INSTALL_HINTS = {
  * @returns {Promise<{ strategy: string, reasoning: string, waitMs: number|null, alternateAction: object|null }>}
  */
 export async function planRecovery(step, options = {}) {
-  const { previousAttempts = [], isRisky = false } = options;
+  const { previousAttempts = [], isRisky = false, permissionMode = 'default' } = options;
   const attemptCount = previousAttempts.length;
   const transient = looksTransient(step.error_message || step.errorMessage);
   const hasDependents = !!step.hasDependents;
+  const isAutoMode = permissionMode === 'auto' || permissionMode === 'bypassPermissions';
 
-  // Already exhausted automated attempts - always hand to the person
-  // rather than retrying forever. This is the hard ceiling regardless of
-  // how promising the error looks.
+  // Already exhausted automated attempts. In auto mode there's no person
+  // to hand this to - fail forward instead of stalling: drop it if
+  // nothing depends on it, otherwise the plan genuinely can't continue
+  // and should say so rather than sit at a silent approval screen.
   if (attemptCount >= MAX_AUTO_RETRIES) {
+    if (isAutoMode) {
+      return hasDependents
+        ? { strategy: RECOVERY_STRATEGIES.ABORT_PLAN, reasoning: `This step failed ${attemptCount} time(s) and other steps depend on it - auto mode can't proceed without it.`, waitMs: null, alternateAction: null }
+        : { strategy: RECOVERY_STRATEGIES.SKIP_AND_CONTINUE, reasoning: `This step failed ${attemptCount} time(s); nothing else depends on it, so continuing without it.`, waitMs: null, alternateAction: null };
+    }
     return {
       strategy: RECOVERY_STRATEGIES.ASK_PERSON,
       reasoning: `This step has failed ${attemptCount} time(s) already - stopping automated retries and asking for your input rather than looping.`,
@@ -136,11 +200,12 @@ export async function planRecovery(step, options = {}) {
     };
   }
 
-  // A risky step that failed should always come back to the person
-  // rather than being auto-retried or auto-skipped - the same "person's
-  // eyes on it" principle riskClassifier.js applies before a risky step
-  // runs applies again once one has failed.
-  if (isRisky) {
+  // A risky step that failed normally comes back to the person - but in
+  // an auto/bypassPermissions mode there's no gate to begin with (the
+  // executor's own risk check upstream already skipped it), so failures
+  // on it get the same automated treatment as any other step instead of
+  // an approval pause that mode was specifically turned on to avoid.
+  if (isRisky && !isAutoMode) {
     return {
       strategy: RECOVERY_STRATEGIES.ASK_PERSON,
       reasoning: 'This step is marked risky - failures on risky steps need your review rather than an automatic retry.',
@@ -156,20 +221,16 @@ export async function planRecovery(step, options = {}) {
   // ephemeral sandbox container is destroyed the moment that command
   // finishes and never reaches the next command) rather than burning an
   // automated attempt on a syntax variant that can't possibly work.
-  const missingTool = !transient && looksLikeMissingTool(step.error_message || step.errorMessage);
-  if (missingTool) {
-    const toolName = extractMissingToolName(step.error_message || step.errorMessage, step);
-    const installCommand = toolName && INSTALL_HINTS[toolName]
-      ? INSTALL_HINTS[toolName]
-      : null;
-    const alternateDescription = installCommand
-      ? `'${toolName}' isn't installed. Install it first by running (with hostAccess: true, so the install actually persists instead of vanishing with the sandbox container): ${installCommand}\n\nThen retry the original command.`
-      : `${toolName ? `'${toolName}'` : 'The required tool'} isn't installed. Figure out and run the appropriate install command for it (apt-get/pip/npm as appropriate) with hostAccess: true, so the install runs against the real VM and persists - installing inside the default sandboxed terminal call won't work, since that container is destroyed right after the command finishes. Then retry the original command.`;
+  const errMsg = step.error_message || step.errorMessage;
+  const missingTool = !transient && looksLikeMissingTool(errMsg);
+  const missingResource = !transient && !missingTool && looksLikeMissingResource(step, errMsg);
+  if (missingTool || missingResource) {
+    const toolName = extractMissingToolName(errMsg, step);
     return {
       strategy: RECOVERY_STRATEGIES.ALTERNATE_APPROACH,
-      reasoning: `'${toolName || 'the tool'}' isn't installed on the VM - installing it (with real host access) rather than retrying the same missing command.`,
+      reasoning: `'${toolName || 'the dependency'}' isn't present on the VM - installing it automatically (with real host/admin access) instead of retrying or stopping to ask.`,
       waitMs: null,
-      alternateAction: { description: alternateDescription },
+      alternateAction: { description: buildAutoInstallDescription(toolName) },
     };
   }
 
@@ -195,11 +256,11 @@ export async function planRecovery(step, options = {}) {
   // this is the genuinely ambiguous case. Ask the model whether a
   // different concrete approach exists for this one step, or whether the
   // step is safe to skip (nothing depends on it) vs needs a person.
-  const modelDecision = await askModelForRecoveryStrategy(step, { hasDependents, attemptCount });
+  const modelDecision = await askModelForRecoveryStrategy(step, { hasDependents, attemptCount, isAutoMode });
   return modelDecision;
 }
 
-async function askModelForRecoveryStrategy(step, { hasDependents, attemptCount }) {
+async function askModelForRecoveryStrategy(step, { hasDependents, attemptCount, isAutoMode = false }) {
   const systemPrompt = `You are ZAO's recovery planner. One plan step failed and simple retries haven't resolved it (or don't look like they would). Decide what should happen next.
 
 Options, in order of preference:
@@ -243,8 +304,17 @@ Respond with ONLY a JSON object, no markdown fences, no commentary:
   }
 
   // Default/fallback: if the model call failed, returned something
-  // unparseable, or genuinely picked ask_person - always safe to hand to
-  // the person rather than guessing.
+  // unparseable, or genuinely picked ask_person, normally that's safe to
+  // hand to the person. In auto mode there's no one to hand it to, so
+  // fail forward instead of stalling at an approval screen that mode was
+  // turned on specifically to avoid: drop the step if nothing depends on
+  // it, otherwise abort the plan with a clear reason.
+  if (isAutoMode) {
+    return hasDependents
+      ? { strategy: RECOVERY_STRATEGIES.ABORT_PLAN, reasoning: parsed?.reasoning || 'This step could not be resolved automatically and other steps depend on it.', waitMs: null, alternateAction: null }
+      : { strategy: RECOVERY_STRATEGIES.SKIP_AND_CONTINUE, reasoning: parsed?.reasoning || 'This step could not be resolved automatically; nothing else depends on it, so continuing without it.', waitMs: null, alternateAction: null };
+  }
+
   return {
     strategy: RECOVERY_STRATEGIES.ASK_PERSON,
     reasoning: parsed?.reasoning || 'This step needs your input to move forward.',

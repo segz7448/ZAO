@@ -136,6 +136,67 @@ export async function createRepo(name, { description = '', isPrivate = true } = 
 }
 
 /**
+ * Lists repositories over the real GitHub REST API - the direct
+ * equivalent of `gh repo list`, without needing the `gh` CLI binary
+ * installed on the PC at all (it commonly isn't, and installing a new
+ * CLI mid-task is a detour when this API call does the same thing in
+ * one authenticated HTTPS request). Three modes, matching the three
+ * shapes GitHub itself exposes as separate endpoints:
+ *   - no `owner` given: /user/repos - every repo the authenticated
+ *     token can see (own + collaborator + org, per `affiliation`).
+ *   - `owner` given and it's an org: /orgs/{owner}/repos.
+ *   - `owner` given and it's a user: /users/{owner}/repos (public repos
+ *     only - the REST API has no "list another user's private repos"
+ *     endpoint even with a token, by design).
+ * Tries org first when an owner is given since that 404s cleanly for a
+ * plain user account rather than a wrong/confusing result the other way
+ * around, then falls back to the user endpoint.
+ */
+export async function listRepos({ owner = undefined, perPage = 30, page = 1, sort = 'updated' } = {}) {
+  const token = await getToken();
+  if (!token) return { success: false, data: null, error: { message: 'No GitHub token configured.' } };
+
+  const params = new URLSearchParams({ per_page: String(perPage), page: String(page), sort });
+
+  let path;
+  if (!owner) {
+    path = `/user/repos`;
+  } else {
+    const orgAttempt = await githubFetch(`/orgs/${owner}/repos?${params.toString()}`, token);
+    if (orgAttempt.success) {
+      return { success: true, data: { repos: mapRepoList(orgAttempt.data), owner, ownerType: 'org' }, error: null };
+    }
+    // A 404 here just means `owner` isn't an org - fall through to the
+    // user endpoint. Any other failure (bad token, rate limit) is real
+    // and should be reported as-is rather than masked by a second call.
+    if (orgAttempt.error?.status !== 404) return orgAttempt;
+    path = `/users/${owner}/repos`;
+  }
+
+  const result = await githubFetch(`${path}?${params.toString()}`, token);
+  if (!result.success) return result;
+
+  return { success: true, data: { repos: mapRepoList(result.data), owner: owner || null, ownerType: owner ? 'user' : 'authenticated_user' }, error: null };
+}
+
+function mapRepoList(rawRepos) {
+  return (rawRepos || []).map((repo) => ({
+    name: repo.name,
+    fullName: repo.full_name,
+    owner: repo.owner?.login,
+    private: repo.private,
+    fork: repo.fork,
+    description: repo.description,
+    defaultBranch: repo.default_branch,
+    language: repo.language,
+    stars: repo.stargazers_count,
+    openIssues: repo.open_issues_count,
+    htmlUrl: repo.html_url,
+    updatedAt: repo.updated_at,
+  }));
+}
+
+/**
  * Creates or updates ONE file and commits it directly to a branch - this
  * is the Contents API's atomic single-file commit path (fetch current
  * SHA if the file exists, then PUT with that SHA to update, or omit SHA

@@ -91,6 +91,22 @@ const GITHUB_TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
+      name: 'github_list_repos',
+      description: "Lists repositories over the real GitHub API - this is the right way to answer \"list my repos\" / \"what repos does X have\", NOT terminal_pc_run_command with `gh repo list`: the `gh` CLI is not guaranteed to be installed on the PC, and this tool gets the same data in one authenticated HTTPS call with no install step, no missing-binary risk, and structured output instead of text to parse. Omit `owner` to list every repo the connected account itself can see (own + org + collaborator repos). Pass `owner` to list a specific org's or user's repos instead - tried as an org first, then falls back to a user account automatically, so you don't need to already know which one it is. Results are paginated (`perPage`/`page`); sorted by `sort` (default 'updated', most-recently-active first).",
+      parameters: {
+        type: 'object',
+        properties: {
+          owner: { type: 'string', description: "Optional. An org or username to list repos for instead of the connected account's own repos." },
+          perPage: { type: 'number', description: 'Optional, defaults 30, max 100.' },
+          page: { type: 'number', description: 'Optional, defaults 1. Use with perPage to page through more than one page of results.' },
+          sort: { type: 'string', enum: ['updated', 'created', 'pushed', 'full_name'], description: "Optional, defaults 'updated'." },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'github_create_repo',
       description: 'Creates a new GitHub repository under the connected account.',
       parameters: {
@@ -1707,6 +1723,10 @@ export const TOOL_REGISTRY = {
     run: (args) => githubTool.createRepo(args.name, { description: args.description, isPrivate: args.isPrivate }),
     label: (args) => `Created repository ${args.name}`,
   },
+  github_list_repos: {
+    run: (args) => githubTool.listRepos({ owner: args.owner || undefined, perPage: args.perPage || undefined, page: args.page || undefined, sort: args.sort || undefined }),
+    label: (args) => (args.owner ? `Listed repositories for ${args.owner}` : 'Listed your repositories'),
+  },
   github_clone_repo: {
     run: (args) => githubTool.cloneRepo(args.owner, args.repo),
     label: (args) => `Read ${args.owner}/${args.repo}`,
@@ -2143,6 +2163,7 @@ function domainForTool(toolName) {
 function eventTypeForTool(functionName) {
   const map = {
     github_create_repo: 'github_repo_created',
+    github_list_repos: 'github_read',
     github_commit_files: 'github_push',
     github_create_branch: 'github_branch_created',
     github_create_pull_request: 'github_pr_opened',
@@ -2320,7 +2341,7 @@ export async function runToolTask(userRequest, context = {}, onStep = null) {
 
   const systemPrompt = `You are ZAO's project manager. The person describes what they want in plain language; you decide which tool functions to call, in what order, to accomplish it - they should never need to name a specific function or press a button themselves.
 
-You have these kinds of tools available: GitHub (repos, commits, branches, PRs, releases - operates through the GitHub API, not a local checkout), Filesystem (creating/moving/renaming/deleting/zipping files directly on the person's PHONE, plus fs_read_file/fs_grep/fs_glob/fs_edit_file for precisely reading and editing existing files there), PC Filesystem (pc_fs_scaffold_project/pc_fs_create_file/pc_fs_write_binary/pc_fs_edit_file/pc_fs_rename/pc_fs_move/pc_fs_delete/pc_fs_zip/pc_fs_extract_zip, plus pc_fs_read_file/pc_fs_grep/pc_fs_glob for reading and searching - real file operations on the PC's own disk, in the same place Terminal builds/runs things), PC Git (pc_git_init/status/add/commit/push/pull/checkout/remote_add/log/diff - a real local git repo on the PC, distinct from the GitHub tools above which never touch a local checkout), PC Process (pc_process_start/status/logs/stop - track a long-running background process on the PC by id, separate from the Terminal tool below which blocks until a command exits), Dev Preview (dev_server_start/stop and dev_preview_screenshot - start a dev server as a tracked background process, detect its localhost URL, and screenshot its actual rendered output - use this to run and preview a project's dev server), Phone utilities (phone_clipboard_copy to put text on the phone's clipboard, phone_share_file to open Android's native share sheet for a file already on the phone), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file, for anything beyond a quick glance), PDF (create/merge/split), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file), Terminal, Web Search, and Web Fetch - use whichever combination the request actually needs.
+You have these kinds of tools available: GitHub (github_list_repos to list repos, plus repos, commits, branches, PRs, releases - operates through the GitHub API, not a local checkout or the \`gh\` CLI), Filesystem (creating/moving/renaming/deleting/zipping files directly on the person's PHONE, plus fs_read_file/fs_grep/fs_glob/fs_edit_file for precisely reading and editing existing files there), PC Filesystem (pc_fs_scaffold_project/pc_fs_create_file/pc_fs_write_binary/pc_fs_edit_file/pc_fs_rename/pc_fs_move/pc_fs_delete/pc_fs_zip/pc_fs_extract_zip, plus pc_fs_read_file/pc_fs_grep/pc_fs_glob for reading and searching - real file operations on the PC's own disk, in the same place Terminal builds/runs things), PC Git (pc_git_init/status/add/commit/push/pull/checkout/remote_add/log/diff - a real local git repo on the PC, distinct from the GitHub tools above which never touch a local checkout), PC Process (pc_process_start/status/logs/stop - track a long-running background process on the PC by id, separate from the Terminal tool below which blocks until a command exits), Dev Preview (dev_server_start/stop and dev_preview_screenshot - start a dev server as a tracked background process, detect its localhost URL, and screenshot its actual rendered output - use this to run and preview a project's dev server), Phone utilities (phone_clipboard_copy to put text on the phone's clipboard, phone_share_file to open Android's native share sheet for a file already on the phone), Data analysis (data_analyze_file - real pandas-backed describe/head/filter/groupby on an existing .csv/.tsv/.xlsx/.xls file, for anything beyond a quick glance), PDF (create/merge/split), Office (docx_create for Word documents, xlsx_create/csv_create for spreadsheets, pptx_create for presentations - write the actual document/spreadsheet/slide content yourself, each tool just turns it into a real file), Terminal, Web Search, and Web Fetch - use whichever combination the request actually needs.
 
 Web Search finds candidate pages (title, URL, short snippet); Web Fetch (web_fetch) reads one specific URL in full - use web_fetch after a web_search result whose snippet isn't enough, or any time the person gives you a URL directly. It's a plain fetch, not a browser, so it won't see content a page only renders via JS.
 
@@ -2363,6 +2384,8 @@ Terminal: terminal_pc_run_command is the full terminal and the only one ZAO has 
 Dev server + visual preview: NEVER start a dev server (npm start, vite, expo start --web, python -m http.server, etc.) with terminal_pc_run_command - it runs to completion/timeout and a dev server never completes, so that just wastes the call and leaves nothing running. Use dev_server_start instead, which tracks it as a background process and hands back its local URL. Then call dev_preview_screenshot with that previewId to actually render the page and see whether the HTML/CSS looks right - you can't view the image yourself, but the returned page title, HTTP status, and browser console errors tell you concretely whether it loaded, 404'd, or threw JS errors, and the PNG itself is saved to the person's phone for them to look at. Call dev_server_stop when you're done with it so the port doesn't stay held.
 
 GitHub Actions: github_commit_files/github_create_pull_request landing successfully only means the commit itself was written - it says nothing about whether CI passed. If the repo has workflows configured, call github_list_workflow_runs afterward (filtered to the branch you just pushed) to see whether a run actually started and what its status is; don't report a task as "done" on the strength of the commit alone if CI exists and hasn't been checked. If a run shows status "in_progress", say so plainly rather than guessing at the outcome. If a run's conclusion is "failure", call github_get_workflow_run with its id to see exactly which job/step broke before reporting back. github_trigger_workflow only works on workflows that declare workflow_dispatch in their own \`on:\` block - a push-triggered workflow can't be manually dispatched this way.
+
+TERMINAL ONLY GUARANTEES BASH AND PYTHON: terminal_pc_run_command runs on the VM as-is, but only bash and a Python interpreter are guaranteed present - no other CLI (gh, aws, docker-compose, jq, etc.) can be assumed installed just because a task resembles something that tool is normally used for. Before reaching for an external CLI, check whether a dedicated tool already covers the same ground through a real API instead - github_list_repos instead of \`gh repo list\`, the other github_* tools instead of \`gh\` subcommands generally, web_fetch instead of \`curl\` for a one-off page - since those need no install step and can't fail with "command not found" partway through a task. When a request genuinely has no dedicated tool and truly needs an external CLI, write the equivalent directly in bash (curl + standard unix tools) or python (the \`requests\`/stdlib-only style, since pip installs a fresh sandbox may not persist - see hostAccess below) rather than installing something new as the first move; only install a missing CLI with terminal_pc_run_command's hostAccess: true when there's genuinely no other way to get the same result.
 
 The PC and the phone are separate filesystems. Source code and project files you create for a coding request should go through pc_fs_* (see above), so they're already on the PC where Terminal can build/run them. The remaining gap is BUILD OUTPUT: anything a PC command produces that pc_fs_* didn't write itself (npm install's node_modules, a built APK from gradlew, a webpack bundle) stays on the PC's own disk and is NOT visible on the phone automatically. After a PC build the person actually wants on their device, use pc_list_directory to find the real output path, then pc_pull_file to copy it into their phone project folder - don't tell them a build "is done and ready" if the artifact they need is still only sitting on the PC.
 
