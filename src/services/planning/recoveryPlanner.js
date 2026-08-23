@@ -142,15 +142,40 @@ function extractMissingToolName(errorMessage, step) {
  * through the plan) since the model executing this with hostAccess:true
  * already has to run a real shell and can branch on what it finds.
  */
+/**
+ * Tools whose real binary name diverges from the name people (and plan
+ * steps) casually type - "python" being the canonical case: on Debian/
+ * Ubuntu/Termux, installing the interpreter gets you "python3" on PATH
+ * and NOTHING answers to the bare name "python" unless something
+ * explicitly links it. Without step 1.5 below, any later plan step that
+ * (reasonably) checks for "python" instead of "python3" fails FOREVER -
+ * not a flaky failure a retry fixes, a permanent one, because the
+ * install step "succeeded" by every measure (python3 --version works)
+ * while never creating the exact binary name the next step checks for.
+ * This is what actually happened in production: "python --version"
+ * failed, recovery correctly swapped to "python3 --version" and that
+ * succeeded, but a later verification step re-checked literal "python"
+ * and looped through its own retries hitting the identical dead end -
+ * because nothing had ever created a "python" binary, only "python3".
+ */
+const BINARY_ALIASES = {
+  python: {
+    realBinary: 'python3',
+    aliasStep: 'Also ensure the bare command "python" resolves, since some steps check for that exact name: on Linux/Termux, run `ln -sf "$(command -v python3)" "$(dirname "$(command -v python3)")/python"` (or `sudo apt-get install -y python-is-python3` on Debian/Ubuntu, `pkg install python2 -y` is NOT the fix - do not install python2); on Windows the official python.org/winget installer already provides both `python` and `python3`, so no extra step is needed there; on macOS with Homebrew, run `ln -sf "$(brew --prefix)/bin/python3" "$(brew --prefix)/bin/python"`.',
+  },
+};
+
 function buildAutoInstallDescription(toolName) {
   const name = toolName || 'the required tool';
   const knownHint = toolName && INSTALL_HINTS[toolName] ? INSTALL_HINTS[toolName] : null;
   const installStep = knownHint
     ? `Install it now, with hostAccess: true and administrator/elevated privileges: ${knownHint}`
     : `Install it now, with hostAccess: true and administrator/elevated privileges, using whichever package manager matches this machine: apt-get/yum/dnf on Linux (sudo apt-get update && sudo apt-get install -y ${name}), winget or choco on Windows (winget install -e --id <package> --accept-package-agreements --accept-source-agreements, run elevated), Homebrew on macOS (brew install ${name}), or pkg on Termux (pkg install ${name} -y). Pick the one that matches the OS this step is actually running on.`;
+  const alias = BINARY_ALIASES[(name || '').toLowerCase()];
+  const aliasStep = alias ? `\n2b. ${alias.aliasStep}` : '';
   return `'${name}' isn't present. Do NOT stop and ask - resolve it automatically in one pass:\n`
     + `1. ${installStep}\n`
-    + `2. Set PATH persistently (append to the shell profile / system PATH, not just the current session's env var) so it survives into the next command's own subprocess.\n`
+    + `2. Set PATH persistently (append to the shell profile / system PATH, not just the current session's env var) so it survives into the next command's own subprocess.${aliasStep}\n`
     + `3. Verify: echo the PATH (or re-run '${name} --version' / 'where ${name}' / 'which ${name}') in a fresh shell call to confirm it actually resolved, not just that the install command exited 0.\n`
     + `4. Once verified, continue on to the original step this was blocking.`;
 }
