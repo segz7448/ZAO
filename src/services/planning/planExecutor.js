@@ -167,6 +167,81 @@ export function translateTerminalArgs(step, baseArgs) {
 }
 
 /**
+ * Zip/unzip tool functions (see TOOL_REGISTRY in toolOrchestrator.js)
+ * take two distinct paths - a folder/zip AND a separate output/destination
+ * path - under names that don't match the generic path/target/name
+ * aliasing runStepTool builds for every step (that aliasing only ever
+ * has ONE real value, step.target, to work with). The model supplies the
+ * second path via extraArgs (see EXECUTION_SYSTEM_PROMPT in
+ * executionPlanner.js), which the details spread already puts on
+ * baseArgs under its own key (e.g. baseArgs.zipPath) - what's still
+ * missing is renaming step.target's generic path/target/name aliases
+ * into the SPECIFIC name each zip function actually destructures
+ * (folderPath, zipOutputPath, destinationFolder, ...), since none of
+ * those specific names get set by the generic aliasing at all.
+ */
+export function translateZipArgs(resolvedToolName, step, baseArgs) {
+  switch (resolvedToolName) {
+    case 'pc_fs_zip':
+      return { ...baseArgs, folderPath: baseArgs.folderPath || step.target || null, zipPath: baseArgs.zipPath || null };
+    case 'pc_fs_extract_zip':
+      return { ...baseArgs, zipPath: baseArgs.zipPath || step.target || null, destinationFolderPath: baseArgs.destinationFolderPath || null };
+    case 'fs_zip':
+      return { ...baseArgs, folderPath: baseArgs.folderPath || step.target || null, zipOutputPath: baseArgs.zipOutputPath || baseArgs.zipPath || null };
+    case 'fs_extract_zip':
+      return { ...baseArgs, zipPath: baseArgs.zipPath || step.target || null, destinationFolder: baseArgs.destinationFolder || baseArgs.destinationFolderPath || null };
+    default:
+      return baseArgs;
+  }
+}
+const ZIP_ACTIONS_SECOND_PATH_FIELD = {
+  pc_fs_zip: 'zipPath',
+  pc_fs_extract_zip: 'destinationFolderPath',
+  fs_zip: 'zipOutputPath',
+  fs_extract_zip: 'destinationFolder',
+};
+
+/**
+ * github_commit_files/github_create_branch (and friends) take separate
+ * `owner` and `repo` strings, but a plan step only has one `target`
+ * field - EXECUTION_SYSTEM_PROMPT asks the model for target = "owner/repo"
+ * for these, so split it here rather than asking the schema to grow an
+ * owner/repo pair just for this one domain.
+ */
+export function translateGithubArgs(step, baseArgs) {
+  if (baseArgs.owner && baseArgs.repo) return baseArgs;
+  const [owner, repo] = String(step.target || '').split('/').map((s) => s.trim());
+  return { ...baseArgs, owner: baseArgs.owner || owner || null, repo: baseArgs.repo || repo || null };
+}
+
+/**
+ * pc_git_remote_add's `url` needs GitHub credentials embedded for later
+ * `pc_git_push`/`pc_git_pull` calls to authenticate (the PC's git CLI has
+ * no other way to know the person's token - it isn't logged into
+ * anything, and the model is never given the raw secret to type into a
+ * plan step in the first place, by design). This injects it exactly
+ * like `git` itself accepts on an HTTPS remote: https://TOKEN@github.com/owner/repo.git
+ * - only for github.com hosts, and only if the URL doesn't already carry
+ * credentials (so a person's own pre-authenticated URL is never
+ * clobbered). SSH-style remotes (git@github.com:owner/repo.git) aren't
+ * touched - that's a different auth mechanism (the PC's own SSH key),
+ * not something a token can help with.
+ */
+export function injectGithubCredentialsIntoUrl(url, githubToken) {
+  if (!githubToken || typeof url !== 'string') return url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (err) {
+    return url; // not a parseable absolute URL (e.g. SSH shorthand) - leave untouched
+  }
+  if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return url;
+  if (parsed.username || parsed.password) return url;
+  parsed.username = githubToken;
+  return parsed.toString();
+}
+
+/**
  * Runs one step's actual tool call via TOOL_REGISTRY - the same
  * function map toolOrchestrator.js's own loop uses. A plan step's
  * `action` should match a TOOL_REGISTRY key exactly (executionPlanner.js
@@ -174,7 +249,7 @@ export function translateTerminalArgs(step, baseArgs) {
  * loosely: exact match first, then a normalized fallback, then a clear
  * "couldn't resolve" failure rather than a crash.
  */
-async function runStepTool(step, planId, { agentSession = null } = {}) {
+async function runStepTool(step, planId, { agentSession = null, githubToken = null } = {}) {
   // ---- Planner failure: executionPlanner.js couldn't get a real,
   // parseable step out of the model for this unit of work (backend
   // unreachable, or a response that never resolved to valid JSON even
@@ -234,14 +309,58 @@ async function runStepTool(step, planId, { agentSession = null } = {}) {
     args = translateTerminalArgs(step, args);
   }
 
-  // fs_create_file with no content isn't a tool-call bug to retry - it's
-  // a planning gap (the model never generated the file's text). Retrying
-  // the identical call just reproduces the same native "undefined" crash
-  // every time, so fail this immediately with a clear, actionable error
+  if (ZIP_ACTIONS_SECOND_PATH_FIELD[resolvedToolName]) {
+    args = translateZipArgs(resolvedToolName, step, args);
+  }
+
+  if (resolvedToolName === 'github_commit_files' || resolvedToolName === 'github_create_branch') {
+    args = translateGithubArgs(step, args);
+  }
+
+  if (resolvedToolName === 'pc_git_remote_add') {
+    args = { ...args, url: injectGithubCredentialsIntoUrl(args.url, githubToken) };
+  }
+
+  // A content-writing step with no content isn't a tool-call bug to
+  // retry - it's a planning gap (the model never generated the file's
+  // text / the decision's reasoning). executionPlanner.js's
+  // repairMissingStepContent() already gets a dedicated second attempt
+  // at filling this in before a step ever reaches here, so landing in
+  // this branch means BOTH the original planning call and the focused
+  // repair call came back empty. Retrying the identical tool call at
+  // that point just reproduces the same native "undefined" crash every
+  // time, so fail this immediately with a clear, actionable error
   // instead of looping through recoveryPlanner.js on a call that can
   // never succeed as-is.
-  if (resolvedToolName === 'fs_create_file' && typeof args.content !== 'string') {
-    const errorMessage = `This step was supposed to create "${step.target || 'a file'}" but no file content was generated for it. Re-run the request and ask ZAO to write the file directly in chat instead of through a plan.`;
+  //
+  // Covers every action whose TOOL_REGISTRY.run() needs real body text:
+  // fs_create_file/pc_fs_create_file take it as `content`;
+  // pc_log_decision takes it as `reasoning` (see
+  // translatePcLogDecisionArgs above, which runs before this check).
+  const CONTENT_FIELD_BY_ACTION = {
+    fs_create_file: 'content',
+    pc_fs_create_file: 'content',
+    pc_log_decision: 'reasoning',
+  };
+  const requiredContentField = CONTENT_FIELD_BY_ACTION[resolvedToolName];
+  if (requiredContentField && typeof args[requiredContentField] !== 'string') {
+    const subject = resolvedToolName === 'pc_log_decision' ? `the decision "${step.target || 'this decision'}"` : `"${step.target || 'a file'}"`;
+    const errorMessage = `This step was supposed to write ${subject} but no content was generated for it. Re-run the request and ask ZAO to write it directly in chat instead of through a plan.`;
+    const actionId = uuidv4();
+    await startStepAction(actionId, { stepId: step.id, planId, toolName: resolvedToolName, label: step.description, input: args });
+    await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    return { success: false, error: errorMessage, noRetry: true };
+  }
+
+  // Same idea as the content guard above, for zip/unzip: these need a
+  // SECOND path the model was asked to supply via extraArgs (see
+  // EXECUTION_SYSTEM_PROMPT), and translateZipArgs just renamed it onto
+  // the field the real tool function destructures. If the model never
+  // supplied it, fail honestly now instead of calling the zip/unzip
+  // function with an undefined output path.
+  const zipSecondPathField = ZIP_ACTIONS_SECOND_PATH_FIELD[resolvedToolName];
+  if (zipSecondPathField && typeof args[zipSecondPathField] !== 'string') {
+    const errorMessage = `This step was supposed to ${resolvedToolName.includes('extract') ? 'extract' : 'zip'} "${step.target || 'a path'}" but the ${resolvedToolName.includes('extract') ? 'destination folder' : 'output zip path'} was never specified. Re-run the request and ask ZAO to do it directly in chat instead of through a plan.`;
     const actionId = uuidv4();
     await startStepAction(actionId, { stepId: step.id, planId, toolName: resolvedToolName, label: step.description, input: args });
     await completeStepAction(actionId, { status: 'failed', error: errorMessage });
@@ -476,7 +595,7 @@ export async function runExecutionPlan(planId, options = {}) {
 
     // ---- Run the step ----
     await updatePlanStep(step.id, planId, { status: STEP_STATUS.RUNNING, startedAt: Date.now() });
-    const result = await runStepTool(step, planId, { agentSession });
+    const result = await runStepTool(step, planId, { agentSession, githubToken });
 
     if (result.success) {
       await updatePlanStep(step.id, planId, { status: STEP_STATUS.DONE, result, completedAt: Date.now() });

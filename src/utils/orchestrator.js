@@ -47,7 +47,7 @@
  * handler here - it was never actually wired that way in this app.
  */
 
-import { logUsageEvent } from '../db/database';
+import { logUsageEvent, getApiKey } from '../db/database';
 import {
   getModelKeyForTask,
   ACTIVE_MODEL,
@@ -237,9 +237,24 @@ async function runHierarchicalPlanHandler(effectiveMessage, params) {
     };
   }
 
+  // Actual token lookup - this used to be hardcoded to `null` here with a
+  // comment claiming it was "resolved inside resourcePlanner.js/the tools
+  // themselves via stored settings" - that was never true anywhere in the
+  // codebase: resourcePlanner.js's checkResource('github_token', ...)
+  // only ever reads context.githubToken (never touches secure storage
+  // itself), so passing null unconditionally meant every hierarchical
+  // plan saw GitHub as "not connected" and blocked its github-domain
+  // steps even when a valid token was saved in Settings. githubTool.js's
+  // OWN direct API calls (commitFiles, etc.) DO fetch the token
+  // themselves via getApiKey('github') and were never affected by this -
+  // only the plan-time availability check (and anything else relying on
+  // this context value) was silently broken.
+  const githubTokenResult = await getApiKey('github');
+  const githubToken = githubTokenResult?.data?.key_value || null;
+
   const planResult = await runHierarchicalPlan(withStandingContextPreface(effectiveMessage, standingContext), {
     conversationId,
-    githubToken: null, // resolved inside resourcePlanner.js/the tools themselves via stored settings, not passed from here
+    githubToken,
     onProgress: onPlanProgress,
     onStep: onPlanStep,
   });

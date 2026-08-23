@@ -57,6 +57,30 @@ const DOMAIN_RESOURCE_MAP = {
 };
 
 /**
+ * Resolves which resource keys a single step actually needs. Domain
+ * alone isn't precise enough here: "files" covers BOTH the phone's own
+ * on-device storage (fs_* actions - genuinely need nothing external,
+ * hence DOMAIN_RESOURCE_MAP.files = []) AND the PC-side project
+ * filesystem (pc_fs_* actions) - and "github" covers both the GitHub
+ * REST API (github_* - needs github_token) and local git operations run
+ * ON the PC (pc_git_* - needs the PC backend reachable, not a GitHub
+ * token, though a push/pull against a real github.com remote also needs
+ * one - see injectGithubCredentialsIntoUrl in planExecutor.js). The
+ * model has no separate domain value for "PC-side" vs "phone-side"
+ * (EXECUTION_SYSTEM_PROMPT's domain enum doesn't have one), so the only
+ * reliable signal is the action name's own pc_ prefix - checked here in
+ * ADDITION to the domain map, not instead of it, so a pc_git_push step
+ * still requires github_token when it plans to push to GitHub.
+ */
+function resourceKeysForStep(step) {
+  const keys = new Set(DOMAIN_RESOURCE_MAP[step.domain] || []);
+  if (typeof step.action === 'string' && step.action.startsWith('pc_')) {
+    keys.add('pc_backend');
+  }
+  return keys;
+}
+
+/**
  * Inspects a flat list of step-like objects ({ domain, ... }) and
  * returns the deduplicated set of resource keys this plan will actually
  * need, so identifyResources() only checks what's relevant.
@@ -65,7 +89,7 @@ const DOMAIN_RESOURCE_MAP = {
 function resourceKeysForSteps(steps) {
   const keys = new Set();
   for (const step of steps || []) {
-    for (const key of DOMAIN_RESOURCE_MAP[step.domain] || []) {
+    for (const key of resourceKeysForStep(step)) {
       keys.add(key);
     }
   }
@@ -163,8 +187,8 @@ export async function planResources(steps, context = {}) {
  * @returns {{ allowed: boolean, blockedBy: string|null }}
  */
 export function checkStepResourceReadiness(planResourcesList, step) {
-  const neededKeys = DOMAIN_RESOURCE_MAP[step.domain] || [];
-  if (neededKeys.length === 0) return { allowed: true, blockedBy: null };
+  const neededKeys = resourceKeysForStep(step);
+  if (neededKeys.size === 0) return { allowed: true, blockedBy: null };
 
   for (const key of neededKeys) {
     const label = RESOURCE_LABELS[key] || key;

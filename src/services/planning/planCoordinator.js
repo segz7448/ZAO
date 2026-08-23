@@ -226,8 +226,18 @@ export async function buildPlan(goalText, context = {}) {
           reasoning: step.reasoning,
           action: step.action,
           target: step.target,
-          details: (step.subtaskTitle || step.content || step.plannerFailed || step.hostAccess)
-            ? { subtask: step.subtaskTitle || null, content: step.content || null, plannerFailed: !!step.plannerFailed, hostAccess: !!step.hostAccess }
+          details: (step.subtaskTitle || step.content || step.plannerFailed || step.hostAccess || step.extraArgs)
+            ? {
+                subtask: step.subtaskTitle || null,
+                content: step.content || null,
+                plannerFailed: !!step.plannerFailed,
+                hostAccess: !!step.hostAccess,
+                // Named args beyond target/content (zipPath, message, branch,
+                // etc.) - see executionPlanner.js's EXECUTION_SYSTEM_PROMPT
+                // "extraArgs" field and planExecutor.js's runStepTool, which
+                // spreads this back into the real tool call's args.
+                ...(step.extraArgs && typeof step.extraArgs === 'object' ? step.extraArgs : {}),
+              }
             : null,
           dependsOnStepId: step.dependsOnStepId,
           dependsOnStepIds: step.dependsOnStepIds,

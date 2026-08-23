@@ -47,6 +47,19 @@ Each step must specify:
 - content: REQUIRED whenever action is "fs_create_file" - the FULL, complete, working text to write into that file (real code/config/text, not a placeholder or a description of what it should contain). For "pc_log_decision", put the WHY - the actual reasoning behind the decision named in target - here instead (this step reuses fs_create_file's target=path/content=text shape as target=decision/content=reasoning, rather than needing its own separate fields). Omit this field entirely for every other action.
 - dependsOnStepIndex: 0-based index of another step in THIS list that must finish first, if any - omit if this step has no same-list prerequisite (it may still depend on something from an earlier task; that's handled separately)
 - hostAccess: ONLY for action "terminal_pc_run_command". Set to true when the command needs to actually persist beyond itself - most commonly, installing a tool (apt-get/pip/npm/curl-based installers, etc.) that a later step depends on. Terminal commands run inside a disposable, isolated sandbox container by default that's destroyed the instant the command finishes, so anything installed there is gone before the next step runs - hostAccess: true runs the command directly on the real VM instead, so an install actually sticks around for later steps to use. Omit (or leave false) for ordinary commands that don't need to leave anything behind - that's the safer default and should stay default.
+- extraArgs: an object for any NAMED field an action needs beyond target/content - target only ever holds ONE string, so any action whose real tool call needs a second (or third) piece of information goes here instead of being crammed into target. Required for these actions:
+  - "pc_fs_zip": target = the folder being zipped, extraArgs = { "zipPath": "output.zip path" }
+  - "pc_fs_extract_zip": target = the .zip file, extraArgs = { "destinationFolderPath": "where to extract" }
+  - "pc_fs_move" / "fs_move": target = source path, extraArgs = { "destinationFolderPath": "...", "copy": false }
+  - "pc_fs_rename": target = current path, extraArgs = { "newName": "..." }
+  - "pc_git_init" / "pc_git_status" / "pc_git_log" / "pc_git_diff": target = repo path (extraArgs usually not needed)
+  - "pc_git_add": target = repo path, extraArgs = { "files": ["path1", "path2"] } or { "all": true }
+  - "pc_git_commit": target = repo path, extraArgs = { "message": "commit message" }
+  - "pc_git_push" / "pc_git_pull": target = repo path, extraArgs = { "remote": "origin", "branch": "main" }
+  - "pc_git_checkout": target = repo path, extraArgs = { "branch": "branch-name", "create": true|false }
+  - "pc_git_remote_add": target = repo path, extraArgs = { "name": "origin", "url": "https://..." }
+  - "github_commit_files": target = "owner/repo", extraArgs = { "message": "commit message", "files": [{ "path": "...", "content": "..." }], "branch": "main" }
+  Omit extraArgs entirely for any action that only needs target (and, for fs_create_file/pc_fs_create_file/pc_log_decision, content).
 
 CRITICAL - never answer these from memory/guessing, always plan a real tool step instead: any question about the actual current date, current time (in any timezone), or "what day is it" -> a "time_get_current" step (domain "time"). Training data goes stale the moment it's trained, so a model has no way to actually know today's date without checking - guessing a plausible-looking date is exactly the failure this step exists to prevent. Any question needing current/live information the model's training can't have (weather, news, prices, current events, "is X still true") -> a "web_search" step (domain "search"). Reading one specific known URL's content -> "web_fetch".
 
@@ -61,9 +74,82 @@ Keep each step small enough that if it fails on its own, the failure is easy to 
 Respond with ONLY a JSON object, no markdown fences, no commentary:
 {
   "steps": [
-    { "reasoning": "...", "domain": "files", "description": "...", "action": "fs_create_file", "target": "path/to/file", "content": "...full file text...", "dependsOnStepIndex": null }
+    { "reasoning": "...", "domain": "files", "description": "...", "action": "fs_create_file", "target": "path/to/file", "content": "...full file text...", "dependsOnStepIndex": null },
+    { "reasoning": "...", "domain": "files", "description": "...", "action": "pc_fs_zip", "target": "path/to/folder", "extraArgs": { "zipPath": "path/to/output.zip" }, "dependsOnStepIndex": null }
   ]
 }`;
+
+// Actions whose whole point is writing text somewhere (a file's body, or
+// a decision log's reasoning) - EXECUTION_SYSTEM_PROMPT already tells the
+// model "content" is REQUIRED for these, but a 30B-class model dropping
+// that one field under load is common enough in practice (see
+// repairMissingStepContent below) that it needs a real second attempt,
+// not just an instruction it's already ignoring once.
+const CONTENT_REQUIRED_ACTIONS = new Set(['fs_create_file', 'pc_fs_create_file', 'pc_log_decision']);
+
+/**
+ * Strips a single top-and-tail markdown code fence if the model wrapped
+ * its answer in one despite being told not to (e.g. "```js\n...\n```") -
+ * common enough for code files that it's worth handling rather than
+ * writing the fence markers themselves into the file.
+ */
+export function stripStrayCodeFence(text) {
+  const match = text.match(/^```[a-zA-Z0-9_+-]*\n([\s\S]*?)\n?```$/);
+  return match ? match[1] : text;
+}
+
+/**
+ * Second-chance, SINGLE-PURPOSE model call for exactly one step that
+ * came back from expandTaskToRawSteps missing required content - this is
+ * the fix for the failure mode the person hit in practice: the planner
+ * call returns a syntactically valid steps array (right path, right
+ * action, right description) but with content: null for an
+ * fs_create_file/pc_fs_create_file/pc_log_decision step, because asking
+ * a single model call to BOTH plan a whole unit of work AND write full
+ * file text for every file in it, all inside one JSON object, is a lot
+ * to ask of a 30B model - it's the field most likely to get dropped
+ * under that combined load.
+ *
+ * Splitting content generation into its own focused, non-JSON call (just
+ * "write this one file's content, nothing else") is a much easier ask
+ * and reliably succeeds where the combined call didn't. Previously a
+ * missing content field went straight to planExecutor.js's hard "no
+ * content was generated, re-run and ask ZAO to write it directly in
+ * chat" failure - correct as a last resort, but this repair pass means
+ * that failure path is only reached if the model can't produce the
+ * content even when asked for nothing else.
+ */
+async function repairMissingStepContent(step, unit, task) {
+  const contextLine = unit.isSubtask
+    ? `Parent task: ${task.title}\nSubtask: ${unit.title}`
+    : `Task: ${unit.title}\n${unit.description || ''}`;
+
+  const isDecisionLog = step.action === 'pc_log_decision';
+  const instructions = isDecisionLog
+    ? `Write the WHY behind this decision: "${step.target || 'the decision described below'}"\nRespond with ONLY the reasoning - 1-3 plain sentences, no preamble, no markdown fences, no commentary.`
+    : `Write the COMPLETE, real, working content for the file "${step.target || 'described below'}".\nRespond with ONLY the raw file content - no explanation, no markdown code fences, no commentary before or after. If the file itself is markdown, still respond with just that text, unfenced.`;
+
+  const history = [
+    {
+      role: 'user',
+      content: `${contextLine}\nStep: ${step.description || unit.title}\n\n${instructions}`,
+    },
+  ];
+
+  let modelResult;
+  try {
+    modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+      maxTokens: 3000,
+      temperature: 0.15,
+    });
+  } catch (err) {
+    return null;
+  }
+
+  const text = modelResult?.success ? modelResult.data?.content : null;
+  if (typeof text !== 'string' || !text.trim()) return null;
+  return stripStrayCodeFence(text.trim());
+}
 
 /**
  * Expands one task (with optional subtasks) into a flat list of raw step
@@ -103,20 +189,33 @@ async function expandTaskToRawSteps(task) {
     // unit's own steps array) into an offset within allSteps, since
     // multiple units' steps are about to be concatenated.
     const offset = allSteps.length;
-    rawSteps.forEach((s, localIndex) => {
+
+    // Sequential (not Promise.all) on purpose: repair calls are rare
+    // (only fires when content was actually missing) and keeping steps
+    // in order matters more than the small speedup, since a later step
+    // in this same loop could reference an earlier one positionally.
+    for (let localIndex = 0; localIndex < rawSteps.length; localIndex++) {
+      const s = rawSteps[localIndex];
+      let content = typeof s.content === 'string' && s.content.length ? s.content : null;
+
+      if (!content && !s.plannerFailed && CONTENT_REQUIRED_ACTIONS.has(s.action)) {
+        content = await repairMissingStepContent(s, unit, task);
+      }
+
       allSteps.push({
         description: s.description || unit.title,
         reasoning: s.reasoning || null,
         domain: normalizeDomain(s.domain),
         action: s.action || null,
         target: s.target || null,
-        content: typeof s.content === 'string' ? s.content : null,
+        content,
         hostAccess: s.hostAccess === true,
+        extraArgs: s.extraArgs && typeof s.extraArgs === 'object' && !Array.isArray(s.extraArgs) ? s.extraArgs : null,
         subtaskTitle: unit.isSubtask ? unit.title : null,
         localDependsOnIndex: Number.isInteger(s.dependsOnStepIndex) ? offset + s.dependsOnStepIndex : null,
         plannerFailed: !!s.plannerFailed,
       });
-    });
+    }
   }
 
   return allSteps;
@@ -271,6 +370,7 @@ export async function planExecution(task, crossTaskDependencyStepIds = []) {
       target: step.target,
       content: step.content,
       hostAccess: step.hostAccess,
+      extraArgs: step.extraArgs,
       subtaskTitle: step.subtaskTitle,
       dependsOnStepId: assignment.directDependsOnId,
       dependsOnStepIds: assignment.allDependsOnIds,
