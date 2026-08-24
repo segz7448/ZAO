@@ -19,12 +19,14 @@
  *
  * OCR IS NOT INCLUDED HERE - reading text out of a scanned/image-based
  * PDF is a fundamentally different problem (computer vision, not PDF
- * structure manipulation) and needs a vision-capable model. ZAO doesn't
- * have one right now - vision/OCR (previously Qwen2.5-VL via Hugging
- * Face) was removed along with the rest of the cloud model stack, with
- * no local or cloud replacement set up yet. Flagging this honestly rather
- * than pretending create/merge/split covers it - OCR would be its own,
- * separate effort once a vision-capable model is available again.
+ * structure manipulation) than what this file (pdf-lib create/merge/split)
+ * does. That's handled elsewhere now, not here: fileProcessor.js runs
+ * server-side OCR (Tesseract) on attached PDFs/images as a supplement, and
+ * separately, Ox Alpha has real vision now (see chatStore.js's
+ * buildMultimodalContent) so it can actually look at an attached image
+ * directly. Neither of those touches this file - this one stays scoped to
+ * pdf-lib's structural operations (create/merge/split/rotate/watermark),
+ * not text extraction.
  *
  * Output files are written through pcFilesystemTool.js (PC backend,
  * PC_BRIDGE_ROOT) rather than duplicating file-writing logic here - this

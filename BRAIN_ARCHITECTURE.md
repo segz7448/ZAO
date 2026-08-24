@@ -8,8 +8,8 @@ a map of what got wired up and where).
 
 | Type | What it means | Does ZAO use it? |
 |---|---|---|
-| Dense transformer | One network, every parameter active every token | **Yes** - the model itself: Qwen3-Coder-30B-A3B-Instruct, served by the PC backend |
-| Mixture-of-Experts (MoE) | Many sub-networks, only some active per token | **No** - single 3B dense model, no expert routing; not planned |
+| Dense transformer | One network, every parameter active every token | **Unknown** - the model itself, Ox Alpha (relayed via OpenRouter), is an anonymous stealth-preview model with no published architecture; not confirmed either way, see `brainTypes.js`'s `ZAO_BRAIN_PROFILE` |
+| Mixture-of-Experts (MoE) | Many sub-networks, only some active per token | **Unknown**, same reason as above - not confirmed either way |
 | Multi-brain / ensemble | Separate roles (or models) for separate jobs | **Yes** - one model, many system-prompt "roles" (see `BRAIN_ROLES` in `backendBrain.js`) |
 | Hybrid symbolic-neural | A rules engine wrapped around neural judgment calls | **Yes** - `src/services/planning/` (deterministic graph/DB state machine) + narrow model calls inside it |
 

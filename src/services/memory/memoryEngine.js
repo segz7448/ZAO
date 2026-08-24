@@ -41,13 +41,15 @@ import {
   deactivateMemory,
 } from '../../db/database';
 
-// Extraction now runs on Qwen3-4B, the same local general-purpose model
+// Extraction now runs on Ox Alpha, the same one general-purpose model
 // used for normal chat (see src/config/localModels.js). There's no
-// separate "cheap model" concern anymore - it's a Model Studio call with
-// no per-call cost, so reusing Qwen3-4B rather than maintaining a second
-// resident model just for extraction is the simpler and more
-// memory-friendly choice on a phone. Gemma 4 (OpenRouter) is gone.
-const EXTRACTION_MODEL_KEY = MODEL_KEYS.QWEN3_CODER_30B_A3B;
+// separate "cheap model" concern - it's the same OpenRouter call the rest
+// of the app makes, so reusing it rather than maintaining a second
+// resident model just for extraction is the simpler choice. It does mean
+// extraction calls count against the same rate limit as everything else
+// (see backendClient.js's RATE_LIMIT_MAX_RETRIES) - there's no cheaper,
+// separate quota for it.
+const EXTRACTION_MODEL_KEY = MODEL_KEYS.OX_ALPHA;
 
 // Hard ceiling on how many active memories are kept at once. Once exceeded,
 // the oldest-updated memories are soft-deleted first - keeps the injected

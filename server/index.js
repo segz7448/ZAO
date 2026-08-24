@@ -488,6 +488,19 @@ app.post('/v1/chat/completions', (req, res) => {
   // activity log instead of this line.
   const liveToolCount = req.body?.tools?.length || 0;
   log(`Chat request (${(req.body?.messages || []).length} messages, live tool-choice: ${liveToolCount > 0 ? `yes, ${liveToolCount} tool(s) offered` : 'no (tool already decided upstream, if any)'})`);
+  // Diagnostic: confirm whether the multimodal (image_url/video_url)
+  // content part actually made it into this request body before it's
+  // relayed to OpenRouter. If this never logs "image" for a message you
+  // just sent with a photo attached, the bug is upstream on the phone
+  // (chatStore.js) - the image never left the device. If it DOES log
+  // "image" here but the model still claims it can't see anything, the
+  // bug is on stealth/ox-alpha's side (vision is reportedly inconsistent
+  // during its preview window as of Aug 2026), not in this codebase.
+  const lastMsg = (req.body?.messages || [])[(req.body?.messages || []).length - 1];
+  if (Array.isArray(lastMsg?.content)) {
+    const partTypes = lastMsg.content.map((p) => p.type).join(', ');
+    log(`Outbound last message is multimodal - parts: [${partTypes}]`);
+  }
   proxyToOpenRouter(req, res, '/chat/completions');
 });
 

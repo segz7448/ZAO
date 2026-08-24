@@ -247,35 +247,48 @@ async function processVideo(uri, name, mimeType) {
 }
 
 /**
- * Image handling: Ox Alpha (via OpenRouter) has real vision, so the model
- * actually sees the image now - fileProcessor returns the base64 bytes
- * alongside the extracted OCR text (server-side, free/open-source
- * Tesseract - see server/ocr.js), and chatStore.js's
- * buildMultimodalContent() attaches the image itself as an `image_url`
- * content part on the outbound message. OCR is kept running too, not
- * replaced - it's a cheap, reliable supplement for pulling exact text out
- * of a screenshot or document photo (useful for search/precision even
- * when vision alone would "read" it approximately), and it costs nothing
- * extra since it already ran server-side before the vision change.
+ * Image handling: Ox Alpha (via OpenRouter) has real vision, so the image
+ * is read as base64 and attached directly as an `image_url` content part
+ * (see chatStore.js's buildMultimodalContent()) - Ox Alpha reads it,
+ * reads any text in it, describes it, whatever the person's prompt asks
+ * for. No separate Tesseract OCR pass here anymore - it was a redundant
+ * second opinion now that the model itself sees the actual pixels, and
+ * removing it means one less thing that can silently fail or disagree
+ * with what the model reports seeing. (server/ocr.js's OCR route is
+ * still used as a scanned-PDF fallback below, where there's no vision
+ * path at all since PDFs aren't sent to the model as images.)
+ *
+ * If reading the file fails (bad/expired picker URI, permissions, etc.)
+ * this returns success:false with a clear error instead of silently
+ * sending a text-only message that claims an image was attached - see
+ * chatStore.js's handling of `result.success === false`.
  */
 async function processImage(uri, name, mimeType) {
   const categoryLabel = getCategoryLabel(FILE_CATEGORY.IMAGE);
-  const [ocrText, base64] = await Promise.all([
-    attemptOcr(uri, name),
-    FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 }).catch((err) => {
-      console.error('[FileProcessor] Reading image base64 failed:', err);
-      return null;
-    }),
-  ]);
-  return {
-    success: true,
-    category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true, isVideo: false,
-    text: ocrText,
-    base64,
-    mimeType: mimeType || 'image/jpeg',
-    truncated: false,
-    error: null,
-  };
+  try {
+    const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+    if (!base64) {
+      throw new Error('Empty read result');
+    }
+    return {
+      success: true,
+      category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true, isVideo: false,
+      text: null,
+      base64,
+      mimeType: mimeType || 'image/jpeg',
+      truncated: false,
+      error: null,
+    };
+  } catch (err) {
+    console.error('[FileProcessor] Reading image base64 failed:', err);
+    return {
+      success: false,
+      category: FILE_CATEGORY.IMAGE, categoryLabel, isImage: true, isVideo: false,
+      text: null, base64: null, mimeType: null,
+      truncated: false,
+      error: 'Could not read that image - try picking it again.',
+    };
+  }
 }
 
 /**

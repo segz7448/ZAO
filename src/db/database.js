@@ -909,7 +909,7 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
 
-    // Migration: filesystem_saf_uri added for the Filesystem tool (Qwen3
+    // Migration: filesystem_saf_uri added for the Filesystem tool (model
     // Coder's create/move/rename/delete/zip/extract plugin - see
     // src/services/filesystem/filesystemTool.js). Modern Android (10+)
     // blocks apps from touching arbitrary paths under
@@ -951,6 +951,36 @@ export async function initDatabase() {
       // Expected on any install that already has this column - not an error.
     }
 
+    // Migration: local_attachment_path / attachment_kind / attachment_name
+    // added so VIDEO and generic FILE attachments (zips, PDFs, docs, etc.)
+    // persist as a visible card in the chat bubble too, the same way
+    // local_image_path already does for photos - previously only images
+    // got a local copy + thumbnail; a video or file the person picked
+    // would vanish from the UI entirely after sending (only the injected
+    // "[The user attached a video...]" text note remained), which read as
+    // "my attachment disappeared" even though it WAS sent to the model.
+    // local_attachment_path stores a local file:// copy (same
+    // copyAttachmentLocally() used for images, see chatStore.js) so it
+    // survives app restarts the same way image bubbles do.
+    // attachment_kind is 'video' | 'file' (images keep using
+    // local_image_path + isImage, unchanged). attachment_name is the
+    // original filename, for the file card's label.
+    try {
+      await db.execAsync(`ALTER TABLE messages ADD COLUMN local_attachment_path TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+    try {
+      await db.execAsync(`ALTER TABLE messages ADD COLUMN attachment_kind TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+    try {
+      await db.execAsync(`ALTER TABLE messages ADD COLUMN attachment_name TEXT;`);
+    } catch (migrationErr) {
+      // Expected on any install that already has this column - not an error.
+    }
+
     // Migration: backend connection settings, added when the backend moved
     // from on-device Termux to running on a real server (see
     // src/services/backend/backendClient.js and server/ in the repo root).
@@ -972,7 +1002,7 @@ export async function initDatabase() {
     } catch (migrationErr) {
       // Expected on any install that already has this column - not an error.
     }
-    // backend_auth_token: the Qwen3-Coder-30B-A3B-Instruct model API key,
+    // backend_auth_token: gates the VM itself, not the model provider key -
     // sent as `Authorization: Bearer <token>` on every request to the VM.
     // Must match AUTH_TOKEN in the VM's server/config.js exactly.
     try {
@@ -1267,9 +1297,9 @@ export async function forkConversation(sourceId, newId, { title, upToCreatedAt }
     for (const m of messages) {
       await db.runAsync(
         `INSERT INTO messages
-          (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [`${newId}_${m.id}`, newId, m.role, m.content, m.provider, m.model, m.model_family, m.token_count, m.created_at, m.is_error, m.local_image_path]
+          (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path, local_attachment_path, attachment_kind, attachment_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [`${newId}_${m.id}`, newId, m.role, m.content, m.provider, m.model, m.model_family, m.token_count, m.created_at, m.is_error, m.local_image_path, m.local_attachment_path, m.attachment_kind, m.attachment_name]
       );
     }
 
@@ -1292,6 +1322,9 @@ export async function addMessage(message) {
       provider = null, model = null, model_family = null,
       token_count = 0, is_error = false,
       local_image_path = null,
+      local_attachment_path = null,
+      attachment_kind = null,
+      attachment_name = null,
       plan_id = null,
       reasoning_type = null,
       reasoning_trace = null,
@@ -1322,9 +1355,9 @@ export async function addMessage(message) {
 
     await db.runAsync(
       `INSERT INTO messages
-        (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path, plan_id, reasoning_type, reasoning_trace, clock_data, pending_confirmation, artifacts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, conversation_id, role, content, provider, model, model_family, token_count, now, is_error ? 1 : 0, local_image_path, plan_id, reasoning_type, reasoning_trace_json, clock_data, pending_confirmation_json, artifacts_json]
+        (id, conversation_id, role, content, provider, model, model_family, token_count, created_at, is_error, local_image_path, local_attachment_path, attachment_kind, attachment_name, plan_id, reasoning_type, reasoning_trace, clock_data, pending_confirmation, artifacts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, conversation_id, role, content, provider, model, model_family, token_count, now, is_error ? 1 : 0, local_image_path, local_attachment_path, attachment_kind, attachment_name, plan_id, reasoning_type, reasoning_trace_json, clock_data, pending_confirmation_json, artifacts_json]
     );
 
     await db.runAsync(

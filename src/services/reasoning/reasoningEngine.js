@@ -43,7 +43,7 @@ import * as backendClient from '../backend/backendClient';
 import { MODEL_KEYS } from '../../config/localModels';
 import { REASONING_STRATEGIES } from './reasoningTypes';
 import { decideReasoningStrategy } from './reasoningRouter';
-import { runChainOfThought } from './chainOfThought';
+import { runChainOfThought, withSystemPrompt } from './chainOfThought';
 import { runTreeOfThought } from './treeOfThought';
 import { runDeductive, runInductive, runAbductive, runAnalogical } from './inferenceModes';
 import { runSelfReflection } from './selfReflection';
@@ -57,6 +57,13 @@ import { runSelfReflection } from './selfReflection';
 // there's no single "the tokens arriving right now ARE the answer"
 // stream to expose - streaming their first draft call would show
 // intermediate reasoning, not the reply.
+// Grounding for the plain-completion fallback below - see that call
+// site's comment for why this exists. Kept short and boundary-focused
+// (what NOT to do, and where real file creation actually lives) rather
+// than a full behavior spec, since this only fires on an already-
+// degraded path and shouldn't add much latency risk of its own.
+const PLAIN_FALLBACK_SYSTEM_PROMPT = `You are ZAO, an AI assistant app. In this chat mode you can only produce a text reply - you cannot create, write, or save an actual file, folder, or zip archive, and there is no artifact/canvas system that renders special tags. Never invent or output pseudo-tags like <artifact>, <file>, or similar - anything you output here is shown to the person as plain chat text exactly as written, tags included. If the person's request needs a real file created (a script saved to disk, a zipped folder, a PDF/Word/Excel/PowerPoint document), say plainly that this reply can't do that and that resending the request should let ZAO's file tools handle it directly - don't simulate the result.`;
+
 const STRATEGY_RUNNERS = {
   [REASONING_STRATEGIES.CHAIN_OF_THOUGHT]: (history, messageText, onToken, onThinkingToken) => runChainOfThought(history, onToken, onThinkingToken),
   [REASONING_STRATEGIES.TREE_OF_THOUGHT]: (history, messageText) => runTreeOfThought(history, messageText),
@@ -162,7 +169,25 @@ export async function runReasoningChat(history, messageText, onToken, onThinking
     // for what might just be a JSON-parsing hiccup on a small model. This
     // is a raw completion with no <thinking>/<answer> wrapping, so unlike
     // chainOfThought.js it can stream straight through with no tag parsing.
-    const plain = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, { maxTokens: 1024, temperature: 0.7, onToken });
+    //
+    // PLAIN_FALLBACK_SYSTEM_PROMPT below matters here specifically: this
+    // call used to go out with NO system prompt at all, so an ungrounded
+    // model would fall back on whatever formatting habits it picked up in
+    // training - including other assistants' file/artifact tag syntax
+    // (e.g. "<answer><artifact ...>") that ZAO has no parser for anywhere.
+    // That text would just print as literal characters in the chat bubble
+    // instead of doing anything. This reached the person in production:
+    // it's what happened when a should-be-tool-call request ("code me a
+    // 70-page python file... present me the artifact") got silently
+    // downgraded to plain chat and the model had nothing telling it what
+    // ZAO can and can't actually do. The one real artifact system ZAO has
+    // is FileArtifactCard.js, populated only by messages.artifacts from an
+    // actual tool call (pc_files/pc_zip/docxTool/etc. in
+    // toolOrchestrator.js) writing a real file - never from parsing tags
+    // out of chat text - so the system prompt tells the model that
+    // directly instead of leaving it to guess.
+    const augmentedHistory = withSystemPrompt(history, PLAIN_FALLBACK_SYSTEM_PROMPT);
+    const plain = await backendClient.sendMessage(augmentedHistory, MODEL_KEYS.OX_ALPHA, { maxTokens: 1024, temperature: 0.7, onToken });
     if (!plain.success) {
       return { success: false, content: '', reasoningType: null, reasoningTrace: null, error: plain.error };
     }

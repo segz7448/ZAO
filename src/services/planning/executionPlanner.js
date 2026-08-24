@@ -142,7 +142,7 @@ async function repairMissingStepContent(step, unit, task) {
 
   let modelResult;
   try {
-    modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    modelResult = await modelClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
       maxTokens: 3000,
       temperature: 0.15,
     });
@@ -181,7 +181,7 @@ async function expandTaskToRawSteps(task) {
       { role: 'user', content: promptContent },
     ];
 
-    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
       maxTokens: 2000,
       temperature: 0.2,
     });

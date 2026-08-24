@@ -42,7 +42,7 @@ export async function runSelfReflection(messageText, draftAnswer) {
     { role: 'user', content: `Original request: ${messageText}\n\nDraft answer: ${draftAnswer}` },
   ];
 
-  const critiqueResult = await backendClient.sendMessage(critiqueHistory, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const critiqueResult = await backendClient.sendMessage(critiqueHistory, MODEL_KEYS.OX_ALPHA, {
     maxTokens: 400,
     temperature: 0.2,
   });
@@ -66,7 +66,7 @@ export async function runSelfReflection(messageText, draftAnswer) {
     { role: 'user', content: `Original request: ${messageText}\n\nDraft answer: ${draftAnswer}\n\nIssues to fix: ${issues.join(' | ')}` },
   ];
 
-  const reviseResult = await backendClient.sendMessage(reviseHistory, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const reviseResult = await backendClient.sendMessage(reviseHistory, MODEL_KEYS.OX_ALPHA, {
     maxTokens: 1024,
     temperature: 0.5,
   });

@@ -2,7 +2,7 @@
   "name": "zao-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Alibaba Cloud VM backend for ZAO - relays chat completions to Alibaba Model Studio (qwen3-coder-30b-a3b-instruct) over HTTPS, plus a Playwright-driven browser agent streamed live to the phone.",
+  "description": "Alibaba Cloud VM backend for ZAO - relays chat completions to OpenRouter (currently stealth/ox-alpha) over HTTPS, plus a Playwright-driven browser agent streamed live to the phone.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

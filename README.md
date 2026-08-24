@@ -1,36 +1,46 @@
 # ZAO
 
 An Android chat app whose "brain" runs on a dedicated Alibaba Cloud VM,
-not the phone or a third-party cloud API. One model - **Qwen3 Coder 30B
-A3B Instruct**, served via Alibaba Cloud's Model Studio (DashScope) API
-and relayed through a small Node backend on the VM (`/server`) - handles
-chat, coding, reasoning, and tool-calling. The phone talks to the VM over
-its fixed public IP; the VM in turn talks to Model Studio over HTTPS -
-there's no local model weights or GPU/CPU inference on the VM itself.
-Beyond chat, ZAO acts as an on-device agent: it can browse the web (via a
-Playwright agent also running on the VM), push code to GitHub, run real
-shell commands on the VM, and create/read PDF/Word/Excel/PowerPoint files
-- all invoked automatically by the model deciding what a request needs,
-not through dedicated buttons.
+not the phone or a third-party cloud API. One model - **Ox Alpha**, an
+anonymous stealth-preview model served via OpenRouter and relayed through
+a small Node backend on the VM (`/server`) - handles chat, coding,
+reasoning, tool-calling, vision, and video understanding. The phone talks
+to the VM over its fixed public IP; the VM in turn talks to OpenRouter
+over HTTPS - there's no local model weights or GPU/CPU inference on the
+VM itself, and no Alibaba dependency left in the model-serving path (the
+VM's infrastructure is still hosted on Alibaba Cloud - that part hasn't
+changed). Beyond chat, ZAO acts as an on-device agent: it can browse the
+web (via a Playwright agent also running on the VM), push code to GitHub,
+run real shell commands on the VM, and create/read PDF/Word/Excel/
+PowerPoint files - all invoked automatically by the model deciding what a
+request needs, not through dedicated buttons.
 
-**No vision, no audio, no image generation.** There is exactly one model
-and it's text-only. Attached images still show up as chat bubbles, but
-the model can't see them - only whatever text OCR pulls out of them (see
-"File handling" below). There's no speech-to-text, no text-to-speech, no
-voice mode, and no image generation anywhere in the app.
+**Vision and video understanding, no audio, no image generation.** Ox
+Alpha has real vision and video input - attached images and video are
+sent directly to the model, not just described via OCR (see "File
+handling" below for how OCR still supplements this). There's no
+speech-to-text, no text-to-speech, no voice mode, and no image generation
+anywhere in the app.
 
 ## The model
 
 | Model | Where it runs | Used for |
 |---|---|---|
-| **Qwen3 Coder 30B A3B Instruct** | Alibaba Cloud Model Studio, relayed via your VM | Everything: chat, coding, reasoning, tool-calling/routing |
+| **Ox Alpha** | OpenRouter, relayed via your VM | Everything: chat, coding, reasoning, tool-calling/routing, vision, video understanding |
 
 That's it - one model, no fallback chain, no task-based switching, no
 on-device weights on the phone. `src/config/localModels.js` keeps a single
-`MODEL_KEYS.QWEN25_CODER_3B` key purely so call sites that predate this
+`MODEL_KEYS.OX_ALPHA` key purely so call sites that predate this
 (`toolOrchestrator.js`, `memoryEngine.js`) didn't need rewriting - the key
-itself is cosmetic; the backend only ever runs whatever `MODEL_PATH` in
-`server/config.js` points to.
+itself is cosmetic; the backend only ever runs whatever `ZAO_MODEL_NAME`
+in `server/config.js` points to (currently `stealth/ox-alpha`).
+
+Ox Alpha is a free-preview stealth model as of writing - it's rate-limited
+by OpenRouter under real usage (`backendClient.js` retries a 429 a few
+times before giving up - see its `RATE_LIMIT_MAX_RETRIES` comment), and
+isn't guaranteed to stay free or available under this name indefinitely.
+If it's swapped for something else, `ZAO_MODEL_NAME` in
+`server/config.js` is the only thing that needs to change.
 
 ## Architecture
 
@@ -129,8 +139,8 @@ src/
   theme/                        tokens.js (light+dark palettes) + useTheme.js.
 
 server/                        Alibaba Cloud VM backend (Node/Express) - see server/README.md.
-  index.js                       Relays /v1/chat/completions to Alibaba
-                              Model Studio, health check + internet-
+  index.js                       Relays /v1/chat/completions to
+                              OpenRouter, health check + internet-
                               reachability self-check, rate limiting, auth.
   terminal.js                    /terminal/run - real bash/Python execution.
   ocr.js + scripts/ocr_extract.py  /ocr/extract - free, open-source OCR
@@ -156,16 +166,18 @@ For the deeper architectural picture (what "brain," "reasoning," and
 
 ## Setup
 
-**VM backend** (relays chat to Alibaba Model Studio - see
+**VM backend** (relays chat to OpenRouter - see
 `server/README.md` for full detail):
 ```
 cd server
 npm install
-# set DASHSCOPE_API_KEY and ZAO_AUTH_TOKEN (env vars, or edit config.js)
+# set ZAO_AUTH_TOKEN (env var, or edit config.js) to a real secret
+# get an OpenRouter key at openrouter.ai/keys - enter it in the app's
+# Settings > Server Connection > OpenRouter API key instead of here
 ```
 Run `./start.sh` (or set it up as a systemd service - see that file's own
 header) each time before using the app - it starts the Node server, which
-relays requests straight to Alibaba Model Studio. The VM is 24/7, so once
+relays requests straight to OpenRouter. The VM is 24/7, so once
 running there's nothing else to keep restarting.
 
 **Phone app**:

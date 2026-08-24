@@ -89,7 +89,7 @@ export async function classifyIntent(messageText, options = {}) {
   const MAX_ATTEMPTS = 3;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+      const result = await backendClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
         maxTokens: 20,
         temperature: 0,
       });
@@ -106,16 +106,26 @@ export async function classifyIntent(messageText, options = {}) {
     }
   }
 
-  // Every attempt failed (backend unreachable for the whole retry
-  // window, or the model never returned parseable JSON) - degrade to
-  // 'general' rather than guessing from keywords. A person's actual
-  // request not getting acted on because classification genuinely
-  // failed is a real, visible problem (the reply will look like plain
-  // chat instead of a completed action) that surfaces the underlying
-  // issue - the PC backend being unreachable - rather than a keyword
-  // fallback quietly papering over it and creating a DIFFERENT wrong
-  // answer instead.
-  return 'general';
+  // Every model-based attempt failed (backend unreachable, or every
+  // retry inside backendClient.sendMessage() ate a 429 for the whole
+  // window - the OpenRouter free/stealth Ox Alpha tier makes this a
+  // real, regular occurrence, not a rare edge case). Previously this
+  // just hardcoded 'general' here, which silently sends an obvious
+  // write request ("create a folder and zip it", "make me a PDF") into
+  // plain chat with zero indication anything was skipped - the model
+  // then either refuses (no tool access in chat mode) or, worse,
+  // hallucinates fake completion syntax it was never told to use (see
+  // reasoningEngine.js's plain-completion system-prompt fix).
+  //
+  // classifyTaskByKeyword (localModels.js's classifyTask) was already
+  // imported for exactly this case per this file's header comment, but
+  // was never actually called - restoring that: a keyword match is a
+  // strictly better guess than an unconditional 'general' when the
+  // real classifier couldn't run at all, and this only ever fires once
+  // classification has already exhausted every attempt, so it doesn't
+  // reintroduce the brittleness the model-based classifier replaced
+  // keyword-matching for in the normal case.
+  return classifyTaskByKeyword(text);
 }
 
 function safeParseIntentJson(rawContent) {

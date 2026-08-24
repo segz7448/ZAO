@@ -4,8 +4,10 @@
 #
 #  Run this to start the Node backend. No local model, no
 #  llama-server child process - this just relays
-#  /v1/chat/completions to Alibaba Cloud's Model Studio
-#  (DashScope) API, which hosts qwen3-coder-30b-a3b-instruct.
+#  /v1/chat/completions to OpenRouter's API, currently pointed
+#  at stealth/ox-alpha (see server/config.js's header comment
+#  for the full provider history and why the key mostly isn't
+#  set here anymore).
 #  The VM is 24/7, so once this is running - or better yet,
 #  installed as a systemd service (see the bottom of this file)
 #  - the phone app just connects straight to the VM's fixed IP.
@@ -13,12 +15,18 @@
 #
 #  FIRST-TIME SETUP (only needed once):
 #    1. npm install                     (run in this folder)
-#    2. Set DASHSCOPE_API_KEY (env var, or edit config.js) to
-#       your Alibaba Cloud Model Studio API key.
-#    3. Change AUTH_TOKEN in config.js (or set the ZAO_AUTH_TOKEN
+#    2. Change AUTH_TOKEN in config.js (or set the ZAO_AUTH_TOKEN
 #       env var) to a real secret, then enter that same value in
 #       the app's Settings > Server Connection > Model API key
 #       field.
+#    3. Get an OpenRouter API key from https://openrouter.ai/keys.
+#       You don't need to set it here - the app sends it per
+#       request from Settings > Server Connection > OpenRouter
+#       API key (see config.js's header comment for why). Setting
+#       OPENROUTER_API_KEY as an env var here is only needed as a
+#       fallback for server-initiated calls (browser agent,
+#       background sessions) before the app has sent a key at
+#       least once, or if you want to test this VM directly.
 #    4. Open the VM's firewall / Alibaba Cloud Security Group for
 #       the PORT you're using (8000 by default) so the phone can
 #       actually reach it from outside the VM.

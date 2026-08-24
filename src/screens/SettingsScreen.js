@@ -355,6 +355,25 @@ function ModelApiKeySection({ preferences, theme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedToken]);
 
+  const runCheck = async (tokenToCheck) => {
+    if (!vmUrl) return null;
+    const result = await testBackendConnection({ url: vmUrl, token: tokenToCheck });
+    setStatus(result);
+    setChecked(true);
+    return result;
+  };
+
+  // Re-verify automatically whenever Settings mounts (or the saved token/VM
+  // URL changes) if a token is already saved - same pattern
+  // VmConnectionSection already used. Without this, a token saved in a
+  // PREVIOUS session shows "Not checked" every time you reopen Settings,
+  // even though it's a real, working, already-persisted value - looks
+  // like it silently reset when it never did.
+  useEffect(() => {
+    if (savedToken && vmUrl) runCheck(savedToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedToken, vmUrl]);
+
   const isDirty = tokenValue.trim() !== savedToken;
 
   const handleTestAndSave = async () => {
@@ -365,9 +384,7 @@ function ModelApiKeySection({ preferences, theme }) {
       return;
     }
     setTesting(true);
-    const result = await testBackendConnection({ url: vmUrl, token });
-    setStatus(result);
-    setChecked(true);
+    const result = await runCheck(token);
     if (result.reachable && result.authValid) {
       await setBackendAuthToken(token);
       Alert.alert('Connected', `API key verified against ${result.model || ACTIVE_MODEL.label}.`);
@@ -379,9 +396,14 @@ function ModelApiKeySection({ preferences, theme }) {
     setTesting(false);
   };
 
-  const pillColor = status.authValid ? '#DCFCE7' : status.authValid === false ? '#FEE2E2' : '#FEF3C7';
-  const pillTextColor = status.authValid ? '#166534' : status.authValid === false ? '#991B1B' : '#92400E';
-  const pillLabel = !checked ? 'Not checked' : status.authValid ? 'Verified' : status.authValid === false ? 'Invalid' : 'Unknown';
+  // While the field has been edited away from the saved value, the LAST
+  // check result no longer describes what's actually typed - show
+  // "Unsaved" rather than a stale Verified/Invalid pill from a different
+  // string. Once Test & Save runs again (or the edit is reverted back to
+  // savedToken), this clears and the real result shows again.
+  const pillColor = isDirty ? '#FEF3C7' : status.authValid ? '#DCFCE7' : status.authValid === false ? '#FEE2E2' : '#FEF3C7';
+  const pillTextColor = isDirty ? '#92400E' : status.authValid ? '#166534' : status.authValid === false ? '#991B1B' : '#92400E';
+  const pillLabel = isDirty ? 'Unsaved' : !checked ? 'Not checked' : status.authValid ? 'Verified' : status.authValid === false ? 'Invalid' : 'Unknown';
 
   return (
     <View style={styles.keyRow}>
@@ -426,6 +448,11 @@ function ModelApiKeySection({ preferences, theme }) {
             ? <ActivityIndicator size="small" color={theme.textInverse} />
             : <Text style={[styles.keyPrimaryBtnText, { color: theme.textInverse }]}>Test & Save</Text>}
         </TouchableOpacity>
+        {savedToken && !isDirty && (
+          <TouchableOpacity style={styles.keySecondaryBtn} onPress={() => runCheck(savedToken)} disabled={testing}>
+            <Text style={[styles.keySecondaryBtnText, { color: theme.textSecondary }]}>Check again</Text>
+          </TouchableOpacity>
+        )}
       </View>
       {isDirty && (
         <Text style={[styles.helperText, { color: theme.textTertiary, marginTop: 6, fontSize: 12 }]}>
@@ -462,6 +489,27 @@ function OpenRouterApiKeySection({ preferences, theme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey]);
 
+  const runCheck = async (keyToCheck) => {
+    if (!vmUrl) return null;
+    const result = await testOpenRouterKey({ url: vmUrl, vmToken, openrouterKey: keyToCheck });
+    setStatus(result);
+    setChecked(true);
+    return result;
+  };
+
+  // Re-verify automatically whenever Settings mounts (or the saved key/VM
+  // URL changes) if a key is already saved - same reasoning as
+  // ModelApiKeySection's identical effect just above: without this, a key
+  // saved in a PREVIOUS session shows "Not checked" every time you reopen
+  // Settings, even though it's the real, working, already-persisted key -
+  // looks like it silently reset when it never did. Test & Save + this
+  // effect together are what make it "permanently connected until you
+  // change it," per how this screen is supposed to behave.
+  useEffect(() => {
+    if (savedKey && vmUrl) runCheck(savedKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey, vmUrl]);
+
   const isDirty = keyValue.trim() !== savedKey;
 
   const handleTestAndSave = async () => {
@@ -472,9 +520,7 @@ function OpenRouterApiKeySection({ preferences, theme }) {
       return;
     }
     setTesting(true);
-    const result = await testOpenRouterKey({ url: vmUrl, vmToken, openrouterKey: key });
-    setStatus(result);
-    setChecked(true);
+    const result = await runCheck(key);
     if (result.valid) {
       await setOpenrouterApiKey(key);
       const creditsNote = typeof result.limitRemaining === 'number' ? ` · ${result.limitRemaining} credits remaining` : '';
@@ -487,9 +533,12 @@ function OpenRouterApiKeySection({ preferences, theme }) {
     setTesting(false);
   };
 
-  const pillColor = status.valid ? '#DCFCE7' : status.valid === false ? '#FEE2E2' : '#FEF3C7';
-  const pillTextColor = status.valid ? '#166534' : status.valid === false ? '#991B1B' : '#92400E';
-  const pillLabel = !checked ? 'Not checked' : status.valid ? 'Verified' : status.valid === false ? 'Invalid' : 'Unknown';
+  // Same isDirty-aware pill logic as ModelApiKeySection above - a value
+  // that's been edited away from savedKey shows "Unsaved," not a stale
+  // Verified/Invalid result that described a different string.
+  const pillColor = isDirty ? '#FEF3C7' : status.valid ? '#DCFCE7' : status.valid === false ? '#FEE2E2' : '#FEF3C7';
+  const pillTextColor = isDirty ? '#92400E' : status.valid ? '#166534' : status.valid === false ? '#991B1B' : '#92400E';
+  const pillLabel = isDirty ? 'Unsaved' : !checked ? 'Not checked' : status.valid ? 'Verified' : status.valid === false ? 'Invalid' : 'Unknown';
 
   return (
     <View style={styles.keyRow}>
@@ -534,6 +583,11 @@ function OpenRouterApiKeySection({ preferences, theme }) {
             ? <ActivityIndicator size="small" color={theme.textInverse} />
             : <Text style={[styles.keyPrimaryBtnText, { color: theme.textInverse }]}>Test & Save</Text>}
         </TouchableOpacity>
+        {savedKey && !isDirty && (
+          <TouchableOpacity style={styles.keySecondaryBtn} onPress={() => runCheck(savedKey)} disabled={testing}>
+            <Text style={[styles.keySecondaryBtnText, { color: theme.textSecondary }]}>Check again</Text>
+          </TouchableOpacity>
+        )}
       </View>
       {isDirty && (
         <Text style={[styles.helperText, { color: theme.textTertiary, marginTop: 6, fontSize: 12 }]}>
@@ -1601,7 +1655,7 @@ export default function SettingsScreen({ onOpenSidebar }) {
       <View style={[styles.card, { backgroundColor: theme.surface }]}>
         <BrowserAgentSection preferences={preferences} theme={theme} />
         <Text style={[styles.helperText, { color: theme.textTertiary }]}>
-          Lets ZAO actually browse the live web — search, open pages, log in, click, fill forms, and read content — using a real browser on the VM, driven by qwen3-coder-30b-a3b-instruct acting as an agent.
+          Lets ZAO actually browse the live web — search, open pages, log in, click, fill forms, and read content — using a real browser on the VM, driven by Ox Alpha (via OpenRouter) acting as an agent.
         </Text>
       </View>
 

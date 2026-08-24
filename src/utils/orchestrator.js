@@ -2,16 +2,20 @@
  * ZAO - Orchestrator
  *
  * The single entry point the UI calls to "send a message and get a
- * response." Everything text-based goes to the one Qwen3-Coder-30B-A3B-Instruct model
+ * response." Everything text-based goes to the one Ox Alpha model
  * served by the PC backend (src/services/backend/backendClient.js) -
  * no manual mode, no fallback chain, no per-task model switching.
  *
- * There is no image generation, image editing, or vision/OCR anymore
- * (Gemini removed per product decision) - an attached image is passed
- * through as a plain attachment (see chatStore.js/AttachmentSheet) but is
- * not "read" by the model; camera/gallery/file attachments still work for
- * sending files INTO tool tasks (e.g. "zip this file", "push this to
- * GitHub"), just not for visual understanding.
+ * Images and video ARE understood by the model: Ox Alpha has native
+ * vision/video input, so an attached image/video is base64-encoded and
+ * sent as an image_url/video_url content part directly on the outbound
+ * message (see chatStore.js's buildMultimodalContent() and
+ * fileProcessor.js's processImage/processVideo) - no separate OCR or
+ * vision model, no fallback chain, just Ox Alpha reading the actual
+ * pixels. (There is still no image GENERATION/editing - only input.)
+ * Camera/gallery/file attachments also still work for sending files INTO
+ * tool tasks (e.g. "zip this file", "push this to GitHub") the same as
+ * before.
  *
  * Contract: sendMessageOrchestrated() NEVER throws. It always resolves to a
  * result object. The UI only needs to handle one shape.
@@ -334,7 +338,7 @@ async function generateResearchAngles(topic, modelKey) {
 
 async function runDeepResearchHandler(effectiveMessage, params) {
   const { history, onToken, onPlanProgress } = params;
-  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.QWEN3_CODER_30B_A3B;
+  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.OX_ALPHA;
 
   onPlanProgress?.({ stage: 'planning_searches', message: 'Breaking this into research angles\u2026' });
   const angles = await generateResearchAngles(effectiveMessage, modelKey);
@@ -464,7 +468,7 @@ async function runQuickLookupHandler(effectiveMessage, params) {
     ...history,
   ];
 
-  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.QWEN3_CODER_30B_A3B;
+  const modelKey = getModelKeyForTask ? getModelKeyForTask() : MODEL_KEYS.OX_ALPHA;
   const completion = await backendClient.sendMessage(synthesisHistory, modelKey, { temperature: 0.3 });
 
   if (!completion.success || !completion.data?.content) {
@@ -566,7 +570,7 @@ async function runBrowsingHandler(effectiveMessage, params) {
 }
 
 // ========================================================================
-// NORMAL CHAT COMPLETION - the one Qwen3-Coder-30B-A3B-Instruct model, served by the
+// NORMAL CHAT COMPLETION - the one Ox Alpha model, served via OpenRouter by the
 // PC backend, put to work through the REASONING ENGINE
 // (src/services/reasoning/reasoningEngine.js) - a chosen reasoning
 // strategy (chain-of-thought by default; tree-of-thought/deductive/

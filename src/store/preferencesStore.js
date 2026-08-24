@@ -151,7 +151,9 @@ export const usePreferencesStore = create((set, get) => ({
   },
 
   /**
-   * API key for the qwen3-coder-30b-a3b-instruct model, sent as
+   * The VM's own shared secret (labeled "Model API key" in Settings for
+   * historical reasons - it gates the VM itself, not the model provider;
+   * see setOpenrouterApiKey() below for that one), sent as
    * `Authorization: Bearer <token>` on every request to the VM - must
    * match AUTH_TOKEN in the VM's server/config.js. Stored as a plain
    * preference rather than the secure api_keys table: it's a self-issued

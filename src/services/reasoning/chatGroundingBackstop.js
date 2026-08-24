@@ -178,7 +178,7 @@ export async function getGroundingNote(messageText) {
       { role: 'system', content: BACKSTOP_SYSTEM_PROMPT },
       { role: 'user', content: text },
     ];
-    const result = await backendClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    const result = await backendClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
       maxTokens: 60,
       temperature: 0,
     });

@@ -3,7 +3,7 @@
  *
  * Runs on the Alibaba Cloud VM (server/, src/services/backend/backendClient.js) - this
  * is where every actual model call happens. There is exactly one model
- * underneath (Qwen3-Coder-30B-A3B-Instruct, MIXTURE_OF_EXPERTS - see brainTypes.js),
+ * underneath (Ox Alpha - architecture undisclosed, see brainTypes.js),
  * but this app puts it to work as a MULTI_BRAIN_ENSEMBLE: several
  * distinct ROLES, each its own system prompt/temperature/job, all
  * hitting that same model. This file is the single place that names

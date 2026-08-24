@@ -69,7 +69,7 @@ export async function planGoal(goalText, context = {}) {
     { role: 'user', content: goalText },
   ];
 
-  const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
     maxTokens: 512,
     temperature: 0.2,
   });

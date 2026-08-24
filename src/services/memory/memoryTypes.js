@@ -26,8 +26,8 @@ export const MEMORY_TYPES = Object.freeze({
     label: 'Parametric memory',
     definition: 'Knowledge baked into the model\'s weights during training - not retrieved, not written to, just... known, the same way a person "just knows" their native language\'s grammar without consulting a rulebook.',
     persistence: 'Forever (until the model is retrained/fine-tuned) - nothing at runtime changes it.',
-    zaoImplementation: 'The Qwen model\'s own training - runs on Alibaba Cloud Model Studio (see server/ and src/services/backend/backendClient.js). Nothing in this app writes to it; every other memory type below exists BECAUSE this one is fixed and can\'t learn anything new about the person at runtime.',
-    location: 'Alibaba Cloud Model Studio (hosted, not local to this VM)',
+    zaoImplementation: 'Ox Alpha\'s own training - served via OpenRouter and relayed by the Alibaba Cloud VM (see server/ and src/services/backend/backendClient.js). Nothing in this app writes to it; every other memory type below exists BECAUSE this one is fixed and can\'t learn anything new about the person at runtime.',
+    location: 'OpenRouter (hosted, not local to the VM) - the VM only relays the request; see server/config.js\'s header comment for the full provider history.',
   },
 
   CONTEXT_WINDOW: {

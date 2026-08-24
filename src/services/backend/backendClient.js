@@ -3,17 +3,24 @@
  *
  * The backend runs on a dedicated, always-on Alibaba Cloud VM (see
  * /server in the repo root) instead of on-device or on a person's PC -
- * the VM hosts qwen3-coder-30b-a3b-instruct plus the Terminal/
- * Filesystem/Office tools against its own Linux filesystem.
+ * the VM relays chat completions to OpenRouter (currently stealth/
+ * ox-alpha, see server/config.js's header comment) and also hosts the
+ * Terminal/Filesystem/Office tools directly against its own Linux
+ * filesystem.
  *
  * CONNECTION: a single fixed address, configured once in Settings >
  * Server Connection:
  *   - VM IP (or IP:port), e.g. http://123.45.67.89:8000 - the VM is
  *     24/7, so there's no LAN/Remote toggle and nothing that rotates.
  * Every request carries an Authorization: Bearer <token> header - the
- * model API key, matching AUTH_TOKEN in the VM's server/config.js -
- * since the backend is reachable over the public internet, not just
- * loopback.
+ * VM's own shared secret (labeled "Model API key" in Settings for
+ * historical reasons, but it's not the model provider's key - see
+ * OPENROUTER_API_KEY below), matching AUTH_TOKEN in the VM's
+ * server/config.js - since the backend is reachable over the public
+ * internet, not just loopback. Separately, an `X-OpenRouter-Key` header
+ * (see authHeaders() below) carries the person's own OpenRouter key,
+ * entered in Settings > Server Connection > OpenRouter API key - that's
+ * the one that actually reaches the model.
  *
  * CONTRACT: sendMessage() keeps the same shape used throughout the app -
  * { success, data: { content, toolCalls, raw }, error } - so
@@ -252,8 +259,8 @@ function toBackendMessage(message) {
  *   multi-model signature; ignored, since there is only one model now.
  * @param {object} options - { maxTokens, temperature, tools, toolChoice, onToken }
  * @param {function} [options.onToken] - if provided (and no `tools` are requested -
- *   see note below), the request streams via SSE (server/index.js's proxyToDashScope
- *   already pipes Model Studio's response through as-is, so this only needed the
+ *   see note below), the request streams via SSE (server/index.js's proxyToOpenRouter
+ *   already pipes OpenRouter's response through as-is, so this only needed the
  *   client side wired up - see sseClient.js's header for why XHR, not fetch).
  *   Called with the full accumulated content string after every chunk, so callers
  *   can just do `setState(text)` rather than concatenating themselves. The
@@ -305,58 +312,111 @@ export async function sendMessage(history, modelKey, options = {}) {
     return sendMessageStreaming(baseUrl, token, body, options.onToken);
   }
 
-  try {
-    const response = await withTimeout(
-      fetch(`${baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
-        body: JSON.stringify(body),
-      }),
-      COMPLETION_TIMEOUT_MS,
-      `Backend took longer than ${COMPLETION_TIMEOUT_MS / 1000}s to respond. Check that the server is still running on the VM.`
-    );
+  return sendChatCompletionWithRetry(baseUrl, token, body);
+}
 
-    if (response.status === 401) {
-      return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token. Check it matches AUTH_TOKEN in the PC\'s server/config.js.' } };
-    }
+// ---------------------------------------------------------------------------
+// 429 (rate limit) retry - added when the app moved to OpenRouter's free
+// `stealth/ox-alpha` preview model, which has real, tight rate limits
+// (unlike the old Alibaba Model Studio setup this never needed). A single
+// user turn can fire several model calls before a reply even starts
+// (intentClassifier.js, reasoningRouter.js's strategy classifier, THEN the
+// actual reasoning call) - without a retry, one 429 on any of those silently
+// degrades classification to 'general'/plain-chat (see intentClassifier.js's
+// own comment on why it degrades rather than guessing), which is exactly
+// what was cutting tool calls off before they ever got a chance to run.
+// Retrying the SAME call a couple of times, honoring OpenRouter's
+// Retry-After header when present, gives a transient rate-limit blip a real
+// chance to clear before the call gives up and degrades - same idea as
+// intentClassifier.js's own MAX_ATTEMPTS retry loop, just one layer lower
+// so every caller (classifier, router, reasoning, tool-calling) benefits
+// without each needing its own retry logic.
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_MAX_RETRIES = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 1500;
 
-    if (response.status === 503) {
-      return { success: false, data: null, error: { type: ERROR_TYPES.MODEL_LOADING, message: 'The model is still loading on the backend. Try again in a moment.' } };
-    }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Backend returned an error (${response.status}): ${text.slice(0, 200)}` } };
-    }
-
-    const result = await response.json();
-    const choice = result?.choices?.[0];
-    const toolCalls = choice?.message?.tool_calls?.length ? choice.message.tool_calls : null;
-    const responseText = choice?.message?.content || null;
-
-    if (!responseText && !toolCalls) {
-      return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: 'No content from backend.', raw: result } };
-    }
-
-    return {
-      success: true,
-      data: { content: responseText, toolCalls, raw: result },
-      error: null,
-    };
-  } catch (err) {
-    console.error('[BackendClient] sendMessage failed:', err);
-    const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
-    return {
-      success: false,
-      data: null,
-      error: {
-        type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
-        message: isNetworkError
-          ? `Can't reach the ZAO backend. Make sure the server is running on the VM and the IP/API key in Settings > Server Connection are correct.`
-          : err?.message || 'Backend request failed.',
-      },
-    };
+/** Reads Retry-After (seconds, or an HTTP-date) off a 429 response - falls back to exponential backoff if absent or unparseable. */
+function retryDelayMs(response, attempt) {
+  const header = response?.headers?.get?.('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const dateMs = Date.parse(header);
+    if (!Number.isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
   }
+  return RATE_LIMIT_BASE_DELAY_MS * 2 ** (attempt - 1); // 1.5s, 3s, 6s
+}
+
+async function sendChatCompletionWithRetry(baseUrl, token, body) {
+  for (let attempt = 1; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    try {
+      const response = await withTimeout(
+        fetch(`${baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
+          body: JSON.stringify(body),
+        }),
+        COMPLETION_TIMEOUT_MS,
+        `Backend took longer than ${COMPLETION_TIMEOUT_MS / 1000}s to respond. Check that the server is still running on the VM.`
+      );
+
+      if (response.status === 429) {
+        if (attempt < RATE_LIMIT_MAX_RETRIES) {
+          await sleep(retryDelayMs(response, attempt));
+          continue;
+        }
+        return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: 'OpenRouter is rate-limiting Ox Alpha right now (HTTP 429) - this is common on the free/stealth preview tier under real usage. Try again in a moment, or check your rate-limit tier at openrouter.ai/keys.' } };
+      }
+
+      if (response.status === 401) {
+        return { success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token. Check it matches AUTH_TOKEN in the PC\'s server/config.js.' } };
+      }
+
+      if (response.status === 503) {
+        return { success: false, data: null, error: { type: ERROR_TYPES.MODEL_LOADING, message: 'The model is still loading on the backend. Try again in a moment.' } };
+      }
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: `Backend returned an error (${response.status}): ${text.slice(0, 200)}` } };
+      }
+
+      const result = await response.json();
+      const choice = result?.choices?.[0];
+      const toolCalls = choice?.message?.tool_calls?.length ? choice.message.tool_calls : null;
+      const responseText = choice?.message?.content || null;
+
+      if (!responseText && !toolCalls) {
+        return { success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: 'No content from backend.', raw: result } };
+      }
+
+      return {
+        success: true,
+        data: { content: responseText, toolCalls, raw: result },
+        error: null,
+      };
+    } catch (err) {
+      console.error('[BackendClient] sendMessage failed:', err);
+      const isNetworkError = err?.message?.includes('Network request failed') || err?.message?.includes('timed out');
+      return {
+        success: false,
+        data: null,
+        error: {
+          type: isNetworkError ? ERROR_TYPES.BACKEND_UNREACHABLE : ERROR_TYPES.UNKNOWN,
+          message: isNetworkError
+            ? `Can't reach the ZAO backend. Make sure the server is running on the VM and the IP/API key in Settings > Server Connection are correct.`
+            : err?.message || 'Backend request failed.',
+        },
+      };
+    }
+  }
+  // Unreachable - the loop above always returns before falling through -
+  // but keeps the function's return type honest for any static analysis.
+  return { success: false, data: null, error: { type: ERROR_TYPES.UNKNOWN, message: 'Retry loop exhausted unexpectedly.' } };
 }
 
 /**
@@ -371,6 +431,19 @@ export async function sendMessage(history, modelKey, options = {}) {
  * @param {(text: string) => void} onToken
  */
 function sendMessageStreaming(baseUrl, token, body, onToken) {
+  return sendMessageStreamingAttempt(baseUrl, token, body, onToken, 1);
+}
+
+/**
+ * One attempt of the streaming call, retrying on a 429 the same way
+ * sendChatCompletionWithRetry() above does for the non-streaming path -
+ * see that function's header comment for why this matters now that the
+ * model is OpenRouter's rate-limited free `ox-alpha` preview. streamSSE
+ * surfaces a non-2xx status as onError with message `HTTP <code>` (see
+ * the 401/503 checks below, which already relied on this), so a 429 is
+ * detected the same way rather than needing streamSSE itself changed.
+ */
+function sendMessageStreamingAttempt(baseUrl, token, body, onToken, attempt) {
   return new Promise((resolve) => {
     let accumulated = '';
     let lastRaw = null;
@@ -415,8 +488,18 @@ function sendMessageStreaming(baseUrl, token, body, onToken) {
         });
       },
       onError: (err) => {
-        console.error('[BackendClient] sendMessage (streaming) failed:', err);
         const msg = err?.message || '';
+        if (msg === 'HTTP 429') {
+          if (attempt < RATE_LIMIT_MAX_RETRIES && !sawAnyContent) {
+            sleep(RATE_LIMIT_BASE_DELAY_MS * 2 ** (attempt - 1)).then(() => {
+              resolve(sendMessageStreamingAttempt(baseUrl, token, body, onToken, attempt + 1));
+            });
+            return;
+          }
+          resolve({ success: false, data: null, error: { type: ERROR_TYPES.INFERENCE_ERROR, message: 'OpenRouter is rate-limiting Ox Alpha right now (HTTP 429) - this is common on the free/stealth preview tier under real usage. Try again in a moment, or check your rate-limit tier at openrouter.ai/keys.' } });
+          return;
+        }
+        console.error('[BackendClient] sendMessage (streaming) failed:', err);
         if (msg === 'HTTP 401') {
           resolve({ success: false, data: null, error: { type: ERROR_TYPES.BAD_REQUEST, message: 'Backend rejected the auth token. Check it matches AUTH_TOKEN in the PC\'s server/config.js.' } });
           return;

@@ -27,6 +27,7 @@ import Toast from '../components/Toast';
 import ImageViewerModal from '../components/ImageViewerModal';
 import ClockWidget from '../components/ClockWidget';
 import FileArtifactCard from '../components/FileArtifactCard';
+import SentAttachmentCard from '../components/SentAttachmentCard';
 import { ACTIVE_MODEL } from '../config/localModels';
 import { useTheme } from '../theme/useTheme';
 import { REASONING_STRATEGY_LABELS, REASONING_STRATEGY_GLYPHS } from '../services/reasoning/reasoningTypes';
@@ -244,7 +245,7 @@ function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps
               borderWidth: 1,
               borderColor: theme.dangerBorder,
             },
-            message.local_image_path && styles.bubbleImagePadding,
+            (message.local_image_path || message.local_attachment_path) && styles.bubbleImagePadding,
           ]}
         >
           {message.local_image_path && (
@@ -260,6 +261,18 @@ function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps
               />
             </TouchableOpacity>
           )}
+          {message.local_attachment_path && (
+            // Video/generic-file bubble - see SentAttachmentCard.js's
+            // header for why this is a tappable card rather than an
+            // inline player/preview.
+            <SentAttachmentCard
+              localPath={message.local_attachment_path}
+              kind={message.attachment_kind}
+              name={message.attachment_name}
+              theme={theme}
+              onToast={onToast}
+            />
+          )}
           {isUser ? (
             // User messages are rendered as plain text - no reason to parse
             // markdown out of what the person typed themselves. Skipped
@@ -269,7 +282,7 @@ function MessageBubble({ message, theme, onLongPress, onImagePress, actionsProps
               <Text
                 style={[
                   { color: textColor, fontSize: 15, lineHeight: 21 },
-                  message.local_image_path && styles.bubbleTextAfterImage,
+                  (message.local_image_path || message.local_attachment_path) && styles.bubbleTextAfterImage,
                 ]}
               >
                 {message.content}

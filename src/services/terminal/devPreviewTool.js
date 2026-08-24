@@ -76,15 +76,15 @@ export async function startServer(command, options = {}) {
  * or any arbitrary URL, and saves it to the phone (under zao-previews/)
  * so the person can actually open and look at it.
  *
- * WHY IT'S SAVED RATHER THAN RETURNED INLINE: the local model driving
- * this tool loop is Qwen3-Coder-30B-A3B-Instruct (see server/config.js) - text-only,
- * no vision input - so handing raw image bytes back into its own
- * tool-result context would be useless; there's nowhere for it to
- * "look" at them. Saving the PNG and returning its path plus real,
+ * WHY IT'S SAVED RATHER THAN RETURNED INLINE: this was written when the
+ * model driving this tool loop (see server/config.js) was text-only, so
+ * handing raw image bytes back into its own tool-result context would
+ * have been useless. That's no longer true - Ox Alpha has real vision -
+ * but this tool still saves the PNG and returns its path plus
  * text-level signal (page title, HTTP status, browser console errors)
- * gives the model something it can actually reason about and relay
- * ("the page loaded but threw 2 console errors" / "got a 404"), while
- * the person gets the actual rendered screenshot to open themselves.
+ * rather than piping the bytes back in as a vision tool-result, which
+ * would be a reasonable follow-up enhancement, not yet done. The person
+ * still gets the actual rendered screenshot to open themselves either way.
  *
  * @param {object} options - { previewId, url, fullPage, viewportWidth, viewportHeight }
  * @returns {Promise<{success, data: {path, title, finalUrl, httpStatus, consoleErrors}|null, error}>}

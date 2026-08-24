@@ -669,7 +669,11 @@ export const useChatStore = create((set, get) => ({
     }
 
     let messageContent = trimmed;
+    let modelOnlyNote = null; // text meant for the model only - never shown in the person's own bubble (the attachment card/thumbnail already shows it was sent)
     let userImageLocalPath = null;
+    let userAttachmentLocalPath = null;
+    let userAttachmentKind = null; // 'video' | 'file'
+    let userAttachmentName = null;
     let attachmentMedia = null; // { base64, mimeType, isVideo } - see buildMultimodalContent() below
 
     if (attachment) {
@@ -677,38 +681,51 @@ export const useChatStore = create((set, get) => ({
       const result = await processAttachedFile(attachment, trimmed);
 
       if (result.isImage) {
-        // Ox Alpha (via OpenRouter) has real vision, so the model actually
-        // sees this image now (see buildMultimodalContent() below, which
-        // attaches result.base64 as an image_url content part on the
-        // outbound message only - not persisted to the DB). fileProcessor
-        // still runs OCR alongside vision (server-side, free/open-source
-        // Tesseract - see server/ocr.js) as a cheap supplement for exact
-        // text extraction, not a replacement for it.
-        userImageLocalPath = await copyAttachmentLocally(attachment);
-        if (result.base64) {
-          attachmentMedia = { base64: result.base64, mimeType: result.mimeType, isVideo: false };
+        // Ox Alpha (via OpenRouter) has real vision - the image is
+        // attached directly as an image_url content part (see
+        // buildMultimodalContent() below, outbound-only, not persisted to
+        // the DB) and the model reads/analyzes/extracts text from it
+        // itself based on whatever the person's prompt asks for. No
+        // separate OCR step anymore (see fileProcessor.js's processImage)
+        // - one path, one source of truth for what's in the image.
+        if (!result.success) {
+          // The picker gave us a URI but reading it failed (bad/expired
+          // content:// URI, permissions, etc.) - surface this plainly
+          // rather than silently sending a text-only message that CLAIMS
+          // an image was attached when it wasn't. This was the exact bug
+          // where the model would reply "I don't see an image."
+          set({ isSending: false, error: result.error });
+          return;
         }
-        const imageNote = result.text
-          ? `[The user attached an image, shown above and sent to you directly - OCR also found this text in it:]\n\n${result.text}`
-          : '[The user attached an image, shown above and sent to you directly.]';
-        messageContent = messageContent ? `${imageNote}\n\n${messageContent}` : imageNote;
+        userImageLocalPath = await copyAttachmentLocally(attachment);
+        attachmentMedia = { base64: result.base64, mimeType: result.mimeType, isVideo: false };
+        modelOnlyNote = '[The user attached an image, shown above and sent to you directly.]';
       } else if (result.isVideo) {
         if (!result.success) {
           set({ isSending: false, error: result.error });
           return;
         }
-        // No thumbnail/inline preview yet (MessageBubble.js only renders
-        // local_image_path as an image) - the video is still sent to the
-        // model in full via buildMultimodalContent() below, just without a
-        // chat-bubble preview of it.
+        // Persist a local copy the same way images do (copyAttachmentLocally
+        // is generic - works for any file, not just images), so the video
+        // shows up as a real card in the bubble and survives app restarts,
+        // instead of only existing as a text note nobody can see. See
+        // SentAttachmentCard.js for the rendering side.
+        userAttachmentLocalPath = await copyAttachmentLocally(attachment);
+        userAttachmentKind = 'video';
+        userAttachmentName = attachment.name || 'video';
         attachmentMedia = { base64: result.base64, mimeType: result.mimeType, isVideo: true };
-        const videoNote = '[The user attached a video, sent to you directly for you to watch and understand.]';
-        messageContent = messageContent ? `${videoNote}\n\n${messageContent}` : videoNote;
+        modelOnlyNote = '[The user attached a video, sent to you directly for you to watch and understand.]';
       } else if (result.success) {
-        const contextBlock = formatFileContextBlock(attachment.name, result);
-        messageContent = messageContent
-          ? `${contextBlock}\n\n${messageContent}`
-          : `${contextBlock}\n\nPlease look at the attached file above and let me know what you'd like to help with, or summarize/analyze it.`;
+        // Generic file (zip, pdf, docx, etc.) - same local-copy treatment
+        // so it stays visible as a card in the chat, on top of the
+        // extracted text content block that's what actually goes to the
+        // model (see formatFileContextBlock below).
+        userAttachmentLocalPath = await copyAttachmentLocally(attachment);
+        userAttachmentKind = 'file';
+        userAttachmentName = attachment.name || 'file';
+        modelOnlyNote = messageContent
+          ? formatFileContextBlock(attachment.name, result)
+          : `${formatFileContextBlock(attachment.name, result)}\n\nPlease look at the attached file above and let me know what you'd like to help with, or summarize/analyze it.`;
       } else {
         // Extraction failed - surface the specific reason (e.g. "sign in
         // required for PDFs", "pptx not supported yet") rather than silently
@@ -717,6 +734,17 @@ export const useChatStore = create((set, get) => ({
         return;
       }
     }
+
+    // The exact text the MODEL sees for this turn - note/extracted-content
+    // prefix (if any) plus whatever the person actually typed. Kept
+    // separate from messageContent (below), which is what's stored in the
+    // DB and rendered in the person's own bubble: the note is redundant
+    // once the image/video/file card is already visible in chat, and for
+    // files it can be many thousands of characters of raw extracted
+    // text - neither belongs cluttering the UI the person sees.
+    const wireContent = modelOnlyNote
+      ? (messageContent ? `${modelOnlyNote}\n\n${messageContent}` : modelOnlyNote)
+      : messageContent;
 
     const userMessage = {
       id: uuidv4(),
@@ -728,6 +756,12 @@ export const useChatStore = create((set, get) => ({
       // local_image_path column, so MessageBubble renders it and
       // reopening the conversation later still shows the thumbnail.
       local_image_path: userImageLocalPath,
+      // Same idea for video/generic-file attachments, via the separate
+      // local_attachment_path/attachment_kind/attachment_name columns -
+      // see SentAttachmentCard.js for the bubble rendering.
+      local_attachment_path: userAttachmentLocalPath,
+      attachment_kind: userAttachmentKind,
+      attachment_name: userAttachmentName,
     };
 
     // Optimistic local write + UI update
@@ -766,25 +800,35 @@ export const useChatStore = create((set, get) => ({
     const history = await assembleHistory(get().messages.concat([userMessage]), {
       conversationId,
       memoryEnabled: prefs.memory_enabled !== false,
-      lastUserText: messageContent,
+      lastUserText: wireContent,
     });
+
+    // The last history entry was built from userMessage.content, which is
+    // the CLEAN caption (no note/extracted-file-text) - that's correct for
+    // display but not for what the model needs to see. Swap in wireContent
+    // here, on this ephemeral outbound copy only - never on userMessage
+    // itself (already saved to the DB above as the clean caption) or on
+    // anything memory/history subsystems touch, so retrievalMemory.js,
+    // workingMemory.js, memoryEngine.js etc. keep working unchanged.
+    if (modelOnlyNote && history.length) {
+      const last = history[history.length - 1];
+      history[history.length - 1] = { ...last, content: wireContent };
+    }
 
     // Swaps the just-assembled last message's plain-string content for a
     // multimodal content-parts array when this turn has an image/video
-    // attachment - ONLY on this ephemeral outbound copy, never on
-    // userMessage itself (already saved to the DB above as plain text) or
-    // on anything memory/history subsystems touch. Keeping the DB/memory
-    // copy as plain text (with the OCR/video note folded in, same as
-    // before) means retrievalMemory.js, workingMemory.js, memoryEngine.js,
-    // and every other consumer that assumes string .content keeps working
-    // completely unchanged - only backendClient.sendMessage(), which
-    // forwards history messages to OpenRouter as-is, ever sees the array.
+    // attachment - same ephemeral-outbound-copy-only rule as above; only
+    // backendClient.sendMessage(), which forwards history messages to
+    // OpenRouter as-is, ever sees the array.
     if (attachmentMedia?.base64 && history.length) {
       const last = history[history.length - 1];
       history[history.length - 1] = {
         ...last,
         content: buildMultimodalContent(last.content, attachmentMedia),
       };
+      console.log('[ChatStore] Outbound message content is multimodal (image/video part attached).');
+    } else if (attachmentMedia && !attachmentMedia.base64) {
+      console.warn('[ChatStore] Had an attachment but no base64 - outbound message is TEXT-ONLY. The model will not see an image.');
     }
 
     const result = await sendMessageOrchestrated({
@@ -793,7 +837,7 @@ export const useChatStore = create((set, get) => ({
       browserAgentActive: !!browserAgentActive,
       webSearchEnabled: !!webSearchEnabled,
       githubToolsEnabled: !!githubToolsEnabled,
-      lastMessageText: messageContent,
+      lastMessageText: wireContent,
       // The connected BrowserAgentStream to the PC's Playwright agent
       // (src/services/browserAgent/browserAgentStream.js), set via
       // setAgentSession() from wherever BrowserAgentPiP mounts. Live
@@ -846,7 +890,7 @@ export const useChatStore = create((set, get) => ({
       // just this one) benefit from it. Never awaited: a slow or failed
       // extraction call must never delay the chat UI (see memoryEngine.js).
       if (prefs.memory_enabled !== false) {
-        extractMemoriesFromTurn(messageContent, assistantMessage.content, conversationId)
+        extractMemoriesFromTurn(wireContent, assistantMessage.content, conversationId)
           .catch((err) => console.error('[ChatStore] background memory extraction failed:', err));
       }
     } else {

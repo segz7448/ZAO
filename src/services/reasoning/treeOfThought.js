@@ -100,7 +100,7 @@ export async function runTreeOfThought(history, messageText) {
 
 async function generateBranches(history) {
   const augmented = withSystemPrompt(history, GENERATE_SYSTEM_PROMPT);
-  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const result = await backendClient.sendMessage(augmented, MODEL_KEYS.OX_ALPHA, {
     maxTokens: 1400,
     temperature: 0.9, // higher than CoT's 0.7 - branches need to actually differ from each other
   });
@@ -125,7 +125,7 @@ async function evaluateBranches(messageText, branches) {
     { role: 'user', content: `Original request: ${messageText}\n\n${branchSummaries}` },
   ];
 
-  const result = await backendClient.sendMessage(evalHistory, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+  const result = await backendClient.sendMessage(evalHistory, MODEL_KEYS.OX_ALPHA, {
     maxTokens: 500,
     temperature: 0.2, // evaluation should be consistent, not creative
   });

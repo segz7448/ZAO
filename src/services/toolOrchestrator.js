@@ -1,10 +1,10 @@
 /**
- * ZAO - Tool Orchestrator (local Qwen3 Coder as Project Manager)
+ * ZAO - Tool Orchestrator (Ox Alpha, via OpenRouter, as Project Manager)
  *
  * This is the layer that makes tools invisible, per the intended
  * architecture:
  *
- *   User -> Chat Screen -> Qwen3 Coder (local, Router) -> Tools/Plugins
+ *   User -> Chat Screen -> Ox Alpha (via OpenRouter, Router) -> Tools/Plugins
  *
  * The person never sees a "GitHub button" or a "Terminal button" - they
  * type a plain-language request, the local coder model decides which
@@ -25,10 +25,18 @@
  *
  * MIGRATION NOTE: this used to call runQwenCoderWithCascade, a 4-step
  * OpenRouter/Hugging Face fallback, and later a local on-device model
- * context. Both are gone - the coder model is now served by Alibaba
- * Cloud Model Studio, relayed through the VM backend
- * (src/services/backend/backendClient.js) with no rate limit and
- * nothing to fall back to, so this calls it directly.
+ * context. Both are gone and replaced by a single model again - but
+ * unlike the version of this note you might be remembering, that model
+ * is now Ox Alpha, served via OpenRouter itself (not Alibaba Model
+ * Studio) and relayed through the VM backend
+ * (src/services/backend/backendClient.js). IMPORTANT: unlike the old
+ * Model Studio setup, this one DOES have a real rate limit - Ox Alpha is
+ * a free/stealth OpenRouter preview model, and backendClient.js's
+ * sendMessage() retries a 429 a few times before giving up (see its
+ * RATE_LIMIT_MAX_RETRIES comment) rather than assuming none will ever
+ * happen. There's still nothing to fall back to beyond that retry, so
+ * this still calls the one model directly - just no longer risk-free
+ * under heavy use.
  *
  * WHY THIS MODULE BUILDS RAW OpenAI-FORMAT MESSAGES: a tool-calling
  * conversation needs to represent an assistant's tool_calls and a tool
@@ -82,7 +90,7 @@ const TERMINAL_TOOL_NAMES_MODULE = new Set(['terminal_pc_run_command', 'pc_proce
 
 /**
  * OpenAI-style function-calling schema for every GitHub tool function.
- * The local Qwen3 Coder model sees these descriptions and decides on its own which to
+ * Ox Alpha sees these descriptions and decides on its own which to
  * call and in what order - e.g. "create an Expo app and push it to
  * GitHub" naturally chains create_repo -> commit_files.
  */
@@ -2028,8 +2036,8 @@ function toolResultMessage(toolCallId, resultPayload) {
 }
 
 /**
- * Runs one user request through the Qwen3 Coder model (relayed via the
- * VM backend to Alibaba Cloud Model Studio) with all
+ * Runs one user request through Ox Alpha (relayed via the VM backend to
+ * OpenRouter) with all
  * tools available, looping through any tool_calls it makes until it gives
  * a final plain-language answer (or MAX_TOOL_STEPS is hit). Calls the
  * VM backend directly (src/services/backend/backendClient.js) -
@@ -2243,7 +2251,7 @@ When generating file content (for pc_fs_scaffold_project, pc_fs_create_file, or 
   ];
 
   for (let i = 0; i < MAX_TOOL_STEPS; i++) {
-    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.QWEN3_CODER_30B_A3B, {
+    const modelResult = await modelClient.sendMessage(history, MODEL_KEYS.OX_ALPHA, {
       tools: allSchemas,
       maxTokens: 2048,
       temperature: 0.3,
