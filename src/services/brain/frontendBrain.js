@@ -106,6 +106,29 @@ function isDeepResearchQuery(messageText) {
 }
 
 /**
+ * Free, local, no-model-call check for an explicit "go navigate the live
+ * browser somewhere" instruction - "go to facebook.com", "open
+ * twitter", "visit their pricing page", "navigate to reddit.com". This
+ * is unambiguous in a way classifyIntent() sometimes isn't: the small
+ * Ox Alpha model, asked to classify a bare "Go to Facebook" with no
+ * other context, has been observed guessing "general" (answering as
+ * plain chat, "I'm a text-based assistant, open your own browser") even
+ * though the classifier's own system prompt already calls "an explicit
+ * instruction to search/browse/visit/check a site" browsing - the
+ * *reason* it should be caught on the free heuristic here rather than
+ * left to that one model call. Deliberately requires one of a handful
+ * of literal navigation verbs (not just any site-sounding message), so
+ * this stays narrow the same way isQuickLookupQuery/isDeepResearchQuery
+ * are narrow - a wrong guess here means real browser-agent steps get
+ * spent on something that wasn't actually a navigation request.
+ */
+const EXPLICIT_BROWSE_PATTERN = /\b(?:go to|open|visit|navigate to|browse to|pull up|check out)\b\s+(?:the\s+)?(?:[\w.-]+\.(?:com|org|net|io|co|dev|gov|edu)\b|(?:facebook|instagram|twitter|x\.com|tiktok|youtube|reddit|linkedin|amazon|google|wikipedia|github|gmail|netflix|spotify)\b)/i;
+
+function isExplicitBrowseQuery(messageText) {
+  return EXPLICIT_BROWSE_PATTERN.test((messageText || '').trim());
+}
+
+/**
  * Loose match for "this message is plausibly about GitHub/the repo" -
  * used only when options.githubToolsEnabled is true (the person
  * explicitly turned the composer's GitHub toggle on for this message).
@@ -157,6 +180,10 @@ export async function decideRoute(messageText, priorAttempts = [], options = {})
 
   if (isQuickLookupQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.QUICK_LOOKUP)) {
     return { route: BRAIN_ROUTES.QUICK_LOOKUP, intent: 'browsing', decompose: false, reason: 'Simple current-info lookup (date/time/weather/news) - a quick tool call, not the full browser agent.' };
+  }
+
+  if (isExplicitBrowseQuery(messageText) && !priorAttempts.includes(BRAIN_ROUTES.BROWSING)) {
+    return { route: BRAIN_ROUTES.BROWSING, intent: 'browsing', decompose: false, reason: 'Explicit "go to/open/visit a site" instruction - routing with confidence rather than leaving it to the classifier.' };
   }
 
   // FAST PATH: skip the classifier model call entirely for messages that

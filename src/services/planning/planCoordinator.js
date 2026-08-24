@@ -90,13 +90,13 @@ import { PLAN_LEVELS, PLANNING_TYPES } from './planTypes';
  * @returns {Promise<{success: boolean, rootPlanId: string|null, executionPlanIds: string[], error: object|null}>}
  */
 export async function buildPlan(goalText, context = {}) {
-  const { conversationId = null, githubToken = null, onProgress = null } = context;
+  const { conversationId = null, githubToken = null, onProgress = null, standingContext = [] } = context;
   const emit = (stage) => onProgress?.(stage);
 
   try {
     // ---- 1. Goal planning ----
     emit('Understanding the goal…');
-    const goalResult = await planGoal(goalText, { conversationId });
+    const goalResult = await planGoal(goalText, { conversationId, standingContext });
     if (!goalResult.success) {
       return { success: false, rootPlanId: null, executionPlanIds: [], error: goalResult.error || { message: 'Goal planning failed.' } };
     }

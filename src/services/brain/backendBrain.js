@@ -138,7 +138,7 @@ export const BRAIN_ROLES = Object.freeze({
  * }>}
  */
 export async function runHierarchicalPlan(goalText, context = {}) {
-  const { conversationId = null, githubToken = null, onProgress = null } = context;
+  const { conversationId = null, githubToken = null, onProgress = null, standingContext = [] } = context;
 
   // Procedural memory (src/services/memory/proceduralMemory.js): if a
   // similar goal has succeeded before, fold a short "here's what worked
@@ -147,7 +147,7 @@ export async function runHierarchicalPlan(goalText, context = {}) {
   // new parameter through every planner in planCoordinator.js.
   const augmentedGoalText = await withProceduralHint(goalText);
 
-  const buildResult = await coordinatorBuildPlan(augmentedGoalText, { conversationId, githubToken, onProgress });
+  const buildResult = await coordinatorBuildPlan(augmentedGoalText, { conversationId, githubToken, onProgress, standingContext });
   if (!buildResult.success) {
     return {
       success: false,

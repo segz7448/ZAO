@@ -256,9 +256,30 @@ async function runHierarchicalPlanHandler(effectiveMessage, params) {
   const githubTokenResult = await getApiKey('github');
   const githubToken = githubTokenResult?.data?.key_value || null;
 
-  const planResult = await runHierarchicalPlan(withStandingContextPreface(effectiveMessage, standingContext), {
+  // NOTE: standingContext (real-time date/time override, project
+  // instructions, memory notes) is passed through as its own field below
+  // rather than string-concatenated onto effectiveMessage via
+  // withStandingContextPreface(). It used to be glued directly onto the
+  // goal text here, which meant the raw "[SYSTEM - ALWAYS TRUE,
+  // OVERRIDES YOUR OWN TRAINING]..." block became part of the literal
+  // string sent to strategicPlanner.js's planGoal() as the person's
+  // "request" - Ox Alpha would often respond to THAT (commenting on the
+  // odd embedded instruction) instead of returning the required JSON,
+  // planGoal()'s parse would fail, and its fallback
+  // (`goalSummary = goalText`) then stored that entire contaminated
+  // string - system block included - as the plan's `goal`. Every
+  // downstream reply that quotes the goal (e.g. "I looked this over:
+  // '<goal>'... didn't break down into any concrete steps") then showed
+  // the raw system block verbatim, for EVERY hierarchical-plan message
+  // regardless of what was actually asked - the repeating/looping reply
+  // reported by users. Threading standingContext separately lets
+  // strategicPlanner.js apply it as real system-role context instead,
+  // the same way the CHAT route already does, so the goal text itself
+  // stays exactly what the person asked for.
+  const planResult = await runHierarchicalPlan(effectiveMessage, {
     conversationId,
     githubToken,
+    standingContext,
     onProgress: onPlanProgress,
     onStep: onPlanStep,
   });

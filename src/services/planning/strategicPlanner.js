@@ -61,11 +61,23 @@ Respond with ONLY a JSON object, no markdown fences, no commentary, in exactly t
  *   strategicPlan shape: { id, goal, successCriteria, scope, majorDeliverables, level: 'strategic', planType: 'goal' }
  */
 export async function planGoal(goalText, context = {}) {
-  const { conversationId = null } = context;
+  const { conversationId = null, standingContext = [] } = context;
   const localGate = shouldDecompose(goalText);
 
+  // standingContext (real-time date/time override, project instructions,
+  // memory notes - see agentLoop.js) is threaded in as its own system
+  // messages here, never concatenated into goalText itself. goalText has
+  // to stay exactly what the person asked for: it's both what's shown to
+  // the model as the "user" turn AND what safeParseGoalJson's fallback
+  // below falls back to verbatim as the plan's `goal` if the model's
+  // JSON doesn't parse. Gluing the (fairly forceful) real-time override
+  // block onto the front of that string used to mean a parse failure
+  // silently turned the whole system block into the plan's goal, which
+  // then got quoted back to the person in every reply about that plan -
+  // see orchestrator.js's runHierarchicalPlanHandler for the full story.
   const history = [
     { role: 'system', content: STRATEGIC_SYSTEM_PROMPT },
+    ...standingContext.filter(Boolean),
     { role: 'user', content: goalText },
   ];
 

@@ -60,6 +60,7 @@ import { planRecovery, buildRecoveryAttemptRecord } from './recoveryPlanner';
 import { evaluateCheckpointPressure, buildCheckpointRecord } from './checkpointBalancer';
 import { PLAN_STATUS, STEP_STATUS, RECOVERY_STRATEGIES } from './planTypes';
 import { recordProcedure } from '../memory/proceduralMemory';
+import { newTraceId, startSpan, endSpan } from '../execution/telemetry';
 
 /**
  * Every tool result's .error can be either a plain string or an
@@ -250,7 +251,7 @@ export function injectGithubCredentialsIntoUrl(url, githubToken) {
  * loosely: exact match first, then a normalized fallback, then a clear
  * "couldn't resolve" failure rather than a crash.
  */
-async function runStepTool(step, planId, { agentSession = null, githubToken = null } = {}) {
+async function runStepTool(step, planId, { agentSession = null, githubToken = null, traceId = null, conversationId = null } = {}) {
   // ---- Planner failure: executionPlanner.js couldn't get a real,
   // parseable step out of the model for this unit of work (backend
   // unreachable, or a response that never resolved to valid JSON even
@@ -284,7 +285,7 @@ async function runStepTool(step, planId, { agentSession = null, githubToken = nu
   // registered tool function. Handled as its own branch rather than
   // forcing it through TOOL_REGISTRY's shape.
   if (step.domain === 'browser') {
-    return runBrowserStep(step, planId, agentSession);
+    return runBrowserStep(step, planId, agentSession, { traceId, conversationId });
   }
 
   const resolvedToolName = TOOL_REGISTRY[step.action] ? step.action : normalizeActionGuess(step);
@@ -384,13 +385,46 @@ async function runStepTool(step, planId, { agentSession = null, githubToken = nu
     input: args,
   });
 
+  // ---- agent_actions span (src/services/execution/telemetry.js) ----
+  // plan_step_actions above is the per-step detail view PlanScreen.js/
+  // StepDetailSheet.js already render - kept exactly as-is. This is a
+  // SEPARATE record into the same agent_actions table
+  // toolOrchestrator.js's flat tool loop writes to, so a hierarchical
+  // plan's tool calls show up in Settings' "Agent activity" audit trail
+  // too, not just the flat loop's - before this, that view only ever
+  // showed non-plan tool calls, so a plan's own actions had no queryable
+  // record outside that one plan's own detail screen. One trace per
+  // runExecutionPlan() call (traceId threaded in from there), one span
+  // per real tool-call attempt here - same shape toolOrchestrator.js
+  // already uses, so both loops' calls interleave correctly by
+  // started_at in the shared view. Never lets a telemetry failure affect
+  // the actual step outcome - same fire-and-forget posture
+  // toolOrchestrator.js's own hook calls already have.
+  const spanPromise = traceId
+    ? startSpan({
+        traceId,
+        conversationId,
+        name: resolvedToolName,
+        toolName: resolvedToolName,
+        attributes: { planId, stepId: step.id, label: step.description },
+      }).catch(() => null)
+    : Promise.resolve(null);
+
   try {
     const result = await toolDef.run(args);
     await completeStepAction(actionId, { status: result.success ? 'done' : 'failed', output: result });
+    const span = await spanPromise;
+    if (span) {
+      await endSpan(span.spanId, { status: result.success ? 'ok' : 'error', errorMessage: result.success ? null : (result.error?.message || result.error || null) }).catch(() => {});
+    }
     return result;
   } catch (err) {
     const errorMessage = err?.message || 'Tool call threw an unexpected error.';
     await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    const span = await spanPromise;
+    if (span) {
+      await endSpan(span.spanId, { status: 'error', errorMessage }).catch(() => {});
+    }
     return { success: false, error: errorMessage };
   }
 }
@@ -407,7 +441,7 @@ async function runStepTool(step, planId, { agentSession = null, githubToken = nu
  * person already asked for - so the real (and only) gate here is
  * whether a live agentSession actually exists to run it on.
  */
-async function runBrowserStep(step, planId, agentSession) {
+async function runBrowserStep(step, planId, agentSession, { traceId = null, conversationId = null } = {}) {
   const actionId = uuidv4();
   const input = { task: step.target || step.description };
 
@@ -419,6 +453,20 @@ async function runBrowserStep(step, planId, agentSession) {
     input,
   });
 
+  // Same agent_actions span as runStepTool()'s tool calls above - see
+  // that function's comment for why. Browsing steps are the other real
+  // "action" a plan can take that wasn't showing up in Settings' audit
+  // trail before this.
+  const spanPromise = traceId
+    ? startSpan({
+        traceId,
+        conversationId,
+        name: 'browser_agent_task',
+        toolName: 'browser_agent_task',
+        attributes: { planId, stepId: step.id, label: step.description },
+      }).catch(() => null)
+    : Promise.resolve(null);
+
   if (!agentSession) {
     // Genuine capability gap (PC not connected / PiP not mounted), not a
     // consent gate - surfaced as a real, actionable failure so
@@ -427,6 +475,8 @@ async function runBrowserStep(step, planId, agentSession) {
     // concrete to act on.
     const errorMessage = 'The browser agent isn\u2019t connected right now, so this step can\u2019t run. Make sure your PC backend is running and reachable, then resume this plan.';
     await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    const span = await spanPromise;
+    if (span) await endSpan(span.spanId, { status: 'error', errorMessage }).catch(() => {});
     return { success: false, error: errorMessage };
   }
 
@@ -434,6 +484,8 @@ async function runBrowserStep(step, planId, agentSession) {
     const agentResult = await agentSession.runTaskAwaitable(input.task);
     if (agentResult.success) {
       await completeStepAction(actionId, { status: 'done', output: agentResult });
+      const span = await spanPromise;
+      if (span) await endSpan(span.spanId, { status: 'ok' }).catch(() => {});
       return { success: true, data: agentResult.answer, stepsUsed: agentResult.stepsUsed };
     }
 
@@ -441,10 +493,14 @@ async function runBrowserStep(step, planId, agentSession) {
       ? (agentResult.reason || 'This step needs a person to take over in the browser (e.g. a CAPTCHA or login).')
       : (agentResult.error?.message || 'Browser agent task failed.');
     await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    const span = await spanPromise;
+    if (span) await endSpan(span.spanId, { status: 'error', errorMessage }).catch(() => {});
     return { success: false, error: errorMessage, needsHuman: !!agentResult.needsHuman };
   } catch (err) {
     const errorMessage = err?.message || 'Browser agent task threw an unexpected error.';
     await completeStepAction(actionId, { status: 'failed', error: errorMessage });
+    const span = await spanPromise;
+    if (span) await endSpan(span.spanId, { status: 'error', errorMessage }).catch(() => {});
     return { success: false, error: errorMessage };
   }
 }
@@ -505,6 +561,20 @@ export async function runExecutionPlan(planId, options = {}) {
   }
 
   await updatePlanStatus(planId, PLAN_STATUS.RUNNING);
+
+  // One trace per runExecutionPlan() call, same "one trace per top-level
+  // request" convention toolOrchestrator.js's runToolTask() uses for its
+  // own loop - every real tool call this run makes (across however many
+  // passes through the while loop below, including ones after an app
+  // restart resumes a partially-done plan) shares this traceId, so
+  // Settings' audit trail can show them as one connected run rather than
+  // unrelated spans. conversationId comes off the plan itself (set at
+  // plan-creation time - see planStore.js's postArtifactsMessageIfAny for
+  // the same field read the same way) so a plan run started from chat
+  // shows up filterable by that conversation, same as a flat tool call
+  // would.
+  const planTraceId = newTraceId();
+  const planConversationId = planResult.data.conversation_id || null;
 
   // Read once per run, not per step - permission_mode doesn't change
   // mid-execution, and this loop can iterate many times for a
@@ -596,7 +666,7 @@ export async function runExecutionPlan(planId, options = {}) {
 
     // ---- Run the step ----
     await updatePlanStep(step.id, planId, { status: STEP_STATUS.RUNNING, startedAt: Date.now() });
-    const result = await runStepTool(step, planId, { agentSession, githubToken });
+    const result = await runStepTool(step, planId, { agentSession, githubToken, traceId: planTraceId, conversationId: planConversationId });
 
     if (result.success) {
       await updatePlanStep(step.id, planId, { status: STEP_STATUS.DONE, result, completedAt: Date.now() });

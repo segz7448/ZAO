@@ -61,6 +61,27 @@ Status reflects what's fixed in this pass vs. still open.
   mode toggle. The assessment is also attached to that call's telemetry
   span (`preActionConfidence` / `preActionConcern` attributes) so it's
   queryable afterward too, not just visible in the moment.
+- **Human confirmation UI for risky terminal commands.** This section
+  used to list the gate (`commandSafety.js`) as existing with no "person
+  taps Approve" surface to actually use it. That surface is now built:
+  `chatStore.js`'s `approvePendingToolCall()` / `dismissPendingConfirmation()`
+  call `toolOrchestrator.js`'s `approveAndRunPendingTool()`, which
+  re-issues a refused terminal command with `confirmed: true` (or, for
+  every other WRITE_TOOL/DESTRUCTIVE_TOOL, re-runs the tool directly - a
+  human tap approving the card IS the override for those). The UI is
+  `ChatScreen.js`'s `PendingToolConfirmCard`, rendered per-message off
+  `message.pending_confirmation`. Closed, not open.
+- **No on-device fallback terminal.** ZAO used to have one
+  (`termuxTerminalTool.js`, dispatching to Termux's RUN_COMMAND service
+  via a custom native module) alongside the PC/VM terminal. That's gone
+  now - the file, its native plugin (`plugins/withTermuxRunCommand/`),
+  and any reference to it in `TOOL_REGISTRY` were removed. All terminal
+  execution goes through `terminal_pc_run_command`
+  (`pcTerminalTool.js` -> the Alibaba Cloud VM backend,
+  `server/terminal.js`), which auto-detects bash vs. a raw Python
+  interpreter per command. If the VM is unreachable, there is currently
+  no fallback - `terminalRouter.js`'s `checkTerminalStatus()` reports
+  that plainly rather than the model attempting a workaround.
 
 ## Still open
 
@@ -71,8 +92,6 @@ Status reflects what's fixed in this pass vs. still open.
   exactly the modules where a silent logic error is expensive
   (destructive commands, corrupted plan state) and hard to notice by
   eye.
-- **Human confirmation UI for risky terminal commands** (see above) -
-  the gate exists, the "person taps Approve" surface doesn't yet.
 - **CORS is `Access-Control-Allow-Origin: *`.** Lower priority than it
   looks - the client is React Native's `fetch`, not a browser page, so
   CORS isn't the enforcement boundary here the way it would be for a

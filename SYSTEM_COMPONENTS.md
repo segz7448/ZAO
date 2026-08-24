@@ -14,7 +14,7 @@ actually has for each, file by file.
 | State management | Tracking "where am I in this multi-step task" across interruptions | **Partial** - persisted, not resurfaced |
 | Feedback loop / learning signal | How the agent (or its trainers) improve over time | **Yes (dislikes only)** - captured and consumed, see below |
 | Human-in-the-loop interface | A defined hand-off point where a person takes over | **Yes** - browser agent only |
-| Audit / logging trail | A record of what the agent did and why | **No** - console logs only, not persisted |
+| Audit / logging trail | A record of what the agent did and why | **Yes** - `agent_actions` table + Settings browse screen, see below |
 
 ## Router / classifier
 
@@ -144,58 +144,72 @@ This one's fully built, but scoped to exactly one surface:
   tools) has neither - if one of those tools hit something requiring a
   person (an interactive prompt, an auth flow, a permission dialog),
   there's currently no `needsHuman`-equivalent for it to call.
-- **Partial fix (terminal only)**: `src/services/terminal/commandSafety.js`
-  (new) now gates `pcTerminalTool.js` -
-  a destructive command (`rm -rf`, `git push --force`, `DROP TABLE`,
-  etc.) is refused with `needsConfirmation: true` unless the call
-  explicitly passes `confirmed: true`, and a handful of catastrophic
-  ones (`rm -rf /`, `mkfs`, a fork bomb) are hard-blocked with no
-  override at all. This closes the flat tool loop's worst exposure
-  (unattended destructive shell commands) but isn't a full
-  human-in-the-loop UI yet - nothing in the app currently sets
-  `confirmed: true`, so today every risky terminal command simply fails
-  closed rather than pausing for a person to approve it. The remaining
-  work is a chat-level "Approve this command?" affordance
-  (`MessageActionMenu.js`/`Toast.js` already have the visual language
-  for this) that re-calls the tool with `confirmed: true` on approval.
+- **Terminal + every other confirmable tool**: `src/services/terminal/commandSafety.js`
+  gates `pcTerminalTool.js` - a destructive command (`rm -rf`, `git push
+  --force`, `DROP TABLE`, etc.) is refused with `needsConfirmation: true`
+  unless the call explicitly passes `confirmed: true`, and a handful of
+  catastrophic ones (`rm -rf /`, `mkfs`, a fork bomb) are hard-blocked
+  with no override at all. This now has the full human-in-the-loop UI to
+  go with it: `ChatScreen.js`'s `PendingToolConfirmCard` renders off
+  `message.pending_confirmation`, and a tap calls `chatStore.js`'s
+  `approvePendingToolCall()` / `dismissPendingConfirmation()`, which
+  reach `toolOrchestrator.js`'s `approveAndRunPendingTool()` - terminal
+  commands re-run with `confirmed: true`; every other
+  WRITE_TOOL/DESTRUCTIVE_TOOL re-runs directly, since a human tap
+  approving the card IS the override for those. Covers every confirmable
+  tool call the flat loop can produce, not just terminal commands.
 
 ## Audit / logging trail
 
-The weakest of the five - there isn't one yet, in the "queryable record
-of what the agent did and why" sense:
+Built, not missing - this section previously described it as the one
+fully-missing piece; that was already stale when written.
+`src/services/execution/telemetry.js` is exactly the "queryable record
+of what the agent did and why" this used to call for:
 
-- What exists today is ordinary `console.error`/`console.warn` calls
-  scattered across ~20 files (backend calls, DB failures, tool errors)
-  - useful for live debugging in a terminal, gone the moment the
-    process restarts, and not attached to a conversation, plan, or
-    step.
-- What's adjacent but not the same thing: `plan_step_actions`'
-  reasoning-vs-tool-call interleaving (`planExecutor.js`) and the
-  `provenance` memory type documented in
-  `src/services/memory/memoryTypes.js` (*"lets a memory be traced back,
-  audited, or selectively invalidated if its source turns out to be
-  wrong"*) - both are about tracing a fact or action back to its
-  source, not about a durable log of every tool call/decision the agent
-  made.
-- **What's missing concretely**: no table (or file) recording, per tool
-  call, what was called, with what arguments, what it returned, which
-  plan/step/conversation it belongs to, and when. Without it, "why did
-  ZAO do X three days ago" has no answer beyond scrolling chat history
-  and hoping the reasoning was said out loud. A minimal version would
-  be a new `agent_actions` SQLite table (mirroring the existing
-  `plan_step_actions` shape) written to from `toolOrchestrator.js`'s
-  tool-call loop and `planExecutor.js`'s step execution, plus a simple
-  read-only screen to browse it - the DB and UI patterns for exactly
-  this already exist elsewhere in the app (`PlanScreen.js`,
-  `StepDetailSheet.js`), they're just not pointed at tool calls in
-  general.
+- **Table**: `agent_actions` (`src/db/database.js`) - one row per real
+  tool-call span: `trace_id`/`span_id`/`parent_span_id`,
+  `session_id`/`conversation_id`, `name`/`tool_name`, `attributes_json`,
+  `status`, `error_message`, `started_at`/`ended_at`. OpenTelemetry-
+  shaped (trace/span/parent-span/attributes/status/timing), not a full
+  OTel SDK - persisted locally, with an optional best-effort HTTP
+  forward to a real OTLP collector if `otel_export_endpoint` is set
+  (`telemetry.js`'s `maybeExport()`).
+- **Write path**: `toolOrchestrator.js`'s flat tool loop calls
+  `startSpan()`/`endSpan()` around every real tool call (Gate 3, after
+  the permission/confidence/hooks gates), including
+  `preActionConfidence`/`preActionConcern` from `actionConfidence.js` as
+  span attributes. `planExecutor.js`'s `runStepTool()`/`runBrowserStep()`
+  do the same now (one `traceId` per `runExecutionPlan()` call, shared
+  across every step and resumed run) - a hierarchical plan's tool calls
+  used to only reach `plan_step_actions` (that step's own detail view),
+  invisible to this trail; both loops write to `agent_actions` now, so
+  "why did ZAO do X three days ago" has one real answer regardless of
+  which loop ran it.
+- **Read path / UI**: `getTrace()`/`getRecentSpans()`
+  (`telemetry.js`) back `SettingsScreen.js`'s `AuditTrailSection` -
+  "View recent activity" opens a modal listing recent spans
+  (timestamp, tool name, status, error if any), plus the
+  `otel_export_endpoint` setting. Rendered, not orphaned - wired into
+  the actual Settings screen tree.
+- **What's still true**: ordinary `console.error`/`console.warn` calls
+  are still scattered across ~20 files for live debugging - that's
+  fine, it's a different, complementary layer (immediate terminal
+  output vs. a durable per-call record), not a gap in `agent_actions`
+  itself.
+- **Distinct from, not a replacement for**: `plan_step_actions`'
+  reasoning-vs-tool-call interleaving (`planExecutor.js`) is still the
+  right place for a single step's full detail (real input/output per
+  attempt, including retries) - `agent_actions` is the cross-loop,
+  cross-conversation index on top, not a duplicate of that detail.
 
 ## Summary: what still needs work
 
-- Surface `resumablePlans` on launch (state management).
-- Live plan-progress handlers in `chatStore.js` (state management).
-- A `needsHuman`-equivalent for the flat tool loop, not just the
-  browser agent and the plan-approval gate (human-in-the-loop).
-- An `agent_actions` table + browse screen (audit/logging trail) - the
-  single fully-missing piece; everything else here is "built but not
-  finished," this one hasn't been started.
+- Nothing in this file - all five components (router, state, feedback,
+  human-in-the-loop, audit trail) are now built and wired. Remaining
+  gaps live in `HARDENING_NOTES.md` instead (no tests/CI, CORS,
+  secrets scanning).
+
+Everything else previously listed here (`resumablePlans` on launch,
+live plan-progress handlers, and a confirmation surface for the flat
+tool loop) is now built - see State management / Human-in-the-loop
+above.

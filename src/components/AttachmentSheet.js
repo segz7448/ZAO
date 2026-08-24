@@ -5,18 +5,18 @@
  * Matches the reference layout: three square action tiles (Camera/Photos/
  * Files) up top, then a list of toggles below.
  *
- * Camera/Photos/Files are wired to onPress callbacks the parent screen
- * implements once file-handling is built (see README TODO) - for now they
- * can safely no-op or show "coming soon" without breaking this component.
- * Web search IS wired to a real tool now (server/webSearch.js via
+ * Camera/Photos/Files are wired to real onPress callbacks in ChatScreen.js
+ * (handleCamera/handlePhotos/handleFiles - expo-image-picker /
+ * expo-document-picker, permission checks included) - file handling is
+ * fully built, not a stub.
+ * Web search is wired to a real tool (server/webSearch.js via
  * src/services/search/webSearchTool.js) - web_search is registered as
  * an always-available tool (src/services/toolOrchestrator.js) the model
  * can call whenever a request needs it, regardless of this toggle's
- * state. The toggle itself is currently visual only (its value isn't
- * threaded into sendMessageOrchestrated yet) - a reasonable next step
- * is passing it through orchestrator.js as a hint, similar to how
- * browserAccessEnabled works, if the person wants the toggle to mean
- * something stronger than "on by default anyway."
+ * state. The toggle's value IS also threaded through: ChatScreen.js
+ * passes it into sendMessage -> orchestrator.js's webSearchEnabled param
+ * -> agentLoop.js, which injects a system-prompt hint telling the model
+ * to prioritize web_search for that turn when the toggle is on.
  */
 
 import React from 'react';
